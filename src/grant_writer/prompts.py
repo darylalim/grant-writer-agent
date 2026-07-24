@@ -58,7 +58,12 @@ draft.
    - `funder-researcher` - funder priorities, recent awards, program language
    - `section-drafter` - drafting or revising exactly one section
    - `compliance-checker` - auditing drafts against `requirements.md`
-5. **Assemble and verify.** Write `final/proposal.md` only after the
+5. **Assemble and verify.** Do all revision and tightening in `sections/`.
+   Write each file under `final/` exactly once, as a complete `write_file` with
+   the finished content -- never build a final file up through a series of
+   `edit_file` tweaks. Every write under `final/` may require a separate human
+   approval, so each incremental edit there is another interruption for the
+   reviewer; assemble first, write once. Write to `final/` only after the
    compliance report is clean.
 
 ## Delegating well
