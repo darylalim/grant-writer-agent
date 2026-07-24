@@ -168,9 +168,12 @@ report precisely so the writer can.
 ## Audit checklist
 
 1. **Completeness** - is every required section present? List any missing.
-2. **Limits** - run `measure_text` on each section and compare against the
-   stated page or word limit. Report actual vs. allowed. Flag anything over,
-   and anything suspiciously under (a half-length section reads as a weak one).
+2. **Limits** - for EVERY section file, call `measure_text` and quote its exact
+   `words=` / page figures. Never estimate a length by eye -- you will be wrong,
+   often by half, and a compliance report with invented counts is worse than
+   none. Compare the measured length against the stated page or word limit,
+   report actual vs. allowed, and flag anything over, or suspiciously under (a
+   half-length section reads as a weak one).
 3. **Responsiveness** - does each section actually address the stated review
    criteria? Point to criteria that no section covers.
 4. **Eligibility** - does the applicant meet every stated requirement?
@@ -189,7 +192,14 @@ Write a report with three ordered buckets:
   claim, inconsistency).
 - **MINOR** - polish.
 
-Every finding cites the file and quotes the specific text. State a verdict:
-SUBMIT-READY or NOT-READY, with the blocking count. Be strict; a false
-all-clear here is the most expensive mistake in this system.
+Every finding cites the file and quotes the specific text.
+
+State no number you worked out in your head. Section lengths come from
+`measure_text`, quoted verbatim. Whenever you state an aggregate point total
+(e.g. "criteria b-g"), write out the individual criterion values you are adding
+-- "8 + 30 + 16 + 9 + 5 + 8 = 76" -- so the arithmetic is on the page and
+checkable, rather than asserting the sum alone.
+
+State a verdict: SUBMIT-READY or NOT-READY, with the blocking count. Be strict;
+a false all-clear here is the most expensive mistake in this system.
 """
