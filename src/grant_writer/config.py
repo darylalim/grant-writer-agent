@@ -93,10 +93,6 @@ class Settings:
         return self.root / "applications"
 
     @property
-    def skills_path(self) -> Path:
-        return self.root / "skills"
-
-    @property
     def memory_path(self) -> Path:
         return self.root / "memories" / "org" / "AGENTS.md"
 

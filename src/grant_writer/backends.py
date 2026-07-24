@@ -90,13 +90,15 @@ def seed_store_from_disk(store: BaseStore, settings: Settings) -> int:
         for path in sorted(base.rglob("*")):
             if not path.is_file():
                 continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                # Skip non-text files (e.g. a stray .DS_Store or image); they
+                # are not skills or memory, and one must not crash startup.
+                continue
             # Prefix-stripped, leading slash: "/rfp-decomposition/SKILL.md".
             key = "/" + path.relative_to(base).as_posix()
-            store.put(
-                namespace,
-                key,
-                create_file_data(path.read_text(encoding="utf-8")),
-            )
+            store.put(namespace, key, create_file_data(content))
             count += 1
     return count
 

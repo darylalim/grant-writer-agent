@@ -172,6 +172,28 @@ def test_seed_store_uses_prefix_stripped_keys_per_namespace():
     assert store.get(skills_ns, "/org/AGENTS.md") is None
 
 
+def test_seed_store_skips_non_utf8_files(tmp_path):
+    """A stray binary file (e.g. macOS .DS_Store) under skills/ must not crash
+    server-profile startup -- it is skipped, not decoded."""
+    from dataclasses import replace
+
+    from grant_writer.config import Settings
+
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: demo\n---\nbody", encoding="utf-8")
+    # Invalid UTF-8, as a real .DS_Store would be.
+    (tmp_path / "skills" / ".DS_Store").write_bytes(b"\x00\x01\xff\xfe not utf-8")
+
+    store = InMemoryStore()
+    settings = replace(Settings(), root=tmp_path)
+    n = seed_store_from_disk(store, settings)  # must not raise
+
+    _, skills_ns = _SEED_ROUTES["skills"]
+    assert store.get(skills_ns, "/demo/SKILL.md") is not None
+    assert n == 1  # the binary file was skipped, the real skill seeded
+
+
 def test_server_backend_routes_skills_and_memory_to_store():
     from deepagents.backends import CompositeBackend, StoreBackend
 
