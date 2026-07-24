@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Generated proposals. Real applications contain sensitive organizational and
+# personnel data -- keep them out of git by default.
+applications/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Tooling
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# OS
+.DS_Store
