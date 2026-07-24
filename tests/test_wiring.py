@@ -21,7 +21,12 @@ from grant_writer.backends import (
 )
 from grant_writer.config import PROJECT_ROOT, Settings
 from grant_writer.subagents import build_subagents
-from grant_writer.tools import _parse_page_spec, extract_pdf_text, measure_text
+from grant_writer.tools import (
+    _parse_page_spec,
+    _resolve_output_path,
+    extract_pdf_text,
+    measure_text,
+)
 
 
 @pytest.mark.parametrize("profile", ["local", "server"])
@@ -139,6 +144,34 @@ def test_extract_pdf_text_reports_missing_file():
     assert extract_pdf_text.invoke({"pdf_path": "/nope/missing.pdf"}).startswith(
         "Error: no such file"
     )
+
+
+@pytest.mark.parametrize(
+    "out_path",
+    ["/applications/x/rfp.md", "applications/x/rfp.md", "/memories/org/AGENTS.md"],
+)
+def test_output_paths_inside_content_dirs_are_allowed(out_path):
+    assert _resolve_output_path(out_path).is_relative_to(PROJECT_ROOT)
+
+
+@pytest.mark.parametrize(
+    "out_path",
+    [
+        "/src/grant_writer/agent.py",
+        "/skills/statement-of-need/SKILL.md",
+        "/pyproject.toml",
+        "/applications/../src/agent.py",
+        "/etc/passwd",
+    ],
+)
+def test_output_paths_outside_content_dirs_are_refused(out_path):
+    """`extract_pdf_text` writes to real disk, bypassing FilesystemPermission.
+
+    It therefore has to enforce the same boundary itself, or it becomes a way
+    around every write rule tested above.
+    """
+    with pytest.raises(ValueError, match="refusing to write|escapes the project root"):
+        _resolve_output_path(out_path)
 
 
 @pytest.mark.parametrize(

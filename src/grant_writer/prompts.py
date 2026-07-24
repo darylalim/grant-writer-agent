@@ -40,9 +40,13 @@ draft.
 
 ## How to work
 
-1. **Read the solicitation first.** If given a PDF, use `extract_pdf_text` and
-   save the text to `/applications/<app-id>/rfp.md`. Page through long
-   documents rather than pulling everything into context at once.
+1. **Archive the solicitation first, in one step.** If given a PDF, call
+   `extract_pdf_text` with `out_path="/applications/<app-id>/rfp.md"`. That
+   writes the complete text to disk directly. Never read a long PDF into
+   context and re-type it into `write_file` -- relayed text gets silently
+   abridged, and every compliance check afterwards would run against a
+   document with pages missing. Once it is archived, read `rfp.md` back in
+   ranges to study it.
 2. **Extract requirements before writing anything.** Produce
    `requirements.md`: every required section, its page or word limit, the
    stated review criteria and their weights, eligibility rules, deadlines,

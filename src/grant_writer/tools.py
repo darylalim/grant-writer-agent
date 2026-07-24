@@ -39,20 +39,52 @@ def _parse_page_spec(spec: str, n_pages: int) -> list[int]:
     return [p for p in wanted if 0 <= p < n_pages]
 
 
+def _resolve_output_path(out_path: str) -> Path:
+    """Map a virtual write path onto disk, refusing anything outside content dirs.
+
+    This tool writes to the real filesystem rather than through the backend, so
+    it does not inherit the FilesystemPermission rules and has to enforce the
+    same boundary itself. Keep this in sync with ``build_permissions``.
+    """
+    from grant_writer.config import PROJECT_ROOT
+
+    root = PROJECT_ROOT.resolve()
+    allowed = (root / "applications", root / "memories")
+
+    # Resolve BEFORE checking. Validating the raw string first lets
+    # "/applications/../src/agent.py" pass the prefix test and then escape when
+    # `..` collapses -- the check has to run on the final path, not the input.
+    virtual = "/" + out_path.strip().lstrip("/")
+    resolved = (root / virtual.lstrip("/")).resolve()
+
+    if not any(resolved.is_relative_to(base) for base in allowed):
+        msg = f"refusing to write outside /applications/ or /memories/: {out_path!r}"
+        raise ValueError(msg)
+    return resolved
+
+
 @tool
-def extract_pdf_text(pdf_path: str, pages: str = "", max_chars: int = 20000) -> str:
+def extract_pdf_text(
+    pdf_path: str, pages: str = "", max_chars: int = 20000, out_path: str = ""
+) -> str:
     """Extract text from a PDF solicitation, RFP, or funder guideline document.
 
     Args:
         pdf_path: Path to the PDF on the local machine.
         pages: Optional 1-based page selection such as "1-4,9". Empty means all
-            pages. Use this to page through a long RFP instead of pulling the
-            whole thing into context at once.
-        max_chars: Truncation limit for a single call.
+            pages. Use this to page through a long RFP when reading it.
+        max_chars: Truncation limit when returning text to you. Ignored when
+            `out_path` is set.
+        out_path: If set (e.g. "/applications/nsf-26/rfp.md"), the COMPLETE
+            extracted text is written straight to that file and you get back
+            only a short receipt. Always use this to archive a solicitation.
+            Never read a long PDF and copy it into `write_file` yourself -- the
+            text gets silently abridged in transit and downstream compliance
+            checks then run against an incomplete document.
 
     Returns:
-        The extracted text, prefixed with a page-count header, plus an explicit
-        truncation notice if it was cut short.
+        A write receipt when `out_path` is set, otherwise the extracted text
+        with an explicit notice if it was truncated.
     """
     path = Path(pdf_path).expanduser()
     if not path.is_file():
@@ -85,12 +117,27 @@ def extract_pdf_text(pdf_path: str, pages: str = "", max_chars: int = 20000) -> 
         parts.append(f"\n--- page {i + 1} ---\n{text.strip()}")
 
     out = "\n".join(parts)
+
+    if out_path:
+        try:
+            target = _resolve_output_path(out_path)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(out, encoding="utf-8")
+        return (
+            f"Wrote {len(out)} characters covering {len(indices)} of {total} page(s) "
+            f"to {out_path}. The full text is on disk -- read it back with "
+            f"read_file, in ranges if it is long. Do not re-transcribe it."
+        )
+
     if len(out) > max_chars:
         shown = out[:max_chars]
         remaining = len(out) - max_chars
         return (
             f"{shown}\n\n[TRUNCATED: {remaining} more characters. "
-            f"Re-call with a narrower `pages` range to read the rest.]"
+            f"Re-call with a narrower `pages` range to read the rest, or pass "
+            f"`out_path` to save the whole document to a file.]"
         )
     return out
 
