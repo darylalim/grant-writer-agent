@@ -166,12 +166,15 @@ def measure_text(text: str) -> str:
     )
 
 
-def build_search_tool():
-    """Return a Tavily web-search tool, or ``None`` if no key is configured.
+def build_search_tool(enabled: bool = True):
+    """Return a Tavily web-search tool, or ``None`` if search is unavailable.
 
-    Returning ``None`` rather than raising lets the agent still run for drafting
-    and compliance work when search is unavailable.
+    Returns ``None`` when ``enabled`` is False (what ``--no-search`` requests) or
+    when no key is configured. Returning ``None`` rather than raising lets the
+    agent still run for drafting and compliance work without search.
     """
+    if not enabled:
+        return None
     if not os.getenv("TAVILY_API_KEY"):
         return None
     try:

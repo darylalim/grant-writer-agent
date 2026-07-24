@@ -27,8 +27,35 @@ COMPLIANCE_MODEL = os.getenv(
 )
 GRADER_MODEL = os.getenv("GRANT_WRITER_GRADER_MODEL", "anthropic:claude-sonnet-5")
 
-# Repo root: src/grant_writer/config.py -> src/grant_writer -> src -> root
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+def _resolve_root() -> Path:
+    """Locate the project root (the directory holding ``skills/`` etc.).
+
+    ``Path(__file__).parents[2]`` is correct for a repo checkout or an editable
+    install, but a non-editable install (``pipx``/``uv tool install`` of the
+    declared console script) puts this file under ``site-packages`` where none
+    of ``skills/``, ``memories/``, or ``applications/`` exist. So we prefer an
+    explicit ``GRANT_WRITER_ROOT``, then the source-relative root if it actually
+    looks like the project, then the current working directory.
+    """
+    env_root = os.getenv("GRANT_WRITER_ROOT")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+
+    src_root = Path(__file__).resolve().parents[2]
+    if (src_root / "skills").is_dir():
+        return src_root
+
+    cwd = Path.cwd()
+    if (cwd / "skills").is_dir():
+        return cwd
+
+    # Nothing looks like a project; fall back to the source-relative guess so
+    # behaviour is at least deterministic (and ensure_dirs will create dirs).
+    return src_root
+
+
+PROJECT_ROOT = _resolve_root()
 
 # Virtual paths the agent sees. These are the *agent's* view of the world; the
 # backend maps them onto real directories (local) or a Store (server).
@@ -50,6 +77,15 @@ class Settings:
     """Require human approval before anything under ``/applications/*/final/``
     is written."""
 
+    enable_search: bool = True
+    """Whether funder research may use web search. ``False`` forces the search
+    tool off even when ``TAVILY_API_KEY`` is set (what ``--no-search`` sets)."""
+
+    checkpoint_db: Path | None = None
+    """When set, the agent persists its checkpoint to this SQLite file so
+    conversation and todos survive across separate processes. ``None`` uses an
+    in-memory checkpointer (tests, and library-default behaviour)."""
+
     max_rubric_iterations: int = 3
 
     @property
@@ -57,8 +93,16 @@ class Settings:
         return self.root / "applications"
 
     @property
+    def skills_path(self) -> Path:
+        return self.root / "skills"
+
+    @property
     def memory_path(self) -> Path:
         return self.root / "memories" / "org" / "AGENTS.md"
+
+    @property
+    def default_checkpoint_db(self) -> Path:
+        return self.root / ".grant_writer" / "checkpoints.sqlite"
 
     def ensure_dirs(self) -> None:
         """Create the directories the agent expects to write into."""

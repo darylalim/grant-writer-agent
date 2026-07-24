@@ -22,8 +22,13 @@ id:
 uv run grant-writer chat --app-id nsf-aisl-2026
 ```
 
-The `--app-id` doubles as the LangGraph `thread_id`, which is what makes a
-later session pick up the same plan and history instead of starting cold.
+The `--app-id` doubles as the LangGraph `thread_id`. The CLI persists its
+checkpoint to `.grant_writer/checkpoints.sqlite`, so a later `chat` or `draft`
+with the same id picks up the same plan, todos, and history instead of starting
+cold — not just the files on disk.
+
+Common flags (`--approve`, `--no-search`, `--profile`, `--recursion-limit`) are
+accepted after the subcommand, e.g. `grant-writer draft --app-id X --approve`.
 
 ### Options
 
@@ -69,12 +74,23 @@ when needed.
 laptop the filesystem *is* the cross-session memory — drafts are real files you
 can open in any editor, and they survive restarts for free.
 
-`--profile server` routes `/memories/` to a `Store` and leaves everything else
-in graph state, for deployments with no durable disk. **Never use `local`
-inside a web server.**
+`--profile server` keeps drafts in graph state and routes `/skills/` and
+`/memories/` to a `Store` that is seeded from disk at startup
+(`seed_store_from_disk`), so the drafter still gets its section guides and the
+org profile. Each route lives in its own Store namespace with prefix-stripped
+keys, because `CompositeBackend` strips the route prefix before delegating.
+**Never use `local` inside a web server.**
 
-`InMemoryStore` and `InMemorySaver` are wired in `agent.py`; swap them for
-`PostgresStore` / `PostgresSaver` before deploying, or memory dies on restart.
+The local CLI persists its checkpoint to SQLite (`.grant_writer/`); the server
+profile's `InMemoryStore` still lives only for the process, so swap it for
+`PostgresStore` before deploying, or seeded skills/memory die on restart.
+
+### Running outside the repo
+
+Paths resolve relative to the project root — the directory holding `skills/`,
+`memories/`, and `applications/`. In a checkout that is found automatically; if
+you install the console script elsewhere (`pipx`, `uv tool install`), point it
+at your content with `GRANT_WRITER_ROOT=/path/to/project`.
 
 ### Permissions
 
@@ -115,14 +131,16 @@ every number, and every citation.
 ## Development
 
 ```bash
-uv run pytest tests/ -q     # 31 wiring tests, no API calls
+uv run pytest tests/ -q     # 54 offline tests, no API calls
 uvx ruff check src/ tests/
 ```
 
 The tests target the failures that are *silent* in a Deep Agents setup: a
 subagent that lost its skills (custom subagents do not inherit them), a
 permission rule ordered so the deny shadows the allow, or an interrupt
-configured without the checkpointer that makes it work.
+configured without the checkpointer that makes it work. `test_review_fixes.py`
+pins the code-review findings — including that server-profile store keys are
+prefix-stripped and namespaced, so `ls /skills/` cannot leak memory files.
 
 ### Known quirks
 

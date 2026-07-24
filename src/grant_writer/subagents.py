@@ -22,14 +22,16 @@ from grant_writer.config import (
     DRAFTING_MODEL,
     RESEARCH_MODEL,
     SKILLS_DIR,
+    Settings,
 )
 from grant_writer.prompts import COMPLIANCE_PROMPT, DRAFTER_PROMPT, RESEARCHER_PROMPT
 from grant_writer.tools import build_search_tool, measure_text
 
 
-def build_subagents() -> list[SubAgent]:
+def build_subagents(settings: Settings | None = None) -> list[SubAgent]:
     """Assemble the subagent roster for the current environment."""
-    search = build_search_tool()
+    settings = settings or Settings()
+    search = build_search_tool(enabled=settings.enable_search)
 
     researcher: SubAgent = {
         "name": "funder-researcher",

@@ -5,6 +5,9 @@
 # personnel data -- keep them out of git by default.
 applications/
 
+# Persisted checkpoint (conversation/todo state) written by the CLI.
+.grant_writer/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -10,8 +10,9 @@ places this agent runs:
 
 ``server``
     There is no durable disk. Working drafts live in graph state (ephemeral,
-    thread-scoped) and only ``/memories/`` is routed to a ``Store`` so org
-    identity outlives a single conversation.
+    thread-scoped) while ``/skills/`` and ``/memories/`` are routed to a
+    ``Store`` that is seeded from disk at startup (see ``seed_store_from_disk``)
+    so the drafter still gets its section guides and the org profile.
 """
 
 from __future__ import annotations
@@ -27,10 +28,26 @@ from deepagents.backends import (
     StateBackend,
     StoreBackend,
 )
+from deepagents.backends.utils import create_file_data
+from langgraph.store.base import BaseStore
 
 from grant_writer.config import Settings
 
 BackendFactory = BackendProtocol | Callable[[Any], BackendProtocol]
+
+# Each routed prefix gets its OWN Store namespace. This matters: CompositeBackend
+# strips the route prefix before delegating (``/memories/org/x`` -> ``/org/x``),
+# so a single shared namespace would let ``ls /skills/`` also surface memory
+# files and vice versa. Keys are stored prefix-stripped, exactly as the routed
+# reads address them. Mapping: disk dir -> (virtual route prefix, namespace).
+_SEED_ROUTES = {
+    "skills": ("/skills/", ("filesystem", "skills")),
+    "memories": ("/memories/", ("filesystem", "memories")),
+}
+
+
+def _namespace_factory(namespace: tuple[str, ...]) -> Callable[[Any], tuple[str, ...]]:
+    return lambda _ctx: namespace
 
 
 def build_backend(settings: Settings) -> BackendFactory:
@@ -41,14 +58,47 @@ def build_backend(settings: Settings) -> BackendFactory:
         # escapes. It does NOT stop it writing to src/ -- permissions do that.
         return FilesystemBackend(root_dir=settings.root, virtual_mode=True)
 
-    # `server`: drafts are ephemeral, org memory persists via the Store.
-    # The route prefix must match exactly -- "/memories/" catches
-    # "/memories/org/AGENTS.md", but a bare "/memory/..." path would silently
-    # fall through to StateBackend and vanish at the end of the thread.
-    return lambda runtime: CompositeBackend(
-        default=StateBackend(runtime),
-        routes={"/memories/": StoreBackend(runtime)},
-    )
+    # `server`: drafts are ephemeral (StateBackend); /skills/ and /memories/ are
+    # each routed to their own namespace in the Store, which `seed_store_from_disk`
+    # fills at startup. Route prefixes must match exactly -- a bare "/memory/..."
+    # path would silently fall through to StateBackend and vanish.
+    def factory(_runtime: Any) -> CompositeBackend:
+        # Newer deepagents resolves the store/context at call time, so the
+        # backends take no runtime argument (passing one is deprecated).
+        routes = {
+            prefix: StoreBackend(namespace=_namespace_factory(namespace))
+            for prefix, namespace in _SEED_ROUTES.values()
+        }
+        return CompositeBackend(default=StateBackend(), routes=routes)
+
+    return factory
+
+
+def seed_store_from_disk(store: BaseStore, settings: Settings) -> int:
+    """Load on-disk skills and memory into the Store for the server profile.
+
+    Without this, ``/skills/`` and ``/memories/`` route to an empty Store and
+    the drafter/reviewer silently get no section guides and no org profile.
+    Keys are stored prefix-stripped and namespaced per route, matching how
+    CompositeBackend addresses them. Returns the number of files seeded.
+    """
+    count = 0
+    for disk_dir, (_prefix, namespace) in _SEED_ROUTES.items():
+        base = settings.root / disk_dir
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if not path.is_file():
+                continue
+            # Prefix-stripped, leading slash: "/rfp-decomposition/SKILL.md".
+            key = "/" + path.relative_to(base).as_posix()
+            store.put(
+                namespace,
+                key,
+                create_file_data(path.read_text(encoding="utf-8")),
+            )
+            count += 1
+    return count
 
 
 def build_permissions(settings: Settings) -> list[FilesystemPermission]:

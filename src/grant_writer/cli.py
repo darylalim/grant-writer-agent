@@ -4,12 +4,28 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from langgraph.types import Command
 
 from grant_writer.agent import build_agent
 from grant_writer.config import Settings, require_api_keys
+
+
+def _settings_from_args(args: argparse.Namespace) -> Settings:
+    """Build Settings from parsed CLI flags.
+
+    The CLI always persists its checkpoint to disk so `chat --app-id X` after
+    `draft --app-id X` resumes the same conversation and todos, not just the
+    files. Tests build Settings without a checkpoint_db and stay in-memory.
+    """
+    base = Settings(
+        backend_profile=args.profile,
+        approve_final=args.approve,
+        enable_search=not args.no_search,
+    )
+    return replace(base, checkpoint_db=base.default_checkpoint_db)
 
 
 def _print_activity(chunk: dict) -> None:
@@ -48,22 +64,44 @@ def _print_activity(chunk: dict) -> None:
                 print(f"\n{text}\n", flush=True)
 
 
-def _resolve_interrupt(agent, config: dict) -> dict | None:
-    """Prompt for approval on a pending write. Returns a resume Command payload."""
-    print("\n--- approval required ---", flush=True)
+def _pending_action_requests(agent, config: dict) -> list[dict]:
+    """All tool calls awaiting approval, flattened across pending interrupts.
+
+    HumanInTheLoopMiddleware bundles every interrupted tool call from one turn
+    into a single interrupt as `action_requests`, and on resume it requires
+    exactly one decision per request. So we count requests, not interrupts.
+    """
+    requests: list[dict] = []
     state = agent.get_state(config)
     for task in state.tasks:
         for interrupt in getattr(task, "interrupts", []) or []:
-            print(f"  {interrupt.value}", flush=True)
+            value = interrupt.value
+            if isinstance(value, dict):
+                requests.extend(value.get("action_requests", []) or [])
+    return requests
+
+
+def _resolve_interrupt(agent, config: dict) -> dict | None:
+    """Prompt for approval on pending writes. Returns a resume Command payload
+    with one decision per pending action, or None to stop."""
+    requests = _pending_action_requests(agent, config)
+    n = max(len(requests), 1)
+    print(f"\n--- approval required ({n} pending write(s)) ---", flush=True)
+    for req in requests:
+        req_args = req.get("args", {})
+        print(
+            f"  {req.get('name', '?')} -> {req_args.get('file_path', '')}", flush=True
+        )
     try:
         answer = input("approve / reject / quit? ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return None
     if answer.startswith("a"):
-        return {"decisions": [{"type": "approve"}]}
+        return {"decisions": [{"type": "approve"} for _ in range(n)]}
     if answer.startswith("r"):
         reason = input("reason (sent back to the agent): ").strip()
-        return {"decisions": [{"type": "reject", "message": reason or "Rejected."}]}
+        decision = {"type": "reject", "message": reason or "Rejected."}
+        return {"decisions": [dict(decision) for _ in range(n)]}
     return None
 
 
@@ -86,11 +124,8 @@ def _run(agent, payload: dict | Command, config: dict) -> None:
 
 
 def _draft(args: argparse.Namespace) -> int:
-    settings = Settings(
-        backend_profile=args.profile,
-        approve_final=args.approve,
-    )
-    missing = require_api_keys(needs_search=not args.no_search)
+    settings = _settings_from_args(args)
+    missing = require_api_keys(needs_search=settings.enable_search)
     if missing:
         print(f"Missing environment variables: {', '.join(missing)}", file=sys.stderr)
         print("Copy .env.example to .env and fill it in.", file=sys.stderr)
@@ -139,15 +174,16 @@ def _draft(args: argparse.Namespace) -> int:
 
 
 def _chat(args: argparse.Namespace) -> int:
-    settings = Settings(backend_profile=args.profile, approve_final=args.approve)
-    missing = require_api_keys(needs_search=not args.no_search)
+    settings = _settings_from_args(args)
+    missing = require_api_keys(needs_search=settings.enable_search)
     if missing:
         print(f"Missing environment variables: {', '.join(missing)}", file=sys.stderr)
         return 1
 
     agent = build_agent(settings)
-    # Reusing the app id as the thread id is what lets a later session pick up
-    # the same todos and conversation instead of starting cold.
+    # Reusing the app id as the thread id, backed by the SQLite checkpoint the
+    # CLI persists, lets a later session pick up the same todos and conversation
+    # instead of starting cold.
     config = {
         "configurable": {"thread_id": args.app_id},
         "recursion_limit": args.recursion_limit,
@@ -166,11 +202,7 @@ def _chat(args: argparse.Namespace) -> int:
         _run(agent, {"messages": [{"role": "user", "content": line}]}, config)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        prog="grant-writer",
-        description="Draft a grant proposal from a solicitation.",
-    )
+def _add_common_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--profile",
         choices=("local", "server"),
@@ -191,9 +223,24 @@ def main() -> int:
         default=150,
         help="max graph steps per turn (default: 150)",
     )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="grant-writer",
+        description="Draft a grant proposal from a solicitation.",
+    )
+    # Common flags live on a parent parser inherited by each subcommand, so they
+    # are accepted AFTER the subcommand (e.g. `grant-writer draft --approve`),
+    # which is where users -- and the README -- naturally put them.
+    common = argparse.ArgumentParser(add_help=False)
+    _add_common_flags(common)
+
     sub = parser.add_subparsers(dest="command", required=True)
 
-    draft = sub.add_parser("draft", help="run the full drafting pipeline")
+    draft = sub.add_parser(
+        "draft", parents=[common], help="run the full drafting pipeline"
+    )
     draft.add_argument("--app-id", required=True, help="short id, e.g. nsf-aisl-2026")
     draft.add_argument("--rfp", help="path to the solicitation PDF")
     draft.add_argument("--funder", help="funder name, e.g. 'NSF'")
@@ -204,11 +251,17 @@ def main() -> int:
     )
     draft.set_defaults(func=_draft)
 
-    chat = sub.add_parser("chat", help="interactive session on an application")
+    chat = sub.add_parser(
+        "chat", parents=[common], help="interactive session on an application"
+    )
     chat.add_argument("--app-id", required=True)
     chat.set_defaults(func=_chat)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
     return args.func(args)
 
 
