@@ -76,6 +76,12 @@ runs, and still produces plausible output.
 7. **A `SKILL.md` without YAML frontmatter (`name:`, `description:`) is ignored silently.**
 8. **`RubricMiddleware` is always installed but dormant** until a `rubric` key is present in
    invocation state (`cli._draft` puts it there from `--rubric`).
+9. **A model id the installed `langchain-anthropic` does not know silently gets a 4096
+   `max_tokens`.** `ChatAnthropic` resolves the default from a bundled profile registry and
+   falls back to `_FALLBACK_MAX_OUTPUT_TOKENS` on a miss — the id is still valid and the API
+   still accepts it, so the only symptom is narratives truncated mid-sentence. Opus 5 thinks
+   by default and thinking shares the `max_tokens` budget, which makes the short cap bite
+   sooner. Bumping a `GRANT_WRITER_*_MODEL` default means checking the dependency floor too.
 
 ## Backend profiles
 

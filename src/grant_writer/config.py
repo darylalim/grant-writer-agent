@@ -20,7 +20,7 @@ BackendProfile = Literal["local", "server"]
 # Prose quality is the whole product, so drafting gets the strongest model.
 # Research is synthesis over search results and compliance checking is largely
 # mechanical, so both run cheaper without hurting the output.
-DRAFTING_MODEL = os.getenv("GRANT_WRITER_DRAFTING_MODEL", "anthropic:claude-opus-4-8")
+DRAFTING_MODEL = os.getenv("GRANT_WRITER_DRAFTING_MODEL", "anthropic:claude-opus-5")
 RESEARCH_MODEL = os.getenv("GRANT_WRITER_RESEARCH_MODEL", "anthropic:claude-sonnet-5")
 COMPLIANCE_MODEL = os.getenv(
     "GRANT_WRITER_COMPLIANCE_MODEL", "anthropic:claude-sonnet-5"
