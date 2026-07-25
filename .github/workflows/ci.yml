@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same ref makes the in-flight run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing here needs to write to the repository.
+permissions:
+  contents: read
+
+# Belt and braces with tests/conftest.py, which already forces this off. No
+# secrets are configured for this workflow on purpose: conftest supplies a dummy
+# ANTHROPIC_API_KEY and pops TAVILY_API_KEY, so a test that needs a real
+# credential is a bug in the suite, and CI is exactly where that should surface.
+env:
+  LANGSMITH_TRACING: "false"
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      # No setup-python and no python-version input: uv reads .python-version
+      # (3.13) and fetches the interpreter itself, so the pin stays in one place.
+      # --locked fails if uv.lock is stale rather than quietly re-resolving, which
+      # makes "someone edited pyproject.toml without re-locking" a CI failure.
+      - name: Install
+        run: uv sync --locked
+
+      - name: Test
+        run: uv run pytest tests/ -q
+
+      # Exercises the shipped console script end to end: [project.scripts], the
+      # uv_build packaging, and _resolve_root(). Importing cli pulls in the whole
+      # dependency graph, so a broken entry point fails here even though the unit
+      # tests import modules directly and would not notice.
+      - name: Smoke-test the entry point
+        run: uv run grant-writer --help
+
+  lint:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      # ruff needs no project install, but ty does -- without the dependencies it
+      # cannot resolve deepagents/langgraph and every import becomes a diagnostic.
+      - name: Install
+        run: uv sync --locked
+
+      # Pinned on purpose. [tool.ruff.lint] selects whole families (E, W, F, I,
+      # UP, B, SIM, BLE, RUF), so a ruff release that adds a rule to any of them
+      # turns CI red on code that did not change. Bump this deliberately, with
+      # the fixes in the same commit.
+      - name: Lint
+        run: uvx ruff@0.16.0 check src/ tests/
+
+      - name: Format
+        run: uvx ruff@0.16.0 format --check src/ tests/
+
+      # ty reports exactly two diagnostics today, both upstream signature
+      # problems in deepagents/langgraph that CLAUDE.md deliberately leaves
+      # alone. Failing on any diagnostic would keep CI permanently red and teach
+      # everyone to ignore this job; ignoring ty entirely would let a real
+      # diagnostic of ours land unnoticed. So it ratchets: the baseline passes, a
+      # third diagnostic fails.
+      #
+      # The same baseline is enforced at edit time by the ty hook in
+      # .claude/settings.json -- keep the two in step. That hook counts
+      # `^(error|warning)\[` header lines while this reads ty's own summary line;
+      # either is fine, but a bump to the pin below should be re-checked against
+      # both, and both drop to 0 if upstream ever fixes theirs.
+      - name: Type check
+        env:
+          TY_BASELINE: 2
+        run: |
+          uvx ty@0.0.63 check src/ tests/ > ty.log 2>&1 || true
+          cat ty.log
+
+          count=$(sed -n 's/^Found \([0-9][0-9]*\) diagnostic.*/\1/p' ty.log | tail -1)
+          if [ -z "$count" ]; then
+            if grep -q 'All checks passed' ty.log; then
+              count=0
+            else
+              echo "::error::could not read a diagnostic count from ty -- did its output format change?"
+              exit 1
+            fi
+          fi
+
+          {
+            echo "### ty: ${count} diagnostic(s), baseline ${TY_BASELINE}"
+            echo
+            echo '```'
+            cat ty.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$count" -gt "$TY_BASELINE" ]; then
+            echo "::error::ty reports ${count} diagnostics, above the baseline of ${TY_BASELINE}. The new one is ours -- fix it rather than raising the baseline."
+            exit 1
+          fi
+          if [ "$count" -lt "$TY_BASELINE" ]; then
+            echo "::notice::ty reports only ${count}; lower TY_BASELINE to ${count} to keep the ratchet tight."
+          fi
