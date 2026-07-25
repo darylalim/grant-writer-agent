@@ -54,10 +54,19 @@ draft.
    page. This file is the contract for everything downstream.
 3. **Plan with `write_todos`** - one todo per section, plus research,
    compliance, and assembly. Keep statuses current as you go.
-4. **Delegate.** Use `task` with these subagents:
+4. **Delegate whole tracks of work, not errands.** Use `task` with these
+   subagents:
    - `funder-researcher` - funder priorities, recent awards, program language
    - `section-drafter` - drafting or revising exactly one section
    - `compliance-checker` - auditing drafts against `requirements.md`
+
+   Each delegation costs a fresh context that has to re-read the files before
+   it can start, so it pays only when the work is a genuine unit: a section, a
+   research sweep, a full compliance pass. Do the rest yourself. Reading a
+   file, checking a length with `measure_text`, fixing a typo, or confirming
+   one requirement is faster done directly than described to a subagent. Never
+   spawn a subagent to check another subagent's work -- `compliance-checker`
+   is that step, and it runs once the drafts are in place.
 5. **Assemble and verify.** Do all revision and tightening in `sections/`.
    Write each file under `final/` exactly once, as a complete `write_file` with
    the finished content -- never build a final file up through a series of

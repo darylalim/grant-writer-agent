@@ -76,12 +76,16 @@ runs, and still produces plausible output.
 7. **A `SKILL.md` without YAML frontmatter (`name:`, `description:`) is ignored silently.**
 8. **`RubricMiddleware` is always installed but dormant** until a `rubric` key is present in
    invocation state (`cli._draft` puts it there from `--rubric`).
-9. **A model id the installed `langchain-anthropic` does not know silently gets a 4096
-   `max_tokens`.** `ChatAnthropic` resolves the default from a bundled profile registry and
-   falls back to `_FALLBACK_MAX_OUTPUT_TOKENS` on a miss — the id is still valid and the API
-   still accepts it, so the only symptom is narratives truncated mid-sentence. Opus 5 thinks
-   by default and thinking shares the `max_tokens` budget, which makes the short cap bite
-   sooner. Bumping a `GRANT_WRITER_*_MODEL` default means checking the dependency floor too.
+9. **Models must be built through `config.build_model`, never handed to deepagents as a
+   bare spec string.** Left to the provider default, `ChatAnthropic` reads `max_tokens` from
+   a profile registry bundled with `langchain-anthropic` and falls back to 4096 for any id
+   it does not recognize — a valid id, an HTTP 200, no exception, and a narrative that stops
+   mid-sentence. Opus 5 thinks by default and reasoning is billed against that same ceiling,
+   so the cap bites sooner than the word count suggests. `build_model` sets
+   `MAX_OUTPUT_TOKENS` explicitly, which is what makes a `GRANT_WRITER_*_MODEL` override to
+   an unrecognized id safe — no test can enumerate those. `DEFAULT_MODELS` holds the shipped
+   ids so `test_wiring` pins what the project ships rather than whatever the developer's
+   environment overrides them to.
 
 ## Backend profiles
 

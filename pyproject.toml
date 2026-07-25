@@ -10,10 +10,12 @@ requires-python = ">=3.13"
 dependencies = [
     "deepagents>=0.6.12",
     "langchain>=1.0,<2.0",
-    # >=1.5.2 for the claude-opus-5 model profile. On an older release the
-    # model id is unknown to the profile registry and `max_tokens` silently
-    # falls back to 4096 instead of 128000 -- see test_model_profile_is_known.
-    "langchain-anthropic>=1.5.2",
+    # >=1.5.2 is the first release carrying the claude-opus-5 profile (context
+    # window, effort levels, no sampling params). `config.build_model` sets
+    # max_tokens explicitly, so an older release no longer truncates output --
+    # but the rest of the profile still informs the model's behaviour. Upper
+    # bound matches the other langchain pins.
+    "langchain-anthropic>=1.5.2,<2.0",
     "langchain-core>=1.0,<2.0",
     "langchain-tavily>=0.2.18",
     "langgraph-checkpoint-sqlite>=3.1.0",

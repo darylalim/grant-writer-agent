@@ -23,6 +23,7 @@ from grant_writer.config import (
     RESEARCH_MODEL,
     SKILLS_DIR,
     Settings,
+    build_model,
 )
 from grant_writer.prompts import COMPLIANCE_PROMPT, DRAFTER_PROMPT, RESEARCHER_PROMPT
 from grant_writer.tools import build_search_tool, measure_text
@@ -42,7 +43,7 @@ def build_subagents(settings: Settings | None = None) -> list[SubAgent]:
         ),
         "system_prompt": RESEARCHER_PROMPT,
         "tools": [search] if search else [],
-        "model": RESEARCH_MODEL,
+        "model": build_model(RESEARCH_MODEL),
     }
 
     drafter: SubAgent = {
@@ -54,7 +55,7 @@ def build_subagents(settings: Settings | None = None) -> list[SubAgent]:
         ),
         "system_prompt": DRAFTER_PROMPT,
         "tools": [measure_text],
-        "model": DRAFTING_MODEL,
+        "model": build_model(DRAFTING_MODEL),
         # Custom subagents do not inherit skills -- pass them explicitly.
         "skills": [SKILLS_DIR],
     }
@@ -68,7 +69,7 @@ def build_subagents(settings: Settings | None = None) -> list[SubAgent]:
         ),
         "system_prompt": COMPLIANCE_PROMPT,
         "tools": [measure_text],
-        "model": COMPLIANCE_MODEL,
+        "model": build_model(COMPLIANCE_MODEL),
         "skills": [SKILLS_DIR],
         "permissions": compliance_permissions(),
     }

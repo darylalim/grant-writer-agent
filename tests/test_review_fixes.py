@@ -10,11 +10,6 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
-from langchain_anthropic import ChatAnthropic
-from langchain_anthropic.chat_models import (
-    _FALLBACK_MAX_OUTPUT_TOKENS,
-    _MODEL_PROFILES,
-)
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
@@ -25,13 +20,7 @@ from grant_writer.backends import (
     seed_store_from_disk,
 )
 from grant_writer.cli import _build_parser, _resolve_interrupt
-from grant_writer.config import (
-    COMPLIANCE_MODEL,
-    DRAFTING_MODEL,
-    GRADER_MODEL,
-    RESEARCH_MODEL,
-    _resolve_root,
-)
+from grant_writer.config import _resolve_root
 from grant_writer.tools import build_search_tool
 
 # ---- ① --no-search actually disables search --------------------------------
@@ -229,30 +218,3 @@ def test_resolve_root_finds_repo_without_env(monkeypatch):
     monkeypatch.delenv("GRANT_WRITER_ROOT", raising=False)
     root = _resolve_root()
     assert (root / "skills").is_dir()
-
-
-# ---- ⑦ configured models are known to the installed profile registry --------
-
-
-@pytest.mark.parametrize(
-    "spec",
-    [DRAFTING_MODEL, RESEARCH_MODEL, COMPLIANCE_MODEL, GRADER_MODEL],
-)
-def test_model_profile_is_known(spec):
-    """A model id absent from the profile registry silently gets a 4096
-    `max_tokens` instead of the model's real ceiling.
-
-    Nothing raises: the id is valid and the API accepts it, so the only symptom
-    is narratives that stop mid-sentence. Opus 5 also thinks by default and
-    thinking shares the `max_tokens` budget, which makes the short cap bite
-    sooner. Pinning the lookup catches a model bump that outruns the installed
-    `langchain-anthropic`.
-    """
-    _, _, model_name = spec.partition(":")
-    assert model_name in _MODEL_PROFILES, (
-        f"{model_name!r} is unknown to langchain-anthropic; max_tokens would "
-        f"fall back to {_FALLBACK_MAX_OUTPUT_TOKENS}. Upgrade the dependency."
-    )
-    max_tokens = ChatAnthropic(model=model_name).max_tokens
-    assert max_tokens is not None
-    assert max_tokens > _FALLBACK_MAX_OUTPUT_TOKENS

@@ -16,6 +16,7 @@ from grant_writer.config import (
     MEMORY_FILE,
     SKILLS_DIR,
     Settings,
+    build_model,
 )
 from grant_writer.prompts import ORCHESTRATOR_PROMPT
 from grant_writer.subagents import build_subagents
@@ -62,7 +63,7 @@ def build_agent(settings: Settings | None = None):
         seed_store_from_disk(store, settings)
 
     return create_deep_agent(
-        model=DRAFTING_MODEL,
+        model=build_model(DRAFTING_MODEL),
         tools=tools,
         system_prompt=ORCHESTRATOR_PROMPT,
         subagents=build_subagents(settings),
@@ -75,7 +76,7 @@ def build_agent(settings: Settings | None = None):
         # this makes the agent grade its own work against them and iterate.
         middleware=[
             RubricMiddleware(
-                model=GRADER_MODEL,
+                model=build_model(GRADER_MODEL),
                 max_iterations=settings.max_rubric_iterations,
             )
         ],

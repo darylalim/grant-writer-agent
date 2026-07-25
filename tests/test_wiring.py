@@ -19,7 +19,13 @@ from grant_writer.backends import (
     build_permissions,
     compliance_permissions,
 )
-from grant_writer.config import PROJECT_ROOT, Settings
+from grant_writer.config import (
+    DEFAULT_MODELS,
+    MAX_OUTPUT_TOKENS,
+    PROJECT_ROOT,
+    Settings,
+    build_model,
+)
 from grant_writer.subagents import build_subagents
 from grant_writer.tools import (
     _parse_page_spec,
@@ -192,3 +198,34 @@ def test_skills_have_valid_frontmatter():
         head = lines[:6]
         assert any(line.startswith("name:") for line in head), skill
         assert any(line.startswith("description:") for line in head), skill
+
+
+@pytest.mark.parametrize(("role", "spec"), sorted(DEFAULT_MODELS.items()))
+def test_default_model_resolves_to_a_usable_output_ceiling(role, spec):
+    """Every shipped model id must resolve to a real output ceiling.
+
+    Left to the provider default, an id the installed `langchain-anthropic` does
+    not recognize silently gets 4096 `max_tokens` -- valid id, HTTP 200, no
+    exception, and a narrative that stops mid-sentence. `build_model` sets the
+    ceiling explicitly so that cannot happen; this pins that it keeps doing so,
+    and that both halves of each spec still resolve.
+
+    Parametrized over `DEFAULT_MODELS` rather than the module-level constants,
+    which `GRANT_WRITER_*_MODEL` can redirect -- otherwise a developer with an
+    override set would never test what the project ships.
+    """
+    max_tokens = getattr(build_model(spec), "max_tokens", None)
+    assert max_tokens is not None, f"{role}: {spec!r} exposes no max_tokens"
+    assert max_tokens >= MAX_OUTPUT_TOKENS, (
+        f"{role}: {spec!r} resolves to max_tokens={max_tokens}, below the "
+        f"{MAX_OUTPUT_TOKENS} a full section needs."
+    )
+
+
+def test_subagents_get_an_explicit_output_ceiling():
+    """The ceiling has to reach the subagents too -- `section-drafter` is what
+    actually writes the narrative, so a 4096 cap there is the truncation this
+    guards against, whatever the orchestrator was built with."""
+    for sub in build_subagents(Settings()):
+        max_tokens = getattr(sub["model"], "max_tokens", None)
+        assert max_tokens == MAX_OUTPUT_TOKENS, sub["name"]

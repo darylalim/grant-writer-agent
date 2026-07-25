@@ -131,7 +131,7 @@ every number, and every citation.
 ## Development
 
 ```bash
-uv run pytest tests/ -q     # 59 offline tests, no API calls
+uv run pytest tests/ -q     # 60 offline tests, no API calls
 uvx ruff check src/ tests/
 ```
 

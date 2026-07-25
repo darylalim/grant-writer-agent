@@ -545,7 +545,7 @@ dev = [
 requires-dist = [
     { name = "deepagents", specifier = ">=0.6.12" },
     { name = "langchain", specifier = ">=1.0,<2.0" },
-    { name = "langchain-anthropic", specifier = ">=1.5.2" },
+    { name = "langchain-anthropic", specifier = ">=1.5.2,<2.0" },
     { name = "langchain-core", specifier = ">=1.0,<2.0" },
     { name = "langchain-tavily", specifier = ">=0.2.18" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.0" },

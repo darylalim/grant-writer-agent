@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
+from langchain.chat_models import init_chat_model
+from langchain_core.language_models import BaseChatModel
 
 load_dotenv()
 
@@ -20,12 +22,45 @@ BackendProfile = Literal["local", "server"]
 # Prose quality is the whole product, so drafting gets the strongest model.
 # Research is synthesis over search results and compliance checking is largely
 # mechanical, so both run cheaper without hurting the output.
-DRAFTING_MODEL = os.getenv("GRANT_WRITER_DRAFTING_MODEL", "anthropic:claude-opus-5")
-RESEARCH_MODEL = os.getenv("GRANT_WRITER_RESEARCH_MODEL", "anthropic:claude-sonnet-5")
+#
+# The defaults live in a dict rather than inline in the `getenv` calls so tests
+# can pin what the project *ships* regardless of any GRANT_WRITER_*_MODEL set in
+# the developer's environment or .env -- see test_wiring, which asserts each one
+# resolves to a real output ceiling.
+DEFAULT_MODELS = {
+    "drafting": "anthropic:claude-opus-5",
+    "research": "anthropic:claude-sonnet-5",
+    "compliance": "anthropic:claude-sonnet-5",
+    "grader": "anthropic:claude-sonnet-5",
+}
+
+DRAFTING_MODEL = os.getenv("GRANT_WRITER_DRAFTING_MODEL", DEFAULT_MODELS["drafting"])
+RESEARCH_MODEL = os.getenv("GRANT_WRITER_RESEARCH_MODEL", DEFAULT_MODELS["research"])
 COMPLIANCE_MODEL = os.getenv(
-    "GRANT_WRITER_COMPLIANCE_MODEL", "anthropic:claude-sonnet-5"
+    "GRANT_WRITER_COMPLIANCE_MODEL", DEFAULT_MODELS["compliance"]
 )
-GRADER_MODEL = os.getenv("GRANT_WRITER_GRADER_MODEL", "anthropic:claude-sonnet-5")
+GRADER_MODEL = os.getenv("GRANT_WRITER_GRADER_MODEL", DEFAULT_MODELS["grader"])
+
+# Set the output ceiling here rather than inheriting whichever profile the
+# installed langchain-anthropic happens to bundle. A model id it does not
+# recognize silently resolves to 4096 -- valid id, HTTP 200, no exception, and a
+# narrative that stops mid-sentence. That fallback applies to
+# GRANT_WRITER_*_MODEL overrides too, which no test can enumerate, so the fix
+# belongs at the construction site rather than in a version pin. 64000 tokens is
+# roughly 48,000 words: far past any section limit, so this only ever removes
+# the truncation, never binds. Models that think (Opus 5 does so by default)
+# spend reasoning from the same budget, which is why the headroom is generous.
+MAX_OUTPUT_TOKENS = 64000
+
+
+def build_model(spec: str) -> BaseChatModel:
+    """Resolve a `provider:model` spec into a chat model with a real ceiling.
+
+    Called lazily from `build_agent`/`build_subagents` rather than at import, so
+    importing this module stays cheap and the CLI's `require_api_keys` check
+    still reports missing credentials before any client is constructed.
+    """
+    return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS)
 
 
 def _resolve_root() -> Path:
