@@ -20,7 +20,9 @@ When working with Python, invoke the relevant `/astral:<skill>` — `/astral:uv`
 `/astral:ty` — to ensure best practices are followed rather than guessed at. uv is the only
 supported package manager: never `pip`, never a hand-rolled venv. There is deliberately no
 `[tool.ty]` config; `uvx ty check src/ tests/` reports two diagnostics, both upstream signature
-problems in `deepagents`/`langgraph`, and neither is worth suppressing — leave them.
+problems in `deepagents`/`langgraph`, and neither is worth suppressing — leave them. That
+tolerance is encoded as a threshold in two places, the ty hook in `.claude/settings.json` and
+the type-check step in `.github/workflows/ci.yml`; lower both when upstream fixes theirs.
 
 Common flags (`--profile`, `--approve`, `--no-search`, `--recursion-limit`) live on a shared
 parent parser and must be passed **after** the subcommand. `--app-id` is also the LangGraph

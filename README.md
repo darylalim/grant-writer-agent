@@ -1,5 +1,7 @@
 # grant-writer-agent
 
+[![CI](https://github.com/darylalim/grant-writer-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/grant-writer-agent/actions/workflows/ci.yml)
+
 A grant writing agent built on [Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview).
 
 Give it a solicitation and an organization profile; it extracts the
@@ -134,6 +136,11 @@ every number, and every citation.
 uv run pytest tests/ -q     # 60 offline tests, no API calls
 uvx ruff check src/ tests/
 ```
+
+CI runs both on every push and pull request, plus `ruff format --check` and
+`ty` held at its two-diagnostic baseline. ruff and ty are version-pinned in the
+workflow so a new release cannot turn CI red on unchanged code — bump them
+there deliberately.
 
 The tests target the failures that are *silent* in a Deep Agents setup: a
 subagent that lost its skills (custom subagents do not inherit them), a
