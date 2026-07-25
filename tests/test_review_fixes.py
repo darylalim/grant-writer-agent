@@ -75,6 +75,7 @@ def test_resolve_interrupt_reject_matches_count(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda *_: next(answers))
     agent = _fake_agent_with_interrupts(2)
     result = _resolve_interrupt(agent, {})
+    assert result is not None
     assert [d["type"] for d in result["decisions"]] == ["reject", "reject"]
     assert all(d["message"] == "run tests first" for d in result["decisions"])
 
@@ -102,17 +103,20 @@ def test_checkpointer_uses_sqlite_when_db_set(tmp_path):
 def test_sqlite_checkpoint_persists_across_savers(tmp_path):
     """A second saver on the same file sees what the first wrote -- the property
     that makes cross-process `draft` -> `chat` resume actually work."""
+    from langchain_core.runnables import RunnableConfig
+    from langgraph.checkpoint.base import Checkpoint
     from langgraph.checkpoint.sqlite import SqliteSaver
 
     db = tmp_path / "ck.sqlite"
-    cfg = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
-    checkpoint = {
+    cfg: RunnableConfig = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    checkpoint: Checkpoint = {
         "v": 1,
         "id": "c1",
         "ts": "2026-01-01T00:00:00+00:00",
         "channel_values": {"x": 1},
         "channel_versions": {},
         "versions_seen": {},
+        "updated_channels": None,
     }
     with SqliteSaver.from_conn_string(str(db)) as saver:
         saver.put(cfg, checkpoint, {}, {})
@@ -195,11 +199,16 @@ def test_seed_store_skips_non_utf8_files(tmp_path):
 
 
 def test_server_backend_routes_skills_and_memory_to_store():
-    from deepagents.backends import CompositeBackend, StoreBackend
+    from deepagents.backends import BackendProtocol, CompositeBackend, StoreBackend
 
     from grant_writer.config import Settings
 
     factory = build_backend(Settings(backend_profile="server"))
+    # build_backend returns `BackendProtocol | Callable[..., BackendProtocol]`.
+    # The server profile is specifically the callable half -- local returns a
+    # ready-made FilesystemBackend instead -- and that split is part of what
+    # this test pins, so assert it rather than assuming it.
+    assert not isinstance(factory, BackendProtocol)
     backend = factory(SimpleNamespace())
     assert isinstance(backend, CompositeBackend)
     for prefix in ("/skills/", "/memories/"):

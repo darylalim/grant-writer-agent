@@ -65,7 +65,9 @@ def build_backend(settings: Settings) -> BackendFactory:
     def factory(_runtime: Any) -> CompositeBackend:
         # Newer deepagents resolves the store/context at call time, so the
         # backends take no runtime argument (passing one is deprecated).
-        routes = {
+        # Annotated because `dict` is invariant in its value type: the inferred
+        # `dict[str, StoreBackend]` is not a `dict[str, BackendProtocol]`.
+        routes: dict[str, BackendProtocol] = {
             prefix: StoreBackend(namespace=_namespace_factory(namespace))
             for prefix, namespace in _SEED_ROUTES.values()
         }
