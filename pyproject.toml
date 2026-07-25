@@ -35,3 +35,16 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.ruff.lint]
+# The source already satisfied every rule below before this section existed, so
+# it is a ratchet on the standard the code was written to, not a cleanup to work
+# through. Ruff's defaults are only E4/E7/E9/F, which say nothing about import
+# order (I), stale idioms (UP), or the mutable-default and loop-variable class of
+# bug (B) -- all things that survive review by looking unremarkable.
+#
+# BLE is here because `tools.py` already carries `# noqa: BLE001` on two
+# deliberate broad excepts. Selecting RUF without BLE would make RUF100 flag
+# those directives as unused and invite deleting the suppression along with the
+# rule that justified it.
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "BLE", "RUF"]

@@ -8,6 +8,7 @@ makes it work.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -175,8 +176,15 @@ def test_output_paths_outside_content_dirs_are_refused(out_path):
 
     It therefore has to enforce the same boundary itself, or it becomes a way
     around every write rule tested above.
+
+    Match the refusal message literally. A looser pattern would keep passing if
+    the guard were replaced by some *other* ValueError -- a path-parsing crash,
+    say -- and report a boundary that is no longer enforced as still holding.
     """
-    with pytest.raises(ValueError, match="refusing to write|escapes the project root"):
+    with pytest.raises(
+        ValueError,
+        match=re.escape("refusing to write outside /applications/ or /memories/"),
+    ):
         _resolve_output_path(out_path)
 
 

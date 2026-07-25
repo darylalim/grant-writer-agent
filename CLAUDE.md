@@ -9,7 +9,8 @@ uv sync                                       # install (Python >=3.13, uv_build
 uv run pytest tests/ -q                       # full suite: offline, no API calls
 uv run pytest tests/test_wiring.py::test_subagent_roster -q   # single test
 uv run pytest tests/ -q -k permission         # by keyword
-uvx ruff check src/ tests/                    # lint (no ruff config; defaults apply)
+uvx ruff check src/ tests/                    # lint (select list in [tool.ruff.lint])
+uvx ruff format --check src/ tests/           # formatting is ruff's default 88-col
 
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
 uv run grant-writer chat --app-id X           # resume the same thread
