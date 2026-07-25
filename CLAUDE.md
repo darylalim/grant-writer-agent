@@ -16,6 +16,12 @@ uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
 uv run grant-writer chat --app-id X           # resume the same thread
 ```
 
+When working with Python, invoke the relevant `/astral:<skill>` — `/astral:uv`, `/astral:ruff`,
+`/astral:ty` — to ensure best practices are followed rather than guessed at. uv is the only
+supported package manager: never `pip`, never a hand-rolled venv. There is deliberately no
+`[tool.ty]` config; `uvx ty check src/ tests/` reports two diagnostics, both upstream signature
+problems in `deepagents`/`langgraph`, and neither is worth suppressing — leave them.
+
 Common flags (`--profile`, `--approve`, `--no-search`, `--recursion-limit`) live on a shared
 parent parser and must be passed **after** the subcommand. `--app-id` is also the LangGraph
 `thread_id`; the CLI persists to `.grant_writer/checkpoints.sqlite`, so state resumes across
