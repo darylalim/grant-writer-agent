@@ -24,8 +24,19 @@ env:
 
 jobs:
   test:
-    name: Tests
+    name: Tests (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      # Both legs always report. Whether a failure is 3.14-only or universal is
+      # most of the diagnosis, and cancelling the sibling job hides exactly that.
+      fail-fast: false
+      matrix:
+        # requires-python is ">=3.13", so 3.14 is claimed and has to be tested or
+        # the claim is only an assertion. Verified before being added here: the
+        # lock resolves on 3.14.6 with a wheel for every dependency, all 60 tests
+        # pass, and the console script runs. .python-version (3.13) remains what
+        # local development and a bare `uv run` use.
+        python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -33,11 +44,15 @@ jobs:
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
+          # Sets UV_PYTHON, so the sync below builds on this interpreter rather
+          # than the one .python-version names. No setup-python step either way:
+          # uv fetches the interpreter itself.
+          python-version: ${{ matrix.python-version }}
 
-      # No setup-python and no python-version input: uv reads .python-version
-      # (3.13) and fetches the interpreter itself, so the pin stays in one place.
       # --locked fails if uv.lock is stale rather than quietly re-resolving, which
-      # makes "someone edited pyproject.toml without re-locking" a CI failure.
+      # makes "someone edited pyproject.toml without re-locking" a CI failure. One
+      # lockfile serves both legs -- uv resolves universally across the whole
+      # requires-python range rather than per interpreter.
       - name: Install
         run: uv sync --locked
 
@@ -62,8 +77,11 @@ jobs:
         with:
           enable-cache: true
 
-      # ruff needs no project install, but ty does -- without the dependencies it
-      # cannot resolve deepagents/langgraph and every import becomes a diagnostic.
+      # One interpreter on purpose, .python-version's 3.13: lint and types are a
+      # property of the source, not the runtime, and the ty baseline below was
+      # measured there. ruff needs no project install, but ty does -- without the
+      # dependencies it cannot resolve deepagents/langgraph and every import
+      # becomes a diagnostic.
       - name: Install
         run: uv sync --locked
 
