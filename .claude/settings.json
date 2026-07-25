@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Read(./.env)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Checking protected paths",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.env|*.env.*) [ \"${f##*/}\" = \".env.example\" ] || { echo 'Blocked: .env holds live ANTHROPIC/TAVILY/LANGSMITH keys. Read .env.example for the variable names.' >&2; exit 2; };; *uv.lock) echo 'Blocked: uv.lock is generated. Change dependencies with uv add / uv remove / uv sync.' >&2; exit 2;; esac; exit 0"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Checking package manager",
+            "command": "c=$(jq -r '.tool_input.command // \"\"'); printf '%s' \"$c\" | grep -qE '(^|[;&|] *)(pip3?|python3? +-m +pip) +(install|uninstall)|(^|[;&|] *)(poetry|conda|pipenv) +|python3? +-m +venv' && { echo 'Blocked: this project is uv-only (see CLAUDE.md). Use uv add / uv sync / uv run / uvx instead.' >&2; exit 2; }; exit 0"
+          },
+          {
+            "type": "command",
+            "statusMessage": "Checking .env access",
+            "command": "c=$(jq -r '.tool_input.command // \"\"')\nprintf '%s' \"$c\" | grep -qE '\\.env([^.A-Za-z0-9_-]|$)' || exit 0\nprintf '%s\\n' \"$c\" | tr ';&|' '\\n\\n\\n' | while IFS= read -r seg; do\n  printf '%s' \"$seg\" | grep -qE '\\.env([^.A-Za-z0-9_-]|$)' || continue\n  printf '%s' \"$seg\" | grep -qE '^[[:space:]]*(cp|mv|ls|test|\\[|touch|stat|file)([[:space:]]|$)' && continue\n  exit 9\ndone\n[ $? -eq 9 ] && { echo 'Blocked: reading .env would put live API keys into the transcript. Variable names are in .env.example; the app loads .env itself via load_dotenv() in config.py.' >&2; exit 2; }\nexit 0"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Formatting with ruff",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) uvx ruff format -q \"$f\"; uvx ruff check -q --fix \"$f\" || true;; esac; exit 0"
+          },
+          {
+            "type": "command",
+            "timeout": 60,
+            "statusMessage": "Running wiring tests",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in \"$CLAUDE_PROJECT_DIR\"/src/grant_writer/*.py|\"$CLAUDE_PROJECT_DIR\"/tests/*.py) ;; *) exit 0;; esac; out=$(cd \"$CLAUDE_PROJECT_DIR\" && uv run pytest tests/ -q --no-header -p no:warnings 2>&1) || { printf '%s\\n' \"$out\" | tail -25 >&2; exit 2; }"
+          },
+          {
+            "type": "command",
+            "timeout": 30,
+            "statusMessage": "Type-checking with ty",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) ;; *) exit 0;; esac; n=$(cd \"$CLAUDE_PROJECT_DIR\" && uvx ty check src/ tests/ 2>&1 | grep -cE '^(error|warning)\\['); [ \"$n\" -gt 2 ] && { echo \"ty: $n diagnostics vs baseline 2 (both upstream in deepagents/langgraph, deliberately unsuppressed). You introduced $((n - 2)).\" >&2; exit 2; }; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
