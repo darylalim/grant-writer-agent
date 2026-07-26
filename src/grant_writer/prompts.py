@@ -10,6 +10,44 @@ Two rules drive most of the wording below:
    as explicit gaps rather than filled in plausibly.
 """
 
+from __future__ import annotations
+
+
+def draft_request(
+    app_id: str,
+    *,
+    rfp_path: str | None = None,
+    funder: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Compose the opening instruction for a full drafting run.
+
+    Shared by every frontend rather than assembled at each call site: this
+    wording is what steers the whole run, so the CLI and the UI drifting into
+    subtly different briefs would produce subtly different proposals from the
+    same inputs.
+
+    ``rfp_path`` is a real path on the host, not a virtual one -- the agent
+    reads the PDF through ``extract_pdf_text``, which touches the real
+    filesystem, and only its *output* path is virtual.
+    """
+    parts = [f"Prepare a proposal in /applications/{app_id}/."]
+    if rfp_path:
+        parts.append(
+            f"The solicitation is the PDF at {rfp_path}. Extract it with "
+            f"extract_pdf_text and save it to /applications/{app_id}/rfp.md."
+        )
+    if funder:
+        parts.append(f"The funder is {funder}.")
+    if notes:
+        parts.append(f"Additional context from the applicant: {notes}")
+    parts.append(
+        "Work through the full process: requirements checklist, funder research, "
+        "plan, section drafts, compliance review, then assemble the final draft."
+    )
+    return " ".join(parts)
+
+
 WORKSPACE_CONVENTIONS = """\
 ## Workspace layout
 

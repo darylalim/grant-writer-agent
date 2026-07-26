@@ -7,7 +7,7 @@ here, so the rest of the package never reads ``os.environ`` directly.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -139,6 +139,28 @@ class Settings:
         """Create the directories the agent expects to write into."""
         self.applications_path.mkdir(parents=True, exist_ok=True)
         self.memory_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def persistent_settings(
+    *,
+    backend_profile: BackendProfile = "local",
+    approve_final: bool = False,
+    enable_search: bool = True,
+) -> Settings:
+    """Settings for an interactive frontend, checkpointed to disk.
+
+    Every frontend wants the same thing an id-per-application implies: the app
+    id doubles as the LangGraph ``thread_id``, and conversation, plan, and
+    pending approvals survive the process, so a run started in the UI can be
+    continued from ``grant-writer chat`` and vice versa. Constructing
+    ``Settings`` directly instead (tests, library use) stays in memory.
+    """
+    base = Settings(
+        backend_profile=backend_profile,
+        approve_final=approve_final,
+        enable_search=enable_search,
+    )
+    return replace(base, checkpoint_db=base.default_checkpoint_db)
 
 
 def require_api_keys(*, needs_search: bool = True) -> list[str]:

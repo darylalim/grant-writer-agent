@@ -4,87 +4,56 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 from langgraph.types import Command
 
+from grant_writer.activity import (
+    DELEGATE,
+    MESSAGE,
+    PLAN,
+    TOOL,
+    iter_activity,
+    pending_action_requests,
+)
 from grant_writer.agent import build_agent
-from grant_writer.config import Settings, require_api_keys
+from grant_writer.config import Settings, persistent_settings, require_api_keys
+from grant_writer.prompts import draft_request
 
 
 def _settings_from_args(args: argparse.Namespace) -> Settings:
-    """Build Settings from parsed CLI flags.
-
-    The CLI always persists its checkpoint to disk so `chat --app-id X` after
-    `draft --app-id X` resumes the same conversation and todos, not just the
-    files. Tests build Settings without a checkpoint_db and stay in-memory.
-    """
-    base = Settings(
+    """Build Settings from parsed CLI flags."""
+    return persistent_settings(
         backend_profile=args.profile,
         approve_final=args.approve,
         enable_search=not args.no_search,
     )
-    return replace(base, checkpoint_db=base.default_checkpoint_db)
 
 
 def _print_activity(chunk: dict) -> None:
-    """Render a compact trace of what the agent is doing."""
-    for node, update in chunk.items():
-        if not isinstance(update, dict):
-            continue
-        for message in update.get("messages", []) or []:
-            for call in getattr(message, "tool_calls", None) or []:
-                name = call.get("name", "?")
-                args = call.get("args", {}) or {}
-                if name == "task":
-                    detail = args.get("subagent_type") or args.get("agent") or ""
-                    print(f"  -> delegate to {detail}", flush=True)
-                elif name == "write_todos":
-                    todos = args.get("todos", []) or []
-                    print(f"  -> plan ({len(todos)} steps)", flush=True)
-                    for todo in todos:
-                        mark = {"completed": "x", "in_progress": ">"}.get(
-                            todo.get("status", ""), " "
-                        )
-                        print(f"     [{mark}] {todo.get('content', '')}", flush=True)
-                else:
-                    hint = (
-                        args.get("file_path")
-                        or args.get("path")
-                        or args.get("query")
-                        or ""
-                    )
-                    suffix = f" {hint}" if hint else ""
-                    print(f"  -> {name}{suffix}", flush=True)
-            text = getattr(message, "text", None)
-            if callable(text):
-                text = text()
-            if text and node == "model" and not getattr(message, "tool_calls", None):
-                print(f"\n{text}\n", flush=True)
+    """Render a compact trace of what the agent is doing.
 
-
-def _pending_action_requests(agent, config: dict) -> list[dict]:
-    """All tool calls awaiting approval, flattened across pending interrupts.
-
-    HumanInTheLoopMiddleware bundles every interrupted tool call from one turn
-    into a single interrupt as `action_requests`, and on resume it requires
-    exactly one decision per request. So we count requests, not interrupts.
+    Parsing lives in `activity.iter_activity` so the UI reads the stream the
+    same way; this function only decides how a terminal draws it.
     """
-    requests: list[dict] = []
-    state = agent.get_state(config)
-    for task in state.tasks:
-        for interrupt in getattr(task, "interrupts", []) or []:
-            value = interrupt.value
-            if isinstance(value, dict):
-                requests.extend(value.get("action_requests", []) or [])
-    return requests
+    for event in iter_activity(chunk):
+        if event.kind == DELEGATE:
+            print(f"  -> delegate to {event.label}", flush=True)
+        elif event.kind == PLAN:
+            print(f"  -> plan ({len(event.todos)} steps)", flush=True)
+            for todo in event.todos:
+                print(f"     [{todo.mark}] {todo.content}", flush=True)
+        elif event.kind == TOOL:
+            suffix = f" {event.detail}" if event.detail else ""
+            print(f"  -> {event.label}{suffix}", flush=True)
+        elif event.kind == MESSAGE:
+            print(f"\n{event.detail}\n", flush=True)
 
 
 def _resolve_interrupt(agent, config: dict) -> dict | None:
     """Prompt for approval on pending writes. Returns a resume Command payload
     with one decision per pending action, or None to stop."""
-    requests = _pending_action_requests(agent, config)
+    requests = pending_action_requests(agent, config)
     n = max(len(requests), 1)
     print(f"\n--- approval required ({n} pending write(s)) ---", flush=True)
     for req in requests:
@@ -131,28 +100,21 @@ def _draft(args: argparse.Namespace) -> int:
         print("Copy .env.example to .env and fill it in.", file=sys.stderr)
         return 1
 
-    instruction = [
-        f"Prepare a proposal in /applications/{args.app_id}/.",
-    ]
+    rfp_path: str | None = None
     if args.rfp:
         rfp = Path(args.rfp).expanduser().resolve()
         if not rfp.is_file():
             print(f"No such RFP file: {rfp}", file=sys.stderr)
             return 1
-        instruction.append(
-            f"The solicitation is the PDF at {rfp}. Extract it with "
-            f"extract_pdf_text and save it to /applications/{args.app_id}/rfp.md."
-        )
-    if args.funder:
-        instruction.append(f"The funder is {args.funder}.")
-    if args.notes:
-        instruction.append(f"Additional context from the applicant: {args.notes}")
-    instruction.append(
-        "Work through the full process: requirements checklist, funder research, "
-        "plan, section drafts, compliance review, then assemble the final draft."
-    )
+        rfp_path = str(rfp)
 
-    payload: dict = {"messages": [{"role": "user", "content": " ".join(instruction)}]}
+    instruction = draft_request(
+        args.app_id,
+        rfp_path=rfp_path,
+        funder=args.funder,
+        notes=args.notes,
+    )
+    payload: dict = {"messages": [{"role": "user", "content": instruction}]}
 
     if args.rubric:
         rubric_path = Path(args.rubric).expanduser()

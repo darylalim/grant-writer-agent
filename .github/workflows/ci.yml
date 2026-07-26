@@ -89,11 +89,15 @@ jobs:
       # UP, B, SIM, BLE, RUF), so a ruff release that adds a rule to any of them
       # turns CI red on code that did not change. Bump this deliberately, with
       # the fixes in the same commit.
+      # streamlit_app.py is linted but deliberately absent from the ty step
+      # below: ty would have to resolve `import streamlit`, and the `ui` extra
+      # is not installed here. Ruff needs no resolved imports, so the lint gap
+      # closes for free while the type check stays honest about what it can see.
       - name: Lint
-        run: uvx ruff@0.16.0 check src/ tests/
+        run: uvx ruff@0.16.0 check src/ tests/ streamlit_app.py
 
       - name: Format
-        run: uvx ruff@0.16.0 format --check src/ tests/
+        run: uvx ruff@0.16.0 format --check src/ tests/ streamlit_app.py
 
       # ty reports exactly two diagnostics today, both upstream signature
       # problems in deepagents/langgraph that CLAUDE.md deliberately leaves

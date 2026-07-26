@@ -9,11 +9,14 @@ uv sync                                       # install (Python >=3.13, uv_build
 uv run pytest tests/ -q                       # full suite: offline, no API calls
 uv run pytest tests/test_wiring.py::test_subagent_roster -q   # single test
 uv run pytest tests/ -q -k permission         # by keyword
-uvx ruff check src/ tests/                    # lint (select list in [tool.ruff.lint])
-uvx ruff format --check src/ tests/           # formatting is ruff's default 88-col
+uvx ruff check src/ tests/ streamlit_app.py   # lint (select list in [tool.ruff.lint])
+uvx ruff format --check src/ tests/ streamlit_app.py   # ruff's default 88-col
 
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
 uv run grant-writer chat --app-id X           # resume the same thread
+
+uv sync --extra ui                            # optional Streamlit front end
+uv run --extra ui streamlit run streamlit_app.py
 ```
 
 When working with Python, invoke the relevant `/astral:<skill>` — `/astral:uv`, `/astral:ruff`,
@@ -36,7 +39,15 @@ subagents. Module dependencies flow one way:
 
 ```
 config.py  →  tools.py, prompts.py  →  backends.py, subagents.py  →  agent.py  →  cli.py
+                                                              activity.py  ↗        ↘  streamlit_app.py
 ```
+
+Two frontends sit at the end of that chain, and what they share is deliberate.
+`activity.py` parses the `stream_mode="updates"` chunks, `prompts.draft_request`
+composes the opening brief, and `config.persistent_settings` decides that a
+frontend checkpoints to disk. Each was duplicated logic waiting to happen: a
+renamed `deepagents` key would blank one frontend's labels silently, and a
+kickoff brief that drifts steers the whole run.
 
 - **`config.py`** is the only module that touches `os.environ`. Model IDs, `PROJECT_ROOT`, and the
   frozen `Settings` dataclass all resolve here. Everything downstream takes `Settings`.
@@ -78,7 +89,8 @@ runs, and still produces plausible output.
    returns SQLite when `Settings.checkpoint_db` is set, in-memory otherwise (tests, library use).
 5. **Approval decisions are per action request, not per interrupt.** `HumanInTheLoopMiddleware`
    bundles a turn's interrupted calls into one interrupt carrying N `action_requests`, and resume
-   requires exactly N decisions — see `cli._pending_action_requests`.
+   requires exactly N decisions — see `activity.pending_action_requests`, used by
+   both the CLI prompt and the UI's approve/reject buttons.
 6. **Server-profile Store keys are prefix-stripped and namespaced per route.** `CompositeBackend`
    strips the route prefix before delegating, so `_SEED_ROUTES` gives `/skills/` and `/memories/`
    separate namespaces; sharing one would let `ls /skills/` surface memory files.
@@ -112,7 +124,12 @@ internals — `_check_fs_permission`, `supports_execution`,
 `graph.nodes["tools"].bound.tools_by_name`, `get_graph().nodes`. That is intentional (it is the only
 way to catch these failures offline) but brittle: a `deepagents` upgrade may need these updated.
 `test_wiring.py` covers structural invariants; `test_review_fixes.py` pins specific past code-review
-findings and should gain a case whenever a review turns one up.
+findings and should gain a case whenever a review turns one up; `test_frontends.py` pins what the CLI
+and the UI must agree on — the stream parser, the shared brief, and the terminal output the refactor
+must not have moved. Its four `AppTest` cases run the Streamlit script headlessly and
+`pytest.importorskip("streamlit")` out when the `ui` extra is absent, which is the case in CI. A
+Streamlit app fails at run time rather than import time, so those are the only thing that would catch
+a bad layout call — run them locally (`uv sync --extra ui`) before touching `streamlit_app.py`.
 
 ## Domain rules baked into the prompts
 
