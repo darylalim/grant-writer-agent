@@ -60,6 +60,11 @@ submission-bound file at the approval prompt rather than just the path, and it
 counts the unresolved `[NEEDS INPUT]` markers across the drafts — the number
 that says how much human input the proposal is still waiting on.
 
+That preview defaults to **source**, with a toggle to read it rendered. What
+you approve has to be the bytes that get written: rendered markdown shows a
+citation's link text and not its URL, which is the one thing worth checking at
+the moment you are asked to sign off on a submission.
+
 The app lives outside `src/`, so the package itself never imports streamlit —
 installing the console script pulls in no web dependencies. The flip side is
 that `streamlit_app.py` is not in the wheel either, which is why streamlit is a
@@ -171,7 +176,7 @@ every number, and every citation.
 
 ```bash
 uv sync                     # installs the dev group, streamlit included
-uv run pytest tests/ -q     # 115 offline tests, no API calls
+uv run pytest tests/ -q     # 118 offline tests, no API calls
 uvx ruff check src/ tests/ streamlit_app.py
 ```
 

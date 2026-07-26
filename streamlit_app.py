@@ -107,6 +107,9 @@ st.session_state.setdefault("phase", IDLE)
 st.session_state.setdefault("payload", None)
 st.session_state.setdefault("active_app_id", "")
 st.session_state.setdefault("error", "")
+# Bumped on every resume, and mixed into the approval widgets' keys so each
+# interrupt gets its own. See `resume_with`.
+st.session_state.setdefault("approval_round", 0)
 
 # A script run that is stopped mid-stream -- the toolbar's Stop button, or any
 # widget interaction, which aborts the current pass at the next element call --
@@ -194,6 +197,11 @@ def resume_with(decisions: list[dict]) -> None:
     """
     st.session_state.payload = Command(resume={"decisions": decisions})
     st.session_state.phase = RUNNING
+    # Retires this round's approval widgets. Their keys carry the counter, so
+    # bumping it hands the next interrupt a blank reason box and a fresh set of
+    # view toggles rather than the previous file's leftovers. Safe here and not
+    # in the panel: `approval_round` is plain state, not a widget key.
+    st.session_state.approval_round += 1
     st.rerun()
 
 
@@ -230,18 +238,46 @@ def approval_panel(requests: list[dict]) -> None:
             f"{max(len(requests), 1)} write(s) to `final/`. These are the "
             "submission-bound files — read each one before approving."
         )
-        for request in requests:
+        for index, request in enumerate(requests):
             args = request.get("args") or {}
             path = args.get("file_path") or "(unknown path)"
             with st.expander(f"{request.get('name', '?')} → {path}"):
                 content = args.get("content")
-                if content:
+                if not content:
+                    st.json(args)
+                    continue
+                # Source is the default, and the reason is not stylistic.
+                # st.markdown *transforms* what it is given: a citation whose
+                # link text and URL disagree shows only the text, heading
+                # levels and whitespace normalise away, and `:red[...]` or
+                # `$...$` are read as directives. This is the one moment a
+                # human vets a submission-bound file, and approving a rendered
+                # view approves something other than the bytes that get
+                # written. Deselecting the control returns None, which lands
+                # on source too.
+                view = st.segmented_control(
+                    "View",
+                    ("Source", "Rendered"),
+                    default="Source",
+                    key=f"view_{st.session_state.approval_round}_{index}",
+                    label_visibility="collapsed",
+                )
+                if view == "Rendered":
                     st.markdown(content)
                 else:
-                    st.json(args)
+                    st.code(content, language="markdown", wrap_lines=True)
         reason = st.text_input(
             "Reason",
-            key="reject_reason",
+            # Keyed per resume, not a fixed "reject_reason". A turn can
+            # interrupt again immediately -- one interrupt per file under
+            # final/ -- and a widget whose key is stable across that keeps its
+            # value, so rejecting narrative.md with "budget is wrong" left that
+            # text sitting in the box for budget.md. Clicking Reject again sent
+            # the previous file's complaint, and the agent then fixed the wrong
+            # thing. Session state cannot be cleared in `resume_with` instead:
+            # the widget is already instantiated by then, and Streamlit refuses
+            # to modify a live widget's key.
+            key=f"reject_reason_{st.session_state.approval_round}",
             placeholder="Sent back to the agent if you reject.",
         )
         with st.container(horizontal=True):

@@ -449,8 +449,102 @@ def test_the_approval_panel_renders_every_pending_write(monkeypatch):
     assert "Approval required" in {sub.value for sub in app.subheader}
     # Both writes are offered, and the count is per request, not per interrupt.
     assert any("2 write(s)" in caption.value for caption in app.caption)
-    assert "Drafted text." in " ".join(block.value for block in app.markdown)
     assert {"Approve", "Reject"} <= {button.label for button in app.button}
+    # Shown as source, not rendered: what is approved has to be the bytes that
+    # get written. A rendered view hides exactly the things worth checking on a
+    # submission -- a citation whose link text and URL disagree, most of all.
+    assert "# Narrative" in " ".join(block.value for block in app.code)
+    assert "Drafted text." not in " ".join(block.value for block in app.markdown)
+
+
+def test_the_approval_preview_can_still_be_read_as_prose(monkeypatch):
+    """Source is the default, but a grant narrative is prose and monospace is a
+    poor way to read two pages of it. The toggle exists so the safe default
+    does not cost readability -- and so the rendered view is a deliberate act
+    rather than what the reviewer is handed."""
+    requests = [
+        {
+            "name": "write_file",
+            "args": {
+                "file_path": "/applications/x/final/narrative.md",
+                "content": "# Narrative\n\nDrafted text.",
+            },
+        }
+    ]
+    agent = SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[
+                SimpleNamespace(
+                    interrupts=[SimpleNamespace(value={"action_requests": requests})]
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-view"
+    app.run()
+
+    control = app.segmented_control[0]
+    assert control.value == "Source"
+    control.set_value("Rendered").run()
+
+    assert not app.exception
+    assert "Drafted text." in " ".join(block.value for block in app.markdown)
+
+
+def test_the_rejection_reason_does_not_leak_into_the_next_interrupt(monkeypatch):
+    """A turn interrupts once per file under `final/`, so the panel is redrawn
+    for the next file straight after a resume. With a fixed widget key the box
+    kept its text across that: rejecting narrative.md with "budget is wrong"
+    left that sitting in the box for budget.md, and a second Reject sent the
+    previous file's complaint, so the agent fixed the wrong thing. The keys
+    carry `approval_round`, which `resume_with` bumps.
+    """
+    sent = []
+
+    class _Agent:
+        def get_state(self, _config):
+            requests = [{"name": "write_file", "args": {"file_path": "/f/next.md"}}]
+            return SimpleNamespace(
+                tasks=[
+                    SimpleNamespace(
+                        interrupts=[
+                            SimpleNamespace(value={"action_requests": requests})
+                        ]
+                    )
+                ]
+            )
+
+        def stream(self, payload, **_kwargs):
+            sent.append(payload)
+            # Interrupts again immediately, on the turn's next final/ write.
+            return iter([{"__interrupt__": ()}])
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: _Agent())
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-reason"
+    app.run()
+
+    first = f"reject_reason_{app.session_state['approval_round']}"
+    app.text_input(key=first).set_value("budget is wrong")
+    next(button for button in app.button if button.label == "Reject").click().run()
+
+    assert not app.exception
+    assert sent[0].resume == {
+        "decisions": [{"type": "reject", "message": "budget is wrong"}]
+    }
+    # Parked on the next file's approval, with a box that says nothing about it.
+    assert app.session_state["phase"] == "awaiting"
+    second = f"reject_reason_{app.session_state['approval_round']}"
+    assert second != first
+    assert app.text_input(key=second).value == ""
 
 
 def test_approving_resumes_the_graph_from_inside_the_fragment(monkeypatch):
