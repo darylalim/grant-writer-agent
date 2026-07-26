@@ -6,6 +6,7 @@ reintroduces it fails here rather than silently in production.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from types import SimpleNamespace
 
@@ -20,8 +21,17 @@ from grant_writer.backends import (
     seed_store_from_disk,
 )
 from grant_writer.cli import _build_parser, _resolve_interrupt
-from grant_writer.config import _resolve_root
+from grant_writer.config import Settings, _resolve_root, application_dir
 from grant_writer.tools import build_search_tool
+from grant_writer.workspace import (
+    NO_VERDICT,
+    application_files,
+    compliance_verdict,
+    count_gaps,
+    modified_at,
+    read_bytes,
+    read_text,
+)
 
 # ---- ① --no-search actually disables search --------------------------------
 
@@ -227,3 +237,105 @@ def test_resolve_root_finds_repo_without_env(monkeypatch):
     monkeypatch.delenv("GRANT_WRITER_ROOT", raising=False)
     root = _resolve_root()
     assert (root / "skills").is_dir()
+
+
+# ---- ⑦ a user-supplied application id cannot escape applications/ ----------
+
+
+@pytest.mark.parametrize(
+    "app_id",
+    [
+        "/Users/me/.ssh",  # absolute: pathlib discards the base entirely
+        "../../../tmp/evil",
+        "..",
+        ".",
+        "nsf/../../etc",
+        "nsf\\..\\..",
+        "",
+        "   ",
+    ],
+)
+def test_application_dir_rejects_ids_that_leave_the_tree(app_id, tmp_path):
+    """The UI joins this onto a real path and writes an upload there.
+
+    `Path("/repo/applications") / "/etc/x"` is `/etc/x` -- the left operand is
+    discarded -- so an unvalidated id is an arbitrary-write, and on the read
+    side an id of ".." lists the repo root and offers `.env` for download.
+    """
+    with pytest.raises(ValueError, match=r"application id|outside applications"):
+        application_dir(Settings(root=tmp_path), app_id)
+
+
+@pytest.mark.parametrize("app_id", ["nsf-aisl-2026", "NSF_26.v2", "a", "2026"])
+def test_application_dir_accepts_plain_ids_and_stays_inside(app_id, tmp_path):
+    settings = Settings(root=tmp_path)
+    resolved = application_dir(settings, app_id)
+    assert resolved.is_relative_to(settings.applications_path.resolve())
+    assert resolved.name == app_id
+
+
+def test_application_dir_strips_surrounding_whitespace(tmp_path):
+    settings = Settings(root=tmp_path)
+    assert application_dir(settings, "  nsf-26  ").name == "nsf-26"
+
+
+# ---- ⑧ the compliance verdict shown is the current one ---------------------
+
+
+def test_verdict_prefers_the_newest_review_not_the_first_sorted(tmp_path):
+    """`review/` gains a report per pass; a stale NOT-READY must not outlive
+    the fixes that cleared it."""
+    review = tmp_path / "review"
+    review.mkdir()
+    old = review / "compliance-01.md"
+    new = review / "compliance-02.md"
+    old.write_text("Verdict: NOT-READY", encoding="utf-8")
+    new.write_text("Verdict: SUBMIT-READY", encoding="utf-8")
+    os.utime(old, (1_000_000, 1_000_000))
+    os.utime(new, (2_000_000, 2_000_000))
+
+    # Alphabetically `old` sorts first, so first-match-wins would return it.
+    assert compliance_verdict(application_files(tmp_path)) == "SUBMIT-READY"
+
+
+def test_verdict_takes_the_last_token_not_a_passing_mention(tmp_path):
+    """COMPLIANCE_PROMPT puts the verdict at the end; the prose above it can
+    legitimately name the other one."""
+    review = tmp_path / "review"
+    review.mkdir()
+    (review / "compliance.md").write_text(
+        "The draft is no longer NOT-READY.\n\nVerdict: SUBMIT-READY\n",
+        encoding="utf-8",
+    )
+    assert compliance_verdict(application_files(tmp_path)) == "SUBMIT-READY"
+
+
+def test_verdict_is_absent_when_no_review_states_one(tmp_path):
+    review = tmp_path / "review"
+    review.mkdir()
+    (review / "notes.md").write_text("Still working through it.", encoding="utf-8")
+    assert compliance_verdict(application_files(tmp_path)) == NO_VERDICT
+
+
+def test_gaps_exclude_the_review_that_collects_them(tmp_path):
+    """The reviewer's job is to gather every marker, so counting its report
+    would double each gap it found."""
+    (tmp_path / "sections").mkdir()
+    (tmp_path / "review").mkdir()
+    (tmp_path / "sections" / "need.md").write_text(
+        "[NEEDS INPUT: baseline data?] and [NEEDS INPUT: indirect rate?]",
+        encoding="utf-8",
+    )
+    (tmp_path / "review" / "gaps.md").write_text(
+        "[NEEDS INPUT: baseline data?]\n[NEEDS INPUT: indirect rate?]",
+        encoding="utf-8",
+    )
+    assert count_gaps(application_files(tmp_path)) == 2
+
+
+def test_workspace_readers_tolerate_a_vanished_file(tmp_path):
+    """The listing is a snapshot and the agent keeps writing."""
+    missing = tmp_path / "gone.md"
+    assert read_text(missing) == ""
+    assert read_bytes(missing) is None
+    assert modified_at(missing) == 0.0

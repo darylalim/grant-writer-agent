@@ -13,6 +13,7 @@ from grant_writer.activity import (
     MESSAGE,
     PLAN,
     TOOL,
+    approval_decisions,
     iter_activity,
     pending_action_requests,
 )
@@ -66,11 +67,12 @@ def _resolve_interrupt(agent, config: dict) -> dict | None:
     except (EOFError, KeyboardInterrupt):
         return None
     if answer.startswith("a"):
-        return {"decisions": [{"type": "approve"} for _ in range(n)]}
+        return {"decisions": approval_decisions(requests, approve=True)}
     if answer.startswith("r"):
         reason = input("reason (sent back to the agent): ").strip()
-        decision = {"type": "reject", "message": reason or "Rejected."}
-        return {"decisions": [dict(decision) for _ in range(n)]}
+        return {
+            "decisions": approval_decisions(requests, approve=False, message=reason)
+        }
     return None
 
 

@@ -60,10 +60,15 @@ submission-bound file at the approval prompt rather than just the path, and it
 counts the unresolved `[NEEDS INPUT]` markers across the drafts — the number
 that says how much human input the proposal is still waiting on.
 
-`streamlit` is an optional extra and lives outside `src/`, so the package never
-imports it and a plain `uv sync` is unaffected. Approvals default to **on**
-here: the CLI leaves `--approve` off because each prompt costs you a context
-switch, and in a UI it costs one click.
+`streamlit` is an optional extra and the app lives outside `src/`, so the
+package itself never imports it — installing the console script pulls in no web
+dependencies. Approvals default to **on** here: the CLI leaves `--approve` off
+because each prompt costs you a context switch, and in a UI it costs one click.
+
+The application id is validated before it is joined onto a path
+(`config.application_dir`). It names a directory and the app writes your upload
+into it, so an id like `../..` or an absolute path would otherwise read and
+write anywhere on disk — `Path("applications") / "/etc/x"` is just `/etc/x`.
 
 ## Architecture
 
@@ -157,15 +162,16 @@ every number, and every citation.
 ## Development
 
 ```bash
-uv run pytest tests/ -q     # 82 offline tests, no API calls
+uv sync --extra ui          # developing needs the extra; see below
+uv run pytest tests/ -q     # 111 offline tests, no API calls
 uvx ruff check src/ tests/ streamlit_app.py
 ```
 
-The four `AppTest` cases in `test_frontends.py` run the Streamlit script
-headlessly and skip unless the `ui` extra is installed — a Streamlit app fails
-at run time, not import time, so nothing else would catch a bad layout call.
-CI does not install the extra, so those four skip there; add `--extra ui` to
-the workflow's `uv sync` if you want them enforced on every push.
+**Install the `ui` extra to develop, even if you only touch the CLI.** The
+`AppTest` cases in `test_frontends.py` run the Streamlit script headlessly and
+`importorskip` out without it, and ty resolves imports statically — so
+`tests/` importing streamlit makes the type check report an extra diagnostic
+and trip the baseline. CI installs it for both reasons.
 
 CI runs both on every push and pull request, against Python 3.13 and 3.14, plus
 `ruff format --check` and `ty` held at its two-diagnostic baseline. ruff and ty

@@ -26,12 +26,25 @@ from grant_writer.activity import (
     PLAN,
     TOOL,
     Event,
+    approval_decisions,
     iter_activity,
     pending_action_requests,
 )
 from grant_writer.agent import build_agent
-from grant_writer.config import BackendProfile, persistent_settings, require_api_keys
+from grant_writer.config import (
+    BackendProfile,
+    application_dir,
+    persistent_settings,
+    require_api_keys,
+)
 from grant_writer.prompts import draft_request
+from grant_writer.workspace import (
+    application_files,
+    compliance_verdict,
+    count_gaps,
+    read_bytes,
+    read_text,
+)
 
 st.set_page_config(
     page_title="Grant writer",
@@ -46,7 +59,12 @@ st.set_page_config(
 # This is only safe because the pending interrupt lives in the checkpointer,
 # not in the agent object -- the graph can be rebuilt on any rerun and
 # Command(resume=...) still lands on the right call.
-IDLE, RUNNING, AWAITING, DONE, FAILED = "idle", "running", "awaiting", "done", "failed"
+IDLE = "idle"
+RUNNING = "running"
+AWAITING = "awaiting"
+DONE = "done"
+FAILED = "failed"
+STOPPED = "stopped"
 
 SUBAGENT_ICONS = {
     "funder-researcher": ":material/travel_explore:",
@@ -73,24 +91,30 @@ TODO_ICONS = {
 }
 PENDING_TODO_ICON = ":gray[:material/radio_button_unchecked:]"
 
-# The order WORKSPACE_CONVENTIONS lays out an application directory in, so the
-# file list reads the way the agent works rather than alphabetically.
-DIRECTORY_ORDER = (
-    "rfp.md",
-    "requirements.md",
-    "research",
-    "sections",
-    "review",
-    "final",
-)
-
+# Which files render inline as markdown. Anything else is offered as a
+# download, so a stray binary cannot be pushed through st.markdown.
 TEXT_SUFFIXES = {".md", ".txt", ".json", ".csv", ".yaml", ".yml"}
+
+# A long run can emit thousands of events, and every rerun -- each keystroke in
+# the reason box, each file click -- replays the whole feed. Keep all of them in
+# state, draw only the tail.
+MAX_RENDERED_EVENTS = 250
 
 st.session_state.setdefault("activity", [])
 st.session_state.setdefault("phase", IDLE)
 st.session_state.setdefault("payload", None)
 st.session_state.setdefault("active_app_id", "")
 st.session_state.setdefault("error", "")
+
+# A script run that is stopped mid-stream -- the toolbar's Stop button, or any
+# widget interaction, which aborts the current pass at the next element call --
+# leaves `phase` at RUNNING with its payload already consumed. Streamlit raises
+# those as BaseException subclasses (RerunException, StopException) precisely so
+# `except Exception` cannot swallow them, so the run block's handler never sees
+# it. Without this the app is wedged: no turn can start because the payload is
+# gone, and the submit button stays disabled because the phase still says busy.
+if st.session_state.phase == RUNNING and st.session_state.payload is None:
+    st.session_state.phase = STOPPED
 
 
 @st.cache_resource(show_spinner=False)
@@ -103,6 +127,13 @@ def get_agent(profile: BackendProfile, approve: bool, search: bool) -> Any:
     per rerun. Toggling a sidebar setting rebuilds the graph, but the thread's
     history and any pending approval live in the checkpoint file, so nothing
     in flight is lost.
+
+    The cache holds one agent per (profile, approve, search) combination and
+    never evicts, so it tops out at eight SQLite connections held open for the
+    process -- bounded, but the reason this is a single-user local tool rather
+    than something to put behind a shared URL. Two viewers also share one graph
+    object, so a sidebar toggle in one tab changes which agent the other tab's
+    pending approval resumes through.
     """
     return build_agent(
         persistent_settings(
@@ -156,54 +187,13 @@ def resume_with(decisions: list[dict]) -> None:
     st.rerun()
 
 
-def application_files(app_dir: Path) -> list[Path]:
-    """Every file in an application directory, in workspace order."""
-    if not app_dir.is_dir():
-        return []
-
-    def sort_key(path: Path) -> tuple[int, str]:
-        head = path.relative_to(app_dir).parts[0]
-        rank = (
-            DIRECTORY_ORDER.index(head)
-            if head in DIRECTORY_ORDER
-            else len(DIRECTORY_ORDER)
-        )
-        return rank, str(path.relative_to(app_dir))
-
-    return sorted((p for p in app_dir.rglob("*") if p.is_file()), key=sort_key)
-
-
-def read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ""
-
-
-def count_gaps(files: list[Path]) -> int:
-    """Unresolved `[NEEDS INPUT: ...]` markers across the drafts.
-
-    The single most important number on this page: every one of these is a
-    fact the agent refused to invent and a human still has to supply.
-    """
-    return sum(
-        read_text(path).count("[NEEDS INPUT")
-        for path in files
-        if path.suffix == ".md" and path.parent.name != "review"
-    )
-
-
-def compliance_verdict(files: list[Path]) -> str:
-    """The compliance reviewer's verdict, as it wrote it."""
-    for path in files:
-        if path.parent.name != "review":
-            continue
-        body = read_text(path)
-        if "NOT-READY" in body:
-            return "NOT-READY"
-        if "SUBMIT-READY" in body:
-            return "SUBMIT-READY"
-    return "—"
+def render_feed(events: list[Event]) -> None:
+    """Draw the tail of the activity log into the current container."""
+    elided = len(events) - MAX_RENDERED_EVENTS
+    if elided > 0:
+        st.caption(f"{elided} earlier event(s) hidden.")
+    for event in events[-MAX_RENDERED_EVENTS:]:
+        render_event(event)
 
 
 # --- Sidebar: run settings ---------------------------------------------------
@@ -305,18 +295,27 @@ status_slot = st.container()
 results_slot = st.container()
 
 if submitted:
-    if not app_id.strip():
-        st.session_state.error = "An application id is required."
-        st.session_state.phase = FAILED
-    else:
-        app_id = app_id.strip()
+    app_id = app_id.strip()
+    try:
+        if not app_id:
+            msg = "An application id is required."
+            raise ValueError(msg)
+
+        # `application_dir` is the boundary. Joining the raw id would escape
+        # `applications/` outright: pathlib discards the left operand for an
+        # absolute right one, so an id of "/Users/me/.ssh" writes there.
+        app_dir = application_dir(settings, app_id)
+
         rfp_path = None
         if rfp is not None:
             # Keep the source PDF beside the drafts rather than in a temp file,
             # so the same app id works again tomorrow. Written by the app, not
-            # the agent, so it is not subject to FilesystemPermission.
-            target = settings.applications_path / app_id / rfp.name
-            target.parent.mkdir(parents=True, exist_ok=True)
+            # the agent, so FilesystemPermission does not cover it -- which is
+            # exactly why the id and the upload name are both bounded here.
+            # `rfp.name` is client-supplied; take its last component only.
+            filename = Path(rfp.name).name or "solicitation.pdf"
+            target = app_dir / filename
+            app_dir.mkdir(parents=True, exist_ok=True)
             target.write_bytes(rfp.getvalue())
             rfp_path = str(target)
 
@@ -336,7 +335,13 @@ if submitted:
         if rubric is not None:
             # RubricMiddleware is dormant until this key is in invocation state.
             payload["rubric"] = rubric.getvalue().decode("utf-8")
-
+    except (ValueError, OSError, UnicodeDecodeError) as exc:
+        # Everything above touches user input or the disk. Route failures
+        # through the app's own error banner rather than a raw traceback,
+        # which would also leave phase and payload half-set.
+        st.session_state.error = str(exc)
+        st.session_state.phase = FAILED
+    else:
         st.session_state.activity = []
         st.session_state.error = ""
         st.session_state.active_app_id = app_id
@@ -349,8 +354,7 @@ with activity_slot:
     st.subheader("Activity", anchor=False)
     feed = st.container(height=440, border=True, autoscroll=True)
     with feed:
-        for event in st.session_state.activity:
-            render_event(event)
+        render_feed(st.session_state.activity)
         if not st.session_state.activity and st.session_state.phase != RUNNING:
             st.caption("Nothing yet. Submit a solicitation above to start a run.")
     st.caption(
@@ -388,9 +392,8 @@ with status_slot:
         agent = get_agent(profile, approve, search)
         config = {"configurable": {"thread_id": st.session_state.active_app_id}}
         requests = pending_action_requests(agent, config)
-        # One decision per action request, not per interrupt: the middleware
-        # bundles a turn's interrupted calls into one interrupt and resume
-        # requires the counts to match.
+        # `approval_decisions` owns the count, shared with the CLI prompt: one
+        # decision per action request, not per interrupt.
         count = max(len(requests), 1)
 
         with st.container(border=True):
@@ -415,12 +418,19 @@ with status_slot:
             )
             with st.container(horizontal=True):
                 if st.button("Approve", type="primary", icon=":material/check:"):
-                    resume_with([{"type": "approve"} for _ in range(count)])
+                    resume_with(approval_decisions(requests, approve=True))
                 if st.button("Reject", icon=":material/close:"):
-                    message = reason.strip() or "Rejected."
                     resume_with(
-                        [{"type": "reject", "message": message} for _ in range(count)]
+                        approval_decisions(requests, approve=False, message=reason)
                     )
+
+    elif st.session_state.phase == STOPPED:
+        st.warning(
+            f"Run stopped before it finished. Progress for "
+            f"`{st.session_state.active_app_id}` is checkpointed — submit the "
+            "same application id to carry on from where it left off.",
+            icon=":material/pause_circle:",
+        )
 
     elif st.session_state.phase == DONE:
         st.success(
@@ -446,43 +456,53 @@ with results_slot:
     elif not browse_id:
         st.caption("Enter an application id to browse its files.")
     else:
-        app_dir = settings.applications_path / browse_id
-        files = application_files(app_dir)
-        if not files:
-            st.caption(f"Nothing in `applications/{browse_id}/` yet.")
+        try:
+            # Same boundary as the write side, and it matters more here: without
+            # it an id of ".." lists the repo root, and the download branch
+            # below would hand `.env` -- live API keys -- to the browser.
+            app_dir = application_dir(settings, browse_id)
+        except ValueError as exc:
+            st.warning(str(exc), icon=":material/warning:")
         else:
-            with st.container(horizontal=True):
-                st.metric("Files", len(files), border=True)
-                st.metric(
-                    "Needs input",
-                    count_gaps(files),
-                    border=True,
-                    help="Unresolved `[NEEDS INPUT]` markers — facts the agent "
-                    "refused to invent and a human must supply.",
-                )
-                st.metric(
-                    "Compliance",
-                    compliance_verdict(files),
-                    border=True,
-                    help="The compliance reviewer's verdict, from `review/`.",
-                )
-
-            names = [str(path.relative_to(app_dir)) for path in files]
-            picker_col, content_col = st.columns([1, 2], vertical_alignment="top")
-            with picker_col, st.container(height=480, border=True):
-                selected = st.radio(
-                    "File", names, key="file_pick", label_visibility="collapsed"
-                )
-            with content_col, st.container(height=480, border=True):
-                chosen = app_dir / selected
-                if chosen.suffix == ".pdf":
-                    st.pdf(chosen.read_bytes(), height=430)
-                elif chosen.suffix in TEXT_SUFFIXES:
-                    st.markdown(read_text(chosen))
-                else:
-                    st.download_button(
-                        "Download",
-                        chosen.read_bytes(),
-                        file_name=chosen.name,
-                        icon=":material/download:",
+            files = application_files(app_dir)
+            if not files:
+                st.caption(f"Nothing in `applications/{browse_id}/` yet.")
+            else:
+                with st.container(horizontal=True):
+                    st.metric("Files", len(files), border=True)
+                    st.metric(
+                        "Needs input",
+                        count_gaps(files),
+                        border=True,
+                        help="Unresolved `[NEEDS INPUT]` markers — facts the "
+                        "agent refused to invent and a human must supply.",
                     )
+                    st.metric(
+                        "Compliance",
+                        compliance_verdict(files),
+                        border=True,
+                        help="The compliance reviewer's latest verdict, from "
+                        "`review/`.",
+                    )
+
+                names = [str(path.relative_to(app_dir)) for path in files]
+                picker_col, content_col = st.columns([1, 2], vertical_alignment="top")
+                with picker_col, st.container(height=480, border=True):
+                    selected = st.radio(
+                        "File", names, key="file_pick", label_visibility="collapsed"
+                    )
+                with content_col, st.container(height=480, border=True):
+                    chosen = app_dir / selected
+                    if chosen.suffix in TEXT_SUFFIXES:
+                        st.markdown(read_text(chosen))
+                    elif (blob := read_bytes(chosen)) is None:
+                        st.caption("That file is no longer on disk.")
+                    elif chosen.suffix == ".pdf":
+                        st.pdf(blob, height=430)
+                    else:
+                        st.download_button(
+                            "Download",
+                            blob,
+                            file_name=chosen.name,
+                            icon=":material/download:",
+                        )

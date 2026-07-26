@@ -19,6 +19,7 @@ from grant_writer.activity import (
     MESSAGE,
     PLAN,
     TOOL,
+    approval_decisions,
     iter_activity,
     pending_action_requests,
 )
@@ -199,18 +200,56 @@ def test_pending_action_requests_flattens_across_interrupts():
     assert len(pending_action_requests(agent, {})) == 2
 
 
+@pytest.mark.parametrize("n", [0, 1, 2, 5])
+def test_approval_decisions_returns_one_decision_per_request(n):
+    """Both frontends build the resume payload here. A count that disagrees
+    with the interrupted calls is rejected on resume, and zero requests still
+    needs one decision -- the floor the CLI has always applied."""
+    requests = [{"name": "write_file"} for _ in range(n)]
+    approved = approval_decisions(requests, approve=True)
+    assert len(approved) == max(n, 1)
+    assert all(decision == {"type": "approve"} for decision in approved)
+
+
+def test_approval_decisions_carries_the_rejection_reason():
+    rejected = approval_decisions([{}, {}], approve=False, message="  fix the budget ")
+    assert [d["type"] for d in rejected] == ["reject", "reject"]
+    assert all(d["message"] == "fix the budget" for d in rejected)
+
+
+def test_rejection_without_a_reason_still_says_something():
+    (decision,) = approval_decisions([], approve=False, message="   ")
+    assert decision == {"type": "reject", "message": "Rejected."}
+
+
+def test_approval_decisions_are_independent_objects():
+    """`[{...}] * n` would alias one dict; mutating one would mutate all."""
+    decisions = approval_decisions([{}, {}], approve=True)
+    decisions[0]["type"] = "reject"
+    assert decisions[1]["type"] == "approve"
+
+
 # ---- ⑤ the UI renders at all ------------------------------------------------
 
 
-def _app_test():
+def _app_test(monkeypatch=None):
     """The real Streamlit script, ready to run headlessly.
 
     Skipped unless the `ui` extra is installed, since it is optional and the
     core package must never import streamlit.
+
+    Pass `monkeypatch` to force the credential check to pass. Without it the
+    app's behaviour depends on whether the developer has a dotenv -- conftest
+    blanks TAVILY_API_KEY, so on a clean checkout every case would render the
+    disabled-button state and never exercise the app in its normal one.
     """
     pytest.importorskip("streamlit", reason="install with `uv sync --extra ui`")
     from streamlit.testing.v1 import AppTest
 
+    if monkeypatch is not None:
+        monkeypatch.setattr(
+            "grant_writer.config.require_api_keys", lambda **_kwargs: []
+        )
     return AppTest.from_file(str(PROJECT_ROOT / "streamlit_app.py"), default_timeout=60)
 
 
@@ -247,16 +286,49 @@ def test_every_activity_event_kind_renders():
     assert "Draft complete." in rendered
 
 
-def test_a_run_cannot_start_without_an_application_id():
+def test_a_run_cannot_start_without_an_application_id(monkeypatch):
     """It doubles as the thread id; a blank one would checkpoint to nowhere."""
-    app = _app_test()
+    app = _app_test(monkeypatch)
     app.run()
+    assert not app.button[0].disabled  # the app is in its normal, runnable state
     app.button[0].click().run()
 
     assert not app.exception
     assert app.session_state["phase"] == "failed"
     assert app.session_state["payload"] is None
     assert any("application id is required" in e.value for e in app.error)
+
+
+@pytest.mark.parametrize("app_id", ["../evil", "/tmp/evil", "nsf/../.."])
+def test_the_ui_refuses_an_application_id_that_escapes_the_tree(monkeypatch, app_id):
+    """The submit handler writes the uploaded PDF to this path itself, outside
+    FilesystemPermission, so the boundary has to hold here too."""
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value(app_id)
+    app.button[0].click().run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "failed"
+    assert app.session_state["payload"] is None
+    assert any("invalid application id" in e.value for e in app.error)
+
+
+def test_a_stopped_run_does_not_wedge_the_app(monkeypatch):
+    """Streamlit aborts a script pass with a BaseException the run block's
+    `except Exception` cannot see, leaving phase=RUNNING and no payload. Before
+    the reset, the submit button stayed disabled with no way back."""
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "running"
+    app.session_state["payload"] = None
+    app.session_state["active_app_id"] = "wedged-run"
+    app.run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "stopped"
+    assert not app.button[0].disabled
+    assert any("checkpointed" in warning.value for warning in app.warning)
 
 
 def test_missing_api_keys_disable_the_run_button(monkeypatch):

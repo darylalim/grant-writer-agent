@@ -15,9 +15,13 @@ uvx ruff format --check src/ tests/ streamlit_app.py   # ruff's default 88-col
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
 uv run grant-writer chat --app-id X           # resume the same thread
 
-uv sync --extra ui                            # optional Streamlit front end
+uv sync --extra ui                            # required to develop, not just to run the UI
 uv run --extra ui streamlit run streamlit_app.py
 ```
+
+Install the `ui` extra even when working only on the CLI. `tests/` imports streamlit, and ty
+resolves imports statically, so without it the ty hook reports 3 diagnostics and blocks every
+Python edit — and the `AppTest` cases skip, which is the only coverage `streamlit_app.py` has.
 
 When working with Python, invoke the relevant `/astral:<skill>` — `/astral:uv`, `/astral:ruff`,
 `/astral:ty` — to ensure best practices are followed rather than guessed at. uv is the only
@@ -39,15 +43,24 @@ subagents. Module dependencies flow one way:
 
 ```
 config.py  →  tools.py, prompts.py  →  backends.py, subagents.py  →  agent.py  →  cli.py
-                                                              activity.py  ↗        ↘  streamlit_app.py
+              activity.py, workspace.py  ──────────────────────────────────────↗  streamlit_app.py
 ```
 
-Two frontends sit at the end of that chain, and what they share is deliberate.
-`activity.py` parses the `stream_mode="updates"` chunks, `prompts.draft_request`
-composes the opening brief, and `config.persistent_settings` decides that a
-frontend checkpoints to disk. Each was duplicated logic waiting to happen: a
-renamed `deepagents` key would blank one frontend's labels silently, and a
-kickoff brief that drifts steers the whole run.
+Two frontends sit at the end of that chain, and what they share is deliberate — each item below
+was duplicated logic waiting to happen:
+
+- **`activity.py`** parses the `stream_mode="updates"` chunks and builds the approval decisions.
+  A renamed `deepagents` key blanks a frontend's labels silently; a decision list whose length
+  disagrees with the interrupted calls leaves the graph stuck with no exception raised.
+- **`workspace.py`** reads an application directory back — file listing, `[NEEDS INPUT]` count,
+  compliance verdict. Not presentation logic, and putting it here is what makes it testable: a
+  Streamlit script cannot be imported without executing it.
+- **`prompts.draft_request`** composes the opening brief, which steers the whole run.
+- **`config.persistent_settings`** decides that a frontend checkpoints to disk.
+- **`config.application_dir`** is the boundary for a user-supplied application id. The UI joins it
+  onto a real path and writes an upload there, outside `FilesystemPermission` — and
+  `Path("applications") / "/etc/x"` is `/etc/x`, so an unvalidated id is an arbitrary read/write.
+  This is the third place enforcing that boundary; see invariant 2.
 
 - **`config.py`** is the only module that touches `os.environ`. Model IDs, `PROJECT_ROOT`, and the
   frozen `Settings` dataclass all resolve here. Everything downstream takes `Settings`.
@@ -78,10 +91,13 @@ runs, and still produces plausible output.
 1. **Permission rules are first-match-wins, and no match means allow.** In
    `backends.py::build_permissions`, specific allows must precede the catch-all
    `paths=["/**"], mode="deny"`. Reordering the list silently opens or closes the whole tree.
-2. **`extract_pdf_text` bypasses `FilesystemPermission` entirely** — it writes to the real
-   filesystem, not through the backend. `tools.py::_resolve_output_path` re-implements the same
-   boundary and must be kept in sync with `build_permissions`, including resolving `..` *before*
-   the prefix check.
+2. **Anything writing to the real filesystem bypasses `FilesystemPermission` entirely** — the
+   permission rules only cover writes that go through the backend. Three places do not, and each
+   re-implements the boundary: `tools.py::_resolve_output_path` for `extract_pdf_text`'s output,
+   and `config.py::application_dir` for the application id the UI joins onto a path and saves an
+   upload into. All must stay in sync with `build_permissions`, and all resolve `..` *before* the
+   prefix check — validating the raw string lets `/applications/../src/x` pass and then escape
+   when `..` collapses. A fourth such writer needs the same treatment, not its own variant.
 3. **Custom subagents do not inherit `skills` from the parent.** `subagents.py` passes
    `"skills": [SKILLS_DIR]` explicitly to `section-drafter` and `compliance-checker`. Omit it and
    the drafter still answers — just generically.
@@ -118,18 +134,26 @@ process — swap for `PostgresStore` before deploying.
 
 ## Testing conventions
 
-`tests/conftest.py` sets a dummy `ANTHROPIC_API_KEY`, forces `LANGSMITH_TRACING=false`, and pops
-`TAVILY_API_KEY`, so nothing hits the network. Tests assert on wiring by reaching into deepagents
-internals — `_check_fs_permission`, `supports_execution`,
-`graph.nodes["tools"].bound.tools_by_name`, `get_graph().nodes`. That is intentional (it is the only
-way to catch these failures offline) but brittle: a `deepagents` upgrade may need these updated.
+`tests/conftest.py` sets a dummy `ANTHROPIC_API_KEY`, forces `LANGSMITH_TRACING=false`, and
+**blanks** `TAVILY_API_KEY` rather than popping it, so nothing hits the network. The distinction is
+load-bearing: `config.py` calls `load_dotenv()` at import, which only skips keys already present in
+`os.environ`, so popping handed a developer's real key straight back and the suite behaved one way
+locally and another on a clean checkout. Every consumer tests it with `if not os.getenv(...)`, so an
+empty string reads as absent. Tests that want a key set it with `monkeypatch`.
+
+Tests assert on wiring by reaching into deepagents internals — `_check_fs_permission`,
+`supports_execution`, `graph.nodes["tools"].bound.tools_by_name`, `get_graph().nodes`. That is
+intentional (it is the only way to catch these failures offline) but brittle: a `deepagents` upgrade
+may need these updated.
+
 `test_wiring.py` covers structural invariants; `test_review_fixes.py` pins specific past code-review
 findings and should gain a case whenever a review turns one up; `test_frontends.py` pins what the CLI
-and the UI must agree on — the stream parser, the shared brief, and the terminal output the refactor
-must not have moved. Its four `AppTest` cases run the Streamlit script headlessly and
-`pytest.importorskip("streamlit")` out when the `ui` extra is absent, which is the case in CI. A
-Streamlit app fails at run time rather than import time, so those are the only thing that would catch
-a bad layout call — run them locally (`uv sync --extra ui`) before touching `streamlit_app.py`.
+and the UI must agree on — the stream parser, the approval decisions, the shared brief, and the
+terminal output the refactor must not have moved. Its `AppTest` cases run the Streamlit script
+headlessly, because a Streamlit app fails at run time rather than import time and nothing else would
+catch a bad layout call. They `pytest.importorskip("streamlit")`, so **install the `ui` extra or they
+silently do not run.** Pass `monkeypatch` to `_app_test` when a case needs the app in its normal
+enabled state; otherwise the credential guard renders the disabled-button variant instead.
 
 ## Domain rules baked into the prompts
 

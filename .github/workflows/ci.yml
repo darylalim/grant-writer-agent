@@ -33,9 +33,9 @@ jobs:
       matrix:
         # requires-python is ">=3.13", so 3.14 is claimed and has to be tested or
         # the claim is only an assertion. Verified before being added here: the
-        # lock resolves on 3.14.6 with a wheel for every dependency, all 60 tests
-        # pass, and the console script runs. .python-version (3.13) remains what
-        # local development and a bare `uv run` use.
+        # lock resolves on 3.14.6 with a wheel for every dependency, the whole
+        # suite passes, and the console script runs. .python-version (3.13)
+        # remains what local development and a bare `uv run` use.
         python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,8 +53,12 @@ jobs:
       # makes "someone edited pyproject.toml without re-locking" a CI failure. One
       # lockfile serves both legs -- uv resolves universally across the whole
       # requires-python range rather than per interpreter.
+      # --extra ui installs streamlit. Without it the AppTest cases in
+      # test_frontends.py importorskip out, and they are the only thing that
+      # exercises streamlit_app.py at all -- a Streamlit app fails at run time,
+      # not import time, so skipping them means the UI is untested here.
       - name: Install
-        run: uv sync --locked
+        run: uv sync --locked --extra ui
 
       - name: Test
         run: uv run pytest tests/ -q
@@ -81,18 +85,17 @@ jobs:
       # property of the source, not the runtime, and the ty baseline below was
       # measured there. ruff needs no project install, but ty does -- without the
       # dependencies it cannot resolve deepagents/langgraph and every import
-      # becomes a diagnostic.
+      # becomes a diagnostic. --extra ui is required for the same reason:
+      # tests/test_frontends.py imports streamlit, and ty flags an unresolved
+      # import even inside a function body, which would push the count to 3 and
+      # fail the baseline below on every push.
       - name: Install
-        run: uv sync --locked
+        run: uv sync --locked --extra ui
 
       # Pinned on purpose. [tool.ruff.lint] selects whole families (E, W, F, I,
       # UP, B, SIM, BLE, RUF), so a ruff release that adds a rule to any of them
       # turns CI red on code that did not change. Bump this deliberately, with
       # the fixes in the same commit.
-      # streamlit_app.py is linted but deliberately absent from the ty step
-      # below: ty would have to resolve `import streamlit`, and the `ui` extra
-      # is not installed here. Ruff needs no resolved imports, so the lint gap
-      # closes for free while the type check stays honest about what it can see.
       - name: Lint
         run: uvx ruff@0.16.0 check src/ tests/ streamlit_app.py
 
@@ -110,12 +113,15 @@ jobs:
       # .claude/settings.json -- keep the two in step. That hook counts
       # `^(error|warning)\[` header lines while this reads ty's own summary line;
       # either is fine, but a bump to the pin below should be re-checked against
-      # both, and both drop to 0 if upstream ever fixes theirs.
+      # both, and both drop to 0 if upstream ever fixes theirs. The hook checks
+      # `src/ tests/` and this also checks streamlit_app.py; the count is the
+      # same either way, but both require the `ui` extra to be installed,
+      # because tests/ imports streamlit and ty resolves imports statically.
       - name: Type check
         env:
           TY_BASELINE: 2
         run: |
-          uvx ty@0.0.63 check src/ tests/ > ty.log 2>&1 || true
+          uvx ty@0.0.63 check src/ tests/ streamlit_app.py > ty.log 2>&1 || true
           cat ty.log
 
           count=$(sed -n 's/^Found \([0-9][0-9]*\) diagnostic.*/\1/p' ty.log | tail -1)

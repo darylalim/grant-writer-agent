@@ -123,3 +123,27 @@ def pending_action_requests(agent: Any, config: dict[str, Any]) -> list[dict[str
             if isinstance(value, dict):
                 requests.extend(value.get("action_requests", []) or [])
     return requests
+
+
+def approval_decisions(
+    requests: list[dict[str, Any]],
+    *,
+    approve: bool,
+    message: str = "",
+) -> list[dict[str, Any]]:
+    """One resume decision per pending action request.
+
+    The count is what matters and what is easy to get wrong -- resume rejects a
+    list whose length does not match the interrupted calls. Lives beside
+    `pending_action_requests` so both frontends build the payload the same way;
+    a change to the decision schema that fixed only one of them would leave the
+    other resuming into a stuck graph with no exception raised.
+
+    The floor of one covers a pending interrupt whose requests could not be
+    read, which is how the CLI has always behaved.
+    """
+    count = max(len(requests), 1)
+    if approve:
+        return [{"type": "approve"} for _ in range(count)]
+    reason = message.strip() or "Rejected."
+    return [{"type": "reject", "message": reason} for _ in range(count)]

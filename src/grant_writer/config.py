@@ -7,6 +7,7 @@ here, so the rest of the package never reads ``os.environ`` directly.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -139,6 +140,43 @@ class Settings:
         """Create the directories the agent expects to write into."""
         self.applications_path.mkdir(parents=True, exist_ok=True)
         self.memory_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+# An application id names a directory on disk and doubles as the LangGraph
+# thread id. It is user input in every frontend, so it has to be a single plain
+# path segment: `Path("/repo/applications") / "/etc/passwd"` silently discards
+# the base and yields `/etc/passwd`, and `..` walks out of the tree.
+_SAFE_APP_ID = re.compile(r"\A[A-Za-z0-9._-]+\Z")
+
+
+def application_dir(settings: Settings, app_id: str) -> Path:
+    """Resolve an application id to its directory, refusing anything unsafe.
+
+    Frontends that touch the real filesystem must route through this rather
+    than joining user input inline. `extract_pdf_text` needs the same boundary
+    for a different input (a virtual path from the model) and enforces it in
+    `tools._resolve_output_path`; both use the same ordering -- resolve first,
+    check second -- because validating the raw string lets `..` pass the prefix
+    test and escape when it collapses.
+
+    Raises:
+        ValueError: if the id is empty, not a plain path segment, or would
+            resolve outside `applications/`.
+    """
+    candidate = app_id.strip()
+    if candidate in {".", ".."} or not _SAFE_APP_ID.match(candidate):
+        msg = (
+            f"invalid application id {app_id!r}: use letters, digits, dots, "
+            "dashes, or underscores -- no path separators"
+        )
+        raise ValueError(msg)
+
+    root = settings.applications_path.resolve()
+    resolved = (root / candidate).resolve()
+    if not resolved.is_relative_to(root):
+        msg = f"refusing to resolve {app_id!r} outside applications/"
+        raise ValueError(msg)
+    return resolved
 
 
 def persistent_settings(
