@@ -73,6 +73,11 @@ The application id is validated before it is joined onto a path
 into it, so an id like `../..` or an absolute path would otherwise read and
 write anywhere on disk — `Path("applications") / "/etc/x"` is just `/etc/x`.
 
+Appearance is entirely `.streamlit/config.toml` (a light, neutral theme). The
+app injects no CSS and should not start: theme tokens are the supported way to
+restyle Streamlit, and `st.markdown(..., unsafe_allow_html=True)` styling
+breaks silently across upgrades when the class names it targets change.
+
 ## Architecture
 
 ```
@@ -166,7 +171,7 @@ every number, and every citation.
 
 ```bash
 uv sync                     # installs the dev group, streamlit included
-uv run pytest tests/ -q     # 111 offline tests, no API calls
+uv run pytest tests/ -q     # 115 offline tests, no API calls
 uvx ruff check src/ tests/ streamlit_app.py
 ```
 

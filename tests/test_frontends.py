@@ -245,8 +245,14 @@ def _app_test(monkeypatch=None):
     blanks TAVILY_API_KEY, so on a clean checkout every case would render the
     disabled-button state and never exercise the app in its normal one.
     """
-    pytest.importorskip("streamlit", reason="dev dependency; run `uv sync`")
+    streamlit = pytest.importorskip("streamlit", reason="dev dependency; run `uv sync`")
     from streamlit.testing.v1 import AppTest
+
+    # `get_agent` is `@st.cache_resource`, whose store is global to the process
+    # rather than per-AppTest. A case that patches `build_agent` would otherwise
+    # be handed whichever fake an earlier case cached under the same
+    # (profile, approve, search) key -- passing or failing on test order.
+    streamlit.cache_resource.clear()
 
     if monkeypatch is not None:
         monkeypatch.setattr(
@@ -331,6 +337,128 @@ def test_a_stopped_run_does_not_wedge_the_app(monkeypatch):
     assert app.session_state["phase"] == "stopped"
     assert not app.button[0].disabled
     assert any("checkpointed" in warning.value for warning in app.warning)
+
+
+def test_the_run_button_is_disabled_while_a_turn_is_in_flight(monkeypatch):
+    """`busy` is read near the top of the script, before the submit handler
+    sets the phase, so the pass that starts a run had already drawn the form
+    enabled -- and that same pass is the one that streams the agent for
+    minutes. The handler reruns rather than falling through so the form is
+    redrawn disabled first; this pins the redrawn state. Without the rerun the
+    button stays live for the whole run and a second click aborts it.
+    """
+
+    class _FinishedAgent:
+        """Streams nothing, so the turn ends immediately and offline."""
+
+        def stream(self, *_args, **_kwargs):
+            return iter(())
+
+    # Faking the graph is what lets this drive a real submission: the handler
+    # runs, the phase flips, and the turn completes without a model call.
+    # Asserting on session_state after the fact would pin nothing -- the state
+    # is identical either way, and it is the *drawn* button that regressed.
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _FinishedAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-inflight")
+    app.button[0].click().run()
+
+    assert not app.exception
+    assert app.button[0].disabled
+
+
+def test_the_approval_panel_renders_every_pending_write(monkeypatch):
+    """The panel is an `st.fragment`, and fragment misuse -- a bad rerun scope,
+    or writing into a container it was never called in -- raises at run time,
+    not import time. Nothing else in the suite reaches AWAITING, so without
+    this a refactor here ships a dead approval prompt standing in front of a
+    submission-bound file.
+    """
+    requests = [
+        {
+            "name": "write_file",
+            "args": {
+                "file_path": "/applications/x/final/narrative.md",
+                # The content branch: the UI shows the drafted text at the
+                # prompt, which is the thing the CLI cannot do.
+                "content": "# Narrative\n\nDrafted text.",
+            },
+        },
+        # No `content`, so this one falls to the st.json branch.
+        {
+            "name": "write_file",
+            "args": {"file_path": "/applications/x/final/budget.md"},
+        },
+    ]
+    agent = SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[
+                SimpleNamespace(
+                    interrupts=[SimpleNamespace(value={"action_requests": requests})]
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-approval"
+    app.run()
+
+    assert not app.exception
+    assert "Approval required" in {sub.value for sub in app.subheader}
+    # Both writes are offered, and the count is per request, not per interrupt.
+    assert any("2 write(s)" in caption.value for caption in app.caption)
+    assert "Drafted text." in " ".join(block.value for block in app.markdown)
+    assert {"Approve", "Reject"} <= {button.label for button in app.button}
+
+
+def test_approving_resumes_the_graph_from_inside_the_fragment(monkeypatch):
+    """`resume_with` reruns from inside the approval fragment, where the
+    default `scope="app"` is load-bearing. A fragment-scoped rerun is *legal*
+    there and would redraw the buttons while the graph stayed parked on its
+    interrupt: a dead Approve button and no exception. Rendering the panel
+    proves nothing about this -- only clicking through does.
+    """
+    resumed = []
+
+    class _Agent:
+        def get_state(self, _config):
+            requests = [{"name": "write_file", "args": {"file_path": "/f/a.md"}}]
+            return SimpleNamespace(
+                tasks=[
+                    SimpleNamespace(
+                        interrupts=[
+                            SimpleNamespace(value={"action_requests": requests})
+                        ]
+                    )
+                ]
+            )
+
+        def stream(self, payload, **_kwargs):
+            resumed.append(payload)
+            return iter(())
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: _Agent())
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-resume"
+    app.run()
+    next(button for button in app.button if button.label == "Approve").click().run()
+
+    assert not app.exception
+    # The graph was actually resumed, with the decision list `approval_decisions`
+    # builds -- one per action request, which is what resume validates against.
+    assert len(resumed) == 1
+    assert resumed[0].resume == {"decisions": [{"type": "approve"}]}
+    assert app.session_state["phase"] == "done"
 
 
 @pytest.fixture

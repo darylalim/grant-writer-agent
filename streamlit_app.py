@@ -183,7 +183,15 @@ def stream_turn(agent: Any, payload: Any, config: dict) -> bool:
 
 
 def resume_with(decisions: list[dict]) -> None:
-    """Queue a resume for the next rerun and trigger it."""
+    """Queue a resume for the next rerun and trigger it.
+
+    Called from inside `approval_panel`, which is a fragment. `st.rerun()`
+    defaults to `scope="app"` even there, and that default is load-bearing: the
+    block that consumes the payload is in the main script body, so a
+    fragment-scoped rerun would redraw the approve/reject buttons while the
+    graph stayed parked on its interrupt -- a dead button, no error. Leave the
+    scope alone.
+    """
     st.session_state.payload = Command(resume={"decisions": decisions})
     st.session_state.phase = RUNNING
     st.rerun()
@@ -196,6 +204,50 @@ def render_feed(events: list[Event]) -> None:
         st.caption(f"{elided} earlier event(s) hidden.")
     for event in events[-MAX_RENDERED_EVENTS:]:
         render_event(event)
+
+
+@st.fragment
+def approval_panel(requests: list[dict]) -> None:
+    """Draw the approval prompt for one interrupt's pending writes.
+
+    A fragment because of the rejection-reason box: typing in it is a widget
+    interaction, and outside a fragment every keystroke reruns the whole
+    script -- replaying up to MAX_RENDERED_EVENTS activity events and
+    re-walking the application directory to recount gaps. Scoped here, a
+    keystroke redraws this container and nothing else.
+
+    `requests` is passed in rather than fetched here so that a fragment rerun
+    reuses the last arguments instead of re-reading the checkpoint on every
+    keystroke. They cannot go stale under it: only a resume clears the
+    interrupt, and `resume_with` reruns the whole app.
+    """
+    with st.container(border=True):
+        st.subheader("Approval required", anchor=False)
+        # `approval_decisions` owns the count, shared with the CLI prompt: one
+        # decision per action request, not per interrupt.
+        st.caption(
+            f"{max(len(requests), 1)} write(s) to `final/`. These are the "
+            "submission-bound files — read each one before approving."
+        )
+        for request in requests:
+            args = request.get("args") or {}
+            path = args.get("file_path") or "(unknown path)"
+            with st.expander(f"{request.get('name', '?')} → {path}"):
+                content = args.get("content")
+                if content:
+                    st.markdown(content)
+                else:
+                    st.json(args)
+        reason = st.text_input(
+            "Reason",
+            key="reject_reason",
+            placeholder="Sent back to the agent if you reject.",
+        )
+        with st.container(horizontal=True):
+            if st.button("Approve", type="primary", icon=":material/check:"):
+                resume_with(approval_decisions(requests, approve=True))
+            if st.button("Reject", icon=":material/close:"):
+                resume_with(approval_decisions(requests, approve=False, message=reason))
 
 
 # --- Sidebar: run settings ---------------------------------------------------
@@ -349,6 +401,15 @@ if submitted:
         st.session_state.active_app_id = app_id
         st.session_state.payload = payload
         st.session_state.phase = RUNNING
+        # Rerun before streaming rather than falling through to the run block.
+        # `busy` is read further up, *before* this handler sets the phase, so
+        # the form on this pass was already drawn enabled -- and this pass is
+        # the one that then streams the agent for minutes. Without the rerun
+        # the submit button sits there clickable for the whole run, inviting a
+        # second click that aborts the turn in flight. One extra pass costs a
+        # redraw and no model calls; the next one renders the form disabled and
+        # runs the turn.
+        st.rerun()
 
 # --- Activity feed -----------------------------------------------------------
 
@@ -393,38 +454,9 @@ with status_slot:
     if st.session_state.phase == AWAITING:
         agent = get_agent(profile, approve, search)
         config = {"configurable": {"thread_id": st.session_state.active_app_id}}
-        requests = pending_action_requests(agent, config)
-        # `approval_decisions` owns the count, shared with the CLI prompt: one
-        # decision per action request, not per interrupt.
-        count = max(len(requests), 1)
-
-        with st.container(border=True):
-            st.subheader("Approval required", anchor=False)
-            st.caption(
-                f"{count} write(s) to `final/`. These are the submission-bound "
-                "files — read each one before approving."
-            )
-            for request in requests:
-                args = request.get("args") or {}
-                path = args.get("file_path") or "(unknown path)"
-                with st.expander(f"{request.get('name', '?')} → {path}"):
-                    content = args.get("content")
-                    if content:
-                        st.markdown(content)
-                    else:
-                        st.json(args)
-            reason = st.text_input(
-                "Reason",
-                key="reject_reason",
-                placeholder="Sent back to the agent if you reject.",
-            )
-            with st.container(horizontal=True):
-                if st.button("Approve", type="primary", icon=":material/check:"):
-                    resume_with(approval_decisions(requests, approve=True))
-                if st.button("Reject", icon=":material/close:"):
-                    resume_with(
-                        approval_decisions(requests, approve=False, message=reason)
-                    )
+        # Read the checkpoint here, in the full app run, and hand the result to
+        # the fragment -- see approval_panel on why it does not fetch its own.
+        approval_panel(pending_action_requests(agent, config))
 
     elif st.session_state.phase == STOPPED:
         st.warning(

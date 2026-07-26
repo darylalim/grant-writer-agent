@@ -156,6 +156,10 @@ headlessly, because a Streamlit app fails at run time rather than import time an
 catch a bad layout call. They `pytest.importorskip("streamlit")`, which only bites under `--no-dev`.
 Pass `monkeypatch` to `_app_test` when a case needs the app in its normal
 enabled state; otherwise the credential guard renders the disabled-button variant instead.
+`_app_test` also clears `st.cache_resource`, whose store is global to the process rather than
+per-`AppTest`: without it a case that patches `build_agent` is handed whichever fake an earlier
+case cached under the same `(profile, approve, search)` key, and the suite passes or fails on
+test order.
 
 ## Domain rules baked into the prompts
 
