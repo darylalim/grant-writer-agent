@@ -457,6 +457,82 @@ def test_the_approval_panel_renders_every_pending_write(monkeypatch):
     assert "Drafted text." not in " ".join(block.value for block in app.markdown)
 
 
+def test_an_unreadable_interrupt_does_not_offer_a_plain_approve(monkeypatch):
+    """`pending_action_requests` returns [] for a renamed `deepagents` payload
+    key or a non-dict interrupt value -- it skips both without raising -- and
+    the phase is AWAITING regardless, because the graph really is parked. The
+    panel used to draw "1 write(s) ... read each one before approving" above no
+    expanders at all, and Approve then resumed a submission-bound write nobody
+    had seen. Exactly the silent-blanking failure activity.py was centralised
+    to prevent.
+    """
+    agent = SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            # An interrupt whose value carries no readable action requests.
+            tasks=[SimpleNamespace(interrupts=[SimpleNamespace(value={})])]
+        )
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-blind"
+    app.run()
+
+    assert not app.exception
+    approve = next(button for button in app.button if button.label == "Approve")
+    assert approve.disabled
+    assert any("no pending write could be read" in e.value for e in app.error)
+    # The reassuring count is gone; nothing claims a file is on offer.
+    assert not any("write(s) to" in caption.value for caption in app.caption)
+    # Rejecting stays available throughout -- it releases the graph without
+    # writing, so it is the safe way out of this state.
+    assert not next(b for b in app.button if b.label == "Reject").disabled
+
+    # Approving is reachable, but only as a second deliberate act.
+    app.checkbox[0].set_value(True).run()
+    assert not next(b for b in app.button if b.label == "Approve").disabled
+
+
+def test_the_sidebar_is_frozen_while_a_turn_is_in_flight(monkeypatch):
+    """Gating only the submit button moves which control throws a run away.
+    Every sidebar widget interaction aborts the streaming pass at the next
+    element call, dropping minutes of model calls into STOPPED.
+
+    The keys matter as much as the `disabled`: without them a widget's identity
+    comes from its parameters, `disabled` included, so a run would change their
+    identity and hand back defaults -- silently swapping the backend profile
+    for the very pass that builds the graph.
+    """
+    streamlit = pytest.importorskip("streamlit", reason="dev dependency")
+
+    class _HaltingAgent:
+        def stream(self, *_args, **_kwargs):
+            streamlit.stop()
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _HaltingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    # Move them off their defaults, so a reset would be visible as well.
+    app.selectbox(key="profile_select").set_value("server").run()
+    app.toggle(key="search_toggle").set_value(False).run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-sidebar")
+    app.button[0].click().run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "running"
+    assert app.selectbox(key="profile_select").disabled
+    assert app.toggle(key="approve_toggle").disabled
+    assert app.toggle(key="search_toggle").disabled
+    assert app.number_input(key="recursion_limit_input").disabled
+    # Still holding what was chosen, not the defaults.
+    assert app.selectbox(key="profile_select").value == "server"
+    assert app.toggle(key="search_toggle").value is False
+
+
 def test_the_approval_preview_can_still_be_read_as_prose(monkeypatch):
     """Source is the default, but a grant narrative is prose and monospace is a
     poor way to read two pages of it. The toggle exists so the safe default

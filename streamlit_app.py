@@ -121,6 +121,13 @@ st.session_state.setdefault("approval_round", 0)
 if st.session_state.phase == RUNNING and st.session_state.payload is None:
     st.session_state.phase = STOPPED
 
+# Read once, before anything interactive is drawn. Every widget on the page is
+# gated on this: touching any of them mid-stream aborts the pass at the next
+# element call and drops a turn that may be minutes of model calls into
+# STOPPED. Disabling the submit button alone would just move which control
+# throws the run away.
+busy = st.session_state.phase == RUNNING
+
 
 @st.cache_resource(show_spinner=False)
 def get_agent(profile: BackendProfile, approve: bool, search: bool) -> Any:
@@ -232,12 +239,32 @@ def approval_panel(requests: list[dict]) -> None:
     """
     with st.container(border=True):
         st.subheader("Approval required", anchor=False)
-        # `approval_decisions` owns the count, shared with the CLI prompt: one
-        # decision per action request, not per interrupt.
-        st.caption(
-            f"{max(len(requests), 1)} write(s) to `final/`. These are the "
-            "submission-bound files — read each one before approving."
-        )
+        # An empty list does not mean nothing is pending. The graph is parked on
+        # an interrupt either way -- that is why the phase is AWAITING -- and
+        # `pending_action_requests` returns [] just as readily for a renamed
+        # `deepagents` payload key or a non-dict interrupt value, both of which
+        # it skips without raising. Left to the normal path this drew a
+        # confident "1 write(s) ... read each one before approving" above no
+        # expanders at all, and Approve then resumed a submission-bound write
+        # that no human had seen. So say what happened, and make approving
+        # blind take a second, deliberate action.
+        blind = not requests
+        if blind:
+            st.error(
+                "This run is waiting on an approval, but no pending write could "
+                "be read from it — most likely a `deepagents` upgrade that "
+                "renamed the interrupt payload. Approving would sign off on a "
+                "submission-bound file without seeing it. Rejecting is safe: it "
+                "releases the graph without writing.",
+                icon=":material/error:",
+            )
+        else:
+            # `approval_decisions` owns the resume count, shared with the CLI
+            # prompt: one decision per action request, not per interrupt.
+            st.caption(
+                f"{len(requests)} write(s) to `final/`. These are the "
+                "submission-bound files — read each one before approving."
+            )
         for index, request in enumerate(requests):
             args = request.get("args") or {}
             path = args.get("file_path") or "(unknown path)"
@@ -280,8 +307,19 @@ def approval_panel(requests: list[dict]) -> None:
             key=f"reject_reason_{st.session_state.approval_round}",
             placeholder="Sent back to the agent if you reject.",
         )
+        # Not a nag: it is the only thing separating "read it and approved it"
+        # from "clicked the primary button on a panel showing nothing".
+        acknowledged = not blind or st.checkbox(
+            "Approve without seeing what will be written",
+            key=f"blind_approve_{st.session_state.approval_round}",
+        )
         with st.container(horizontal=True):
-            if st.button("Approve", type="primary", icon=":material/check:"):
+            if st.button(
+                "Approve",
+                type="primary",
+                icon=":material/check:",
+                disabled=not acknowledged,
+            ):
                 resume_with(approval_decisions(requests, approve=True))
             if st.button("Reject", icon=":material/close:"):
                 resume_with(approval_decisions(requests, approve=False, message=reason))
@@ -291,9 +329,16 @@ def approval_panel(requests: list[dict]) -> None:
 
 with st.sidebar:
     st.subheader("Run settings", anchor=False)
+    # Every control here takes an explicit key. Without one a widget's identity
+    # is derived from its parameters, `disabled` among them, so gating these on
+    # `busy` would change their identity the moment a run starts and hand back
+    # defaults -- silently swapping the profile or switching search on for the
+    # pass that actually builds the graph. With a key, identity is the key.
     profile = st.selectbox(
         "Backend profile",
         ("local", "server"),
+        key="profile_select",
+        disabled=busy,
         help=(
             "`local` writes real files under `applications/`. `server` keeps "
             "drafts in ephemeral graph state, so the file browser stays empty."
@@ -305,11 +350,15 @@ with st.sidebar:
     approve = st.toggle(
         "Approve writes to final/",
         value=True,
+        key="approve_toggle",
+        disabled=busy,
         help="Pause before each submission-bound file and show it for review.",
     )
     search = st.toggle(
         "Web search",
         value=True,
+        key="search_toggle",
+        disabled=busy,
         help="Funder research needs TAVILY_API_KEY. Turn off to run without it.",
     )
     recursion_limit = st.number_input(
@@ -318,6 +367,8 @@ with st.sidebar:
         max_value=500,
         value=150,
         step=10,
+        key="recursion_limit_input",
+        disabled=busy,
         help="Maximum graph steps per turn.",
     )
     st.divider()
@@ -348,8 +399,6 @@ if missing:
         "Copy `.env.example` to `.env` and fill it in, then restart the app.",
         icon=":material/key_off:",
     )
-
-busy = st.session_state.phase == RUNNING
 
 with st.form("draft", border=True):
     with st.container(horizontal=True):

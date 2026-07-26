@@ -176,7 +176,7 @@ every number, and every citation.
 
 ```bash
 uv sync                     # installs the dev group, streamlit included
-uv run pytest tests/ -q     # 118 offline tests, no API calls
+uv run pytest tests/ -q     # 120 offline tests, no API calls
 uvx ruff check src/ tests/ streamlit_app.py
 ```
 

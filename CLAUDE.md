@@ -108,7 +108,11 @@ runs, and still produces plausible output.
 5. **Approval decisions are per action request, not per interrupt.** `HumanInTheLoopMiddleware`
    bundles a turn's interrupted calls into one interrupt carrying N `action_requests`, and resume
    requires exactly N decisions — see `activity.pending_action_requests`, used by
-   both the CLI prompt and the UI's approve/reject buttons.
+   both the CLI prompt and the UI's approve/reject buttons. N of zero does **not** mean
+   nothing is pending: that function skips a renamed payload key and a non-dict interrupt
+   value without raising, so an empty list with the graph parked means the pending writes
+   could not be read. Both frontends apply a floor of one decision to release the graph;
+   the UI refuses a plain approve in that state, since there is nothing to have read.
 6. **Server-profile Store keys are prefix-stripped and namespaced per route.** `CompositeBackend`
    strips the route prefix before delegating, so `_SEED_ROUTES` gives `/skills/` and `/memories/`
    separate namespaces; sharing one would let `ls /skills/` surface memory files.
