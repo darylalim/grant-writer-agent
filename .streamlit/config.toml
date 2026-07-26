@@ -1,7 +1,9 @@
 # shadcn/ui-inspired theme, copied verbatim from the theme templates bundled
-# with streamlit (`.agents/skills/developing-with-streamlit/assets/templates/
-# themes/configs/shadcn.toml`). Kept whole rather than trimmed to the keys this
-# app happens to use, so it can be re-diffed against the upstream template.
+# inside the installed streamlit package, at
+# `$(uv run python -c 'import streamlit,pathlib;print(pathlib.Path(streamlit.__file__).parent)')`
+# then `/.agents/skills/developing-with-streamlit/assets/templates/themes/
+# configs/shadcn.toml`. Kept whole rather than trimmed to the keys this app
+# happens to use, so it stays diffable against that template on a version bump.
 #
 # Chosen for this app specifically: a light base because the file browser
 # renders long prose drafts that get read rather than scanned;

@@ -97,8 +97,8 @@ PENDING_TODO_ICON = ":gray[:material/radio_button_unchecked:]"
 # download, so a stray binary cannot be pushed through st.markdown.
 TEXT_SUFFIXES = {".md", ".txt", ".json", ".csv", ".yaml", ".yml"}
 
-# A long run can emit thousands of events, and every rerun -- each keystroke in
-# the reason box, each file click -- replays the whole feed. Keep all of them in
+# A long run can emit thousands of events, and every rerun -- each entry in the
+# reason box, each file click -- replays the whole feed. Keep all of them in
 # state, draw only the tail.
 MAX_RENDERED_EVENTS = 250
 
@@ -210,11 +210,12 @@ def render_feed(events: list[Event]) -> None:
 def approval_panel(requests: list[dict]) -> None:
     """Draw the approval prompt for one interrupt's pending writes.
 
-    A fragment because of the rejection-reason box: typing in it is a widget
-    interaction, and outside a fragment every keystroke reruns the whole
-    script -- replaying up to MAX_RENDERED_EVENTS activity events and
-    re-walking the application directory to recount gaps. Scoped here, a
-    keystroke redraws this container and nothing else.
+    A fragment because of the rejection-reason box. `st.text_input` commits on
+    Enter or blur rather than per keystroke, so this is one full-app rerun per
+    entry, not one per character -- but that rerun replays up to
+    MAX_RENDERED_EVENTS activity events through st.markdown and re-walks the
+    application directory to recount gaps and re-read the verdict, all to
+    redraw a text box. Scoped here it redraws this container and nothing else.
 
     `requests` is passed in rather than fetched here so that a fragment rerun
     reuses the last arguments instead of re-reading the checkpoint on every
@@ -444,6 +445,13 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
             st.session_state.phase = FAILED
         else:
             st.session_state.phase = AWAITING if interrupted else DONE
+    # Redraw now that the phase is terminal. The form above was drawn from
+    # `busy` at the top of this pass -- disabled, correctly, since the turn was
+    # about to stream -- and nothing else would rerun to re-enable it. Skipping
+    # this leaves a greyed-out submit button sitting under the "Run finished"
+    # banner until the user happens to touch some other widget: the same bug as
+    # leaving it live during the run, at the other end of the turn.
+    st.rerun()
 
 # --- Approval and status -----------------------------------------------------
 

@@ -341,11 +341,49 @@ def test_a_stopped_run_does_not_wedge_the_app(monkeypatch):
 
 def test_the_run_button_is_disabled_while_a_turn_is_in_flight(monkeypatch):
     """`busy` is read near the top of the script, before the submit handler
-    sets the phase, so the pass that starts a run had already drawn the form
-    enabled -- and that same pass is the one that streams the agent for
-    minutes. The handler reruns rather than falling through so the form is
-    redrawn disabled first; this pins the redrawn state. Without the rerun the
-    button stays live for the whole run and a second click aborts it.
+    sets the phase, so the pass that starts a run would draw the form enabled
+    and then spend minutes streaming with a live button on screen. The handler
+    reruns instead of falling through, so the streaming pass is a later one
+    that reads phase=RUNNING and draws the form disabled.
+
+    Asserting on the tree left after the turn *finishes* pins the wrong thing:
+    by then the phase is terminal and the button should be live again. The
+    agent here halts the pass from inside the run block instead, so the tree
+    AppTest captures is the one drawn mid-stream.
+    """
+    streamlit = pytest.importorskip("streamlit", reason="dev dependency")
+
+    class _HaltingAgent:
+        """Stops the script inside the run block, freezing the in-flight tree.
+
+        `st.stop` raises a BaseException subclass, so the run block's
+        `except Exception` does not catch it and the phase stays RUNNING --
+        the same property the STOPPED guard at the top of the app relies on.
+        """
+
+        def stream(self, *_args, **_kwargs):
+            streamlit.stop()
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _HaltingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-inflight")
+    app.button[0].click().run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "running"  # genuinely mid-turn
+    assert app.button[0].disabled
+
+
+def test_the_run_button_comes_back_once_the_turn_ends(monkeypatch):
+    """The other half of the rule above, and the one the first attempt at it
+    got backwards. The streaming pass draws the form disabled and nothing
+    afterwards would redraw it, so the run block reruns once the phase is
+    terminal. Without that the app finishes with a greyed-out submit button
+    under its own "Run finished" banner and no way to start another run short
+    of touching an unrelated widget.
     """
 
     class _FinishedAgent:
@@ -354,20 +392,17 @@ def test_the_run_button_is_disabled_while_a_turn_is_in_flight(monkeypatch):
         def stream(self, *_args, **_kwargs):
             return iter(())
 
-    # Faking the graph is what lets this drive a real submission: the handler
-    # runs, the phase flips, and the turn completes without a model call.
-    # Asserting on session_state after the fact would pin nothing -- the state
-    # is identical either way, and it is the *drawn* button that regressed.
     monkeypatch.setattr(
         "grant_writer.agent.build_agent", lambda *_a, **_k: _FinishedAgent()
     )
     app = _app_test(monkeypatch)
     app.run()
-    app.text_input(key="app_id_input").set_value("zz-pytest-inflight")
+    app.text_input(key="app_id_input").set_value("zz-pytest-finished")
     app.button[0].click().run()
 
     assert not app.exception
-    assert app.button[0].disabled
+    assert app.session_state["phase"] == "done"
+    assert not app.button[0].disabled
 
 
 def test_the_approval_panel_renders_every_pending_write(monkeypatch):
@@ -419,11 +454,17 @@ def test_the_approval_panel_renders_every_pending_write(monkeypatch):
 
 
 def test_approving_resumes_the_graph_from_inside_the_fragment(monkeypatch):
-    """`resume_with` reruns from inside the approval fragment, where the
-    default `scope="app"` is load-bearing. A fragment-scoped rerun is *legal*
-    there and would redraw the buttons while the graph stayed parked on its
-    interrupt: a dead Approve button and no exception. Rendering the panel
-    proves nothing about this -- only clicking through does.
+    """Approving has to actually resume the graph, with the decision list
+    `approval_decisions` builds. Rendering the panel proves nothing about that.
+
+    What this does NOT cover, despite touching the same code: the scope of the
+    rerun in `resume_with`. In a browser a button inside `@st.fragment`
+    produces a fragment rerun, where `scope="fragment"` is legal and would
+    leave the graph parked on its interrupt behind a dead Approve button.
+    AppTest runs the click as a full-script rerun instead, so mutating the
+    scope here fails with `StreamlitAPIException: scope="fragment" can only be
+    specified ... during fragment reruns` rather than with the silent stall.
+    The comment on `resume_with` is what guards that; this test cannot.
     """
     resumed = []
 

@@ -1,5 +1,9 @@
 # Secrets
 .env
+# `.streamlit/` is tracked for config.toml (the theme). secrets.toml is the
+# conventional home for API keys in a Streamlit app, sits in that same now-
+# tracked directory, and `git add .streamlit` would take it along.
+.streamlit/secrets.toml
 
 # Generated proposals. Real applications contain sensitive organizational and
 # personnel data -- keep them out of git by default.
