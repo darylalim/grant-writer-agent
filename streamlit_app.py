@@ -5,11 +5,13 @@ checkpoint, so a run started here continues from `grant-writer chat --app-id X`
 and back again. The app id is the LangGraph thread id in both.
 
 Deliberately outside `src/grant_writer/`: the package must never import
-streamlit. That is what keeps the `ui` extra genuinely optional -- installing
-the console script without it still works.
+streamlit, so installing the console script pulls in no web dependencies. The
+flip side is that this file is not in the wheel either, which is why streamlit
+is a dev dependency rather than an optional extra -- an extra would have been
+installable by someone who then had no app to run.
 
-    uv sync --extra ui
-    uv run --extra ui streamlit run streamlit_app.py
+    uv sync
+    uv run streamlit run streamlit_app.py
 """
 
 from __future__ import annotations

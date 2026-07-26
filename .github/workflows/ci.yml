@@ -53,12 +53,12 @@ jobs:
       # makes "someone edited pyproject.toml without re-locking" a CI failure. One
       # lockfile serves both legs -- uv resolves universally across the whole
       # requires-python range rather than per interpreter.
-      # --extra ui installs streamlit. Without it the AppTest cases in
-      # test_frontends.py importorskip out, and they are the only thing that
-      # exercises streamlit_app.py at all -- a Streamlit app fails at run time,
-      # not import time, so skipping them means the UI is untested here.
+      # streamlit is in the dev group, which uv installs by default, so the
+      # AppTest cases in test_frontends.py run here rather than importorskip-ing
+      # out. They are the only thing that exercises streamlit_app.py at all -- a
+      # Streamlit app fails at run time, not import time. Do not add --no-dev.
       - name: Install
-        run: uv sync --locked --extra ui
+        run: uv sync --locked
 
       - name: Test
         run: uv run pytest tests/ -q
@@ -85,12 +85,12 @@ jobs:
       # property of the source, not the runtime, and the ty baseline below was
       # measured there. ruff needs no project install, but ty does -- without the
       # dependencies it cannot resolve deepagents/langgraph and every import
-      # becomes a diagnostic. --extra ui is required for the same reason:
+      # becomes a diagnostic. The dev group matters here for the same reason:
       # tests/test_frontends.py imports streamlit, and ty flags an unresolved
       # import even inside a function body, which would push the count to 3 and
       # fail the baseline below on every push.
       - name: Install
-        run: uv sync --locked --extra ui
+        run: uv sync --locked
 
       # Pinned on purpose. [tool.ruff.lint] selects whole families (E, W, F, I,
       # UP, B, SIM, BLE, RUF), so a ruff release that adds a rule to any of them
@@ -115,7 +115,7 @@ jobs:
       # either is fine, but a bump to the pin below should be re-checked against
       # both, and both drop to 0 if upstream ever fixes theirs. The hook checks
       # `src/ tests/` and this also checks streamlit_app.py; the count is the
-      # same either way, but both require the `ui` extra to be installed,
+      # same either way, but both require the dev group to be installed,
       # because tests/ imports streamlit and ty resolves imports statically.
       - name: Type check
         env:

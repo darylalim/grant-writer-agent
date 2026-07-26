@@ -46,8 +46,8 @@ accepted after the subcommand, e.g. `grant-writer draft --app-id X --approve`.
 An optional Streamlit front end over the same graph:
 
 ```bash
-uv sync --extra ui
-uv run --extra ui streamlit run streamlit_app.py
+uv sync
+uv run streamlit run streamlit_app.py
 ```
 
 Upload a solicitation, watch the plan and delegations stream in, approve the
@@ -60,10 +60,13 @@ submission-bound file at the approval prompt rather than just the path, and it
 counts the unresolved `[NEEDS INPUT]` markers across the drafts — the number
 that says how much human input the proposal is still waiting on.
 
-`streamlit` is an optional extra and the app lives outside `src/`, so the
-package itself never imports it — installing the console script pulls in no web
-dependencies. Approvals default to **on** here: the CLI leaves `--approve` off
-because each prompt costs you a context switch, and in a UI it costs one click.
+The app lives outside `src/`, so the package itself never imports streamlit —
+installing the console script pulls in no web dependencies. The flip side is
+that `streamlit_app.py` is not in the wheel either, which is why streamlit is a
+**dev dependency** rather than an optional extra: an extra would have been
+installable by someone who then had no app to run. Approvals default to **on**
+here: the CLI leaves `--approve` off because each prompt costs you a context
+switch, and in a UI it costs one click.
 
 The application id is validated before it is joined onto a path
 (`config.application_dir`). It names a directory and the app writes your upload
@@ -162,16 +165,15 @@ every number, and every citation.
 ## Development
 
 ```bash
-uv sync --extra ui          # developing needs the extra; see below
+uv sync                     # installs the dev group, streamlit included
 uv run pytest tests/ -q     # 111 offline tests, no API calls
 uvx ruff check src/ tests/ streamlit_app.py
 ```
 
-**Install the `ui` extra to develop, even if you only touch the CLI.** The
-`AppTest` cases in `test_frontends.py` run the Streamlit script headlessly and
-`importorskip` out without it, and ty resolves imports statically — so
-`tests/` importing streamlit makes the type check report an extra diagnostic
-and trip the baseline. CI installs it for both reasons.
+Don't develop with `--no-dev`. The `AppTest` cases in `test_frontends.py` run
+the Streamlit script headlessly and `importorskip` out without streamlit, and
+ty resolves imports statically — so `tests/` importing streamlit makes the type
+check report an extra diagnostic and trip the baseline.
 
 CI runs both on every push and pull request, against Python 3.13 and 3.14, plus
 `ruff format --check` and `ty` held at its two-diagnostic baseline. ruff and ty

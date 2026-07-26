@@ -601,14 +601,10 @@ dependencies = [
     { name = "python-dotenv" },
 ]
 
-[package.optional-dependencies]
-ui = [
-    { name = "streamlit" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "streamlit" },
 ]
 
 [package.metadata]
@@ -622,12 +618,13 @@ requires-dist = [
     { name = "langsmith", specifier = ">=0.3.0" },
     { name = "pypdf", specifier = ">=6.14.2" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
-    { name = "streamlit", marker = "extra == 'ui'", specifier = ">=1.60.0" },
 ]
-provides-extras = ["ui"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.1.1" }]
+dev = [
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "streamlit", specifier = ">=1.60.0" },
+]
 
 [[package]]
 name = "h11"

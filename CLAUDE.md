@@ -15,13 +15,15 @@ uvx ruff format --check src/ tests/ streamlit_app.py   # ruff's default 88-col
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
 uv run grant-writer chat --app-id X           # resume the same thread
 
-uv sync --extra ui                            # required to develop, not just to run the UI
-uv run --extra ui streamlit run streamlit_app.py
+uv run streamlit run streamlit_app.py         # optional Streamlit front end
 ```
 
-Install the `ui` extra even when working only on the CLI. `tests/` imports streamlit, and ty
-resolves imports statically, so without it the ty hook reports 3 diagnostics and blocks every
-Python edit — and the `AppTest` cases skip, which is the only coverage `streamlit_app.py` has.
+streamlit is in the `dev` group, which `uv sync` installs by default, so this needs no extra flag.
+Never develop with `--no-dev`: `tests/` imports streamlit and ty resolves imports statically, so
+without it the ty hook reports 3 diagnostics and blocks every Python edit — and the `AppTest` cases
+skip, which is the only coverage `streamlit_app.py` has. It is a dev dependency rather than an
+optional extra because `streamlit_app.py` sits at the repo root and is not in the wheel, so an
+extra would have been installable by someone who then had no app to run.
 
 When working with Python, invoke the relevant `/astral:<skill>` — `/astral:uv`, `/astral:ruff`,
 `/astral:ty` — to ensure best practices are followed rather than guessed at. uv is the only
@@ -151,8 +153,8 @@ findings and should gain a case whenever a review turns one up; `test_frontends.
 and the UI must agree on — the stream parser, the approval decisions, the shared brief, and the
 terminal output the refactor must not have moved. Its `AppTest` cases run the Streamlit script
 headlessly, because a Streamlit app fails at run time rather than import time and nothing else would
-catch a bad layout call. They `pytest.importorskip("streamlit")`, so **install the `ui` extra or they
-silently do not run.** Pass `monkeypatch` to `_app_test` when a case needs the app in its normal
+catch a bad layout call. They `pytest.importorskip("streamlit")`, which only bites under `--no-dev`.
+Pass `monkeypatch` to `_app_test` when a case needs the app in its normal
 enabled state; otherwise the credential guard renders the disabled-button variant instead.
 
 ## Domain rules baked into the prompts

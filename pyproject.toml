@@ -27,11 +27,6 @@ dependencies = [
 [project.scripts]
 grant-writer = "grant_writer.cli:main"
 
-[project.optional-dependencies]
-ui = [
-    "streamlit>=1.60.0",
-]
-
 [build-system]
 requires = ["uv_build>=0.11.21,<0.12.0"]
 build-backend = "uv_build"
@@ -39,6 +34,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "streamlit>=1.60.0",
 ]
 
 [tool.ruff.lint]

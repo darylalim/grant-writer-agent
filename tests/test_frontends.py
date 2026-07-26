@@ -235,15 +235,16 @@ def test_approval_decisions_are_independent_objects():
 def _app_test(monkeypatch=None):
     """The real Streamlit script, ready to run headlessly.
 
-    Skipped unless the `ui` extra is installed, since it is optional and the
-    core package must never import streamlit.
+    streamlit is a dev dependency, so `uv sync` installs it and these run
+    everywhere the rest of the suite does. The guard only covers `--no-dev`,
+    where pytest itself would be missing too.
 
     Pass `monkeypatch` to force the credential check to pass. Without it the
     app's behaviour depends on whether the developer has a dotenv -- conftest
     blanks TAVILY_API_KEY, so on a clean checkout every case would render the
     disabled-button state and never exercise the app in its normal one.
     """
-    pytest.importorskip("streamlit", reason="install with `uv sync --extra ui`")
+    pytest.importorskip("streamlit", reason="dev dependency; run `uv sync`")
     from streamlit.testing.v1 import AppTest
 
     if monkeypatch is not None:
