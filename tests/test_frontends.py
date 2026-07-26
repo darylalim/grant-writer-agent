@@ -9,6 +9,7 @@ shows up as a crash, so they are pinned here.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -330,6 +331,44 @@ def test_a_stopped_run_does_not_wedge_the_app(monkeypatch):
     assert app.session_state["phase"] == "stopped"
     assert not app.button[0].disabled
     assert any("checkpointed" in warning.value for warning in app.warning)
+
+
+@pytest.fixture
+def application_with_a_pdf():
+    """A real application directory holding a PDF, removed afterwards.
+
+    It has to live under the project's own `applications/` -- that is the only
+    tree `config.application_dir` resolves an id into, and the app builds its
+    Settings from PROJECT_ROOT rather than taking one. The directory is
+    gitignored, and the id is prefixed so a failed teardown is recognisable.
+    """
+    app_id = "zz-pytest-pdf"
+    app_dir = PROJECT_ROOT / "applications" / app_id
+    app_dir.mkdir(parents=True, exist_ok=True)
+    # Never parsed -- the viewer fails long before it reads the bytes.
+    (app_dir / "solicitation.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    try:
+        yield app_id
+    finally:
+        shutil.rmtree(app_dir, ignore_errors=True)
+
+
+def test_a_pdf_in_the_application_directory_renders(application_with_a_pdf):
+    """`st.pdf` lives in a separate `streamlit-pdf` package, which the dev group
+    pulls in via the `streamlit[pdf]` extra. Plain `streamlit` is a working
+    install that passes every other case here, so nothing else notices: the
+    failure is a raised StreamlitAPIException where the document should be, and
+    only on the file browser's PDF branch. The app saves the uploaded
+    solicitation into this directory itself, so every run started in the UI has
+    one sitting in the listing.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_a_pdf)
+    app.run()
+
+    assert not app.exception
+    assert app.radio(key="file_pick").value == "solicitation.pdf"
 
 
 def test_missing_api_keys_disable_the_run_button(monkeypatch):

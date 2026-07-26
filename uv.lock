@@ -604,7 +604,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
-    { name = "streamlit" },
+    { name = "streamlit", extra = ["pdf"] },
 ]
 
 [package.metadata]
@@ -623,7 +623,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest", specifier = ">=9.1.1" },
-    { name = "streamlit", specifier = ">=1.60.0" },
+    { name = "streamlit", extras = ["pdf"], specifier = ">=1.60.0" },
 ]
 
 [[package]]
@@ -1930,6 +1930,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7a/46/fa437e9651af1dbe7e5b28a754fd9c36df656e4a14a2b5ecc1bcd1d90587/streamlit-1.60.0.tar.gz", hash = "sha256:09f2fdd2aabbd3b3560953795681dd675d5479ac82c21fc2dceadaf9bd484ea3", size = 9819884, upload-time = "2026-07-21T21:13:58.04Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2f/69/7a1984df015d01875c9ac79bfda7c31492cc94f81a2625303ce4707188e5/streamlit-1.60.0-py3-none-any.whl", hash = "sha256:d167d67cf94537600a6e378d8aa0c31eabab26beb243e2a51de9842e2872e393", size = 10419153, upload-time = "2026-07-21T21:13:55.113Z" },
+]
+
+[package.optional-dependencies]
+pdf = [
+    { name = "streamlit-pdf" },
+]
+
+[[package]]
+name = "streamlit-pdf"
+version = "2.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/5d/04487c85e3b5071b417451f1a910302d063ccd9f392457846bea271b340d/streamlit_pdf-2.0.1.tar.gz", hash = "sha256:c6306381d0eeb291d7a4f6eb16cfbf937560a29be78049c64251fa2c3276e1a2", size = 1949207, upload-time = "2025-11-18T00:38:44.079Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/65/57/ba77126eed2cb516feaf19b9f9d39af5be110b0a692415e772c7bbab7ed3/streamlit_pdf-2.0.1-py3-none-any.whl", hash = "sha256:8330d7f954e46edc7574b7e498378462555a8e25e829946abb78dbf5684b0a1e", size = 2083529, upload-time = "2025-11-18T00:38:42.373Z" },
 ]
 
 [[package]]
