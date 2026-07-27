@@ -284,6 +284,11 @@ def test_every_activity_event_kind_renders():
         Event(TOOL, label="write_file", detail="/applications/x/sections/need.md"),
         Event(TOOL, label="a_tool_with_no_icon_mapping"),
         Event(MESSAGE, detail="Draft complete."),
+        # A UI-only kind, spelled as a literal because it is defined in
+        # streamlit_app.py and that file cannot be imported without running it.
+        # It is not in `activity.py` because nothing in the agent's stream
+        # produces it -- see the PROMPT comment there.
+        Event("prompt", detail="Tighten the need section."),
     ]
     app.run()
 
@@ -292,6 +297,7 @@ def test_every_activity_event_kind_renders():
     assert "section-drafter" in rendered
     assert "/applications/x/sections/need.md" in rendered
     assert "Draft complete." in rendered
+    assert "Tighten the need section." in rendered
 
 
 def test_a_run_cannot_start_without_an_application_id(monkeypatch):
@@ -403,6 +409,103 @@ def test_the_run_button_comes_back_once_the_turn_ends(monkeypatch):
     assert not app.exception
     assert app.session_state["phase"] == "done"
     assert not app.button[0].disabled
+
+
+def test_a_follow_up_sends_what_the_cli_chat_loop_sends(monkeypatch):
+    """The UI could only ever start a fresh draft, so refining one meant
+    dropping to `grant-writer chat`. A follow-up has to send exactly what
+    `cli._chat` sends -- a plain turn on the existing thread -- and not another
+    `draft_request`, which re-briefs the agent to run the whole process from the
+    top. Both produce output, which is why this is pinned rather than noticed.
+    """
+    seen: list[tuple[object, dict]] = []
+
+    class _RecordingAgent:
+        """Streams nothing, but keeps what it was asked to stream."""
+
+        def stream(self, payload, config, **_kwargs):
+            seen.append((payload, config))
+            return iter(())
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _RecordingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-followup").run()
+    app.button[0].click().run()
+    assert app.session_state["phase"] == "done"
+    seen.clear()  # drop the opening brief; the follow-up is what is under test
+
+    app.chat_input(key="followup_input").set_value("Tighten the need section.").run()
+
+    assert not app.exception
+    assert len(seen) == 1, "a follow-up must run exactly one turn"
+    payload, config = seen[0]
+    # Byte-for-byte the shape of `cli._chat`'s `_run(agent, {...}, config)`.
+    assert payload == {
+        "messages": [{"role": "user", "content": "Tighten the need section."}]
+    }
+    # Same thread id as the run it continues, which is the whole point: the
+    # checkpoint carries the plan, todos, and history across to this turn.
+    assert config["configurable"]["thread_id"] == "zz-pytest-followup"
+    assert app.session_state["active_app_id"] == "zz-pytest-followup"
+
+
+def test_a_follow_up_cannot_be_sent_while_an_approval_is_pending(monkeypatch):
+    """AWAITING is not idleness. The graph is parked on an interrupt, and a
+    plain message resumes nothing -- it starts a new turn, abandoning the
+    pending submission-bound write rather than approving or rejecting it. The
+    approval panel is the only way out of this state.
+    """
+    agent = SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[
+                SimpleNamespace(
+                    interrupts=[
+                        SimpleNamespace(
+                            value={
+                                "action_requests": [
+                                    {
+                                        "name": "write_file",
+                                        "args": {
+                                            "file_path": "/applications/x/final/a.md",
+                                            "content": "Final text.",
+                                        },
+                                    }
+                                ]
+                            }
+                        )
+                    ]
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["active_app_id"] = "zz-pytest-parked"
+    app.session_state["phase"] = "awaiting"
+    app.run()
+
+    assert not app.exception
+    assert app.chat_input(key="followup_input").disabled
+    # The way forward is still on screen -- this gates the input, not the turn.
+    assert any(button.label == "Approve" for button in app.button)
+
+
+def test_the_follow_up_input_is_disabled_before_any_run(monkeypatch):
+    """There is no thread to continue yet. `monkeypatch` forces the credential
+    check to pass, so a disabled input here means "no active run" rather than
+    the missing-key state every control shares.
+    """
+    app = _app_test(monkeypatch)
+    app.run()
+
+    assert not app.exception
+    assert not app.button[0].disabled  # the app is otherwise runnable
+    assert app.chat_input(key="followup_input").disabled
 
 
 def test_the_approval_panel_renders_every_pending_write(monkeypatch):

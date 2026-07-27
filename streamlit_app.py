@@ -68,6 +68,13 @@ DONE = "done"
 FAILED = "failed"
 STOPPED = "stopped"
 
+# A follow-up the human typed, echoed into the feed so a turn does not open
+# with a reply to a question no longer on screen. Deliberately *not* in
+# `activity.py` alongside the kinds imported above: that module's job is reading
+# the agent's stream, and nothing in the stream ever produces this. It rides on
+# `Event` because the feed is a list of Events and `kind` is an open string.
+PROMPT = "prompt"
+
 SUBAGENT_ICONS = {
     "funder-researcher": ":material/travel_explore:",
     "section-drafter": ":material/edit_note:",
@@ -183,6 +190,13 @@ def render_event(event: Event) -> None:
         st.markdown(f":gray[{icon} {event.label}]{detail}")
     elif event.kind == MESSAGE:
         with st.container(border=True):
+            st.markdown(event.detail)
+    elif event.kind == PROMPT:
+        # The one thing in the feed that came from the human, so it gets the
+        # native chat bubble rather than another bordered container -- the
+        # agent's own prose is already drawn as one, and a turn that opens with
+        # a follow-up needs the two told apart at a glance.
+        with st.chat_message("user"):
             st.markdown(event.detail)
 
 
@@ -617,10 +631,52 @@ with activity_slot:
         render_feed(st.session_state.activity)
         if not st.session_state.activity and st.session_state.phase != RUNNING:
             st.caption("Nothing yet. Submit a solicitation above to start a run.")
+    # Nested inside a container on purpose. Called from the main body,
+    # `st.chat_input` pins itself to the bottom of the viewport and would float
+    # over the file browser -- which is the surface you actually read after a
+    # run. This is not a chat app; the follow-up belongs to the feed it
+    # continues, so it renders inline under it.
+    followup = st.chat_input(
+        f"Ask for a revision to {st.session_state.active_app_id}…"
+        if st.session_state.active_app_id
+        else "Start a run above, then refine it here…",
+        key="followup_input",
+        # AWAITING is not idleness. The graph is parked on an interrupt, and a
+        # fresh message there starts a new turn rather than answering it --
+        # abandoning the pending write instead of approving or rejecting it.
+        # Resolve the approval first; its panel is directly below.
+        disabled=(
+            busy
+            or bool(missing)
+            or not st.session_state.active_app_id
+            or st.session_state.phase == AWAITING
+        ),
+        # Closes the window inside the submitting pass itself, before the rerun
+        # below lands and `busy` takes over: `disabled` is computed from a phase
+        # read at the top of this pass, so without this a second submission here
+        # aborts the pass at the next element call and drops the turn to STOPPED.
+        submit_mode="disable",
+    )
     st.caption(
         "Long runs can be stopped from Streamlit's toolbar and picked up later "
         "with the same application id — progress is checkpointed each step."
     )
+
+if followup:
+    st.session_state.activity.append(Event(PROMPT, detail=followup))
+    # A plain turn on the existing thread, the same payload shape `cli._chat`
+    # sends -- not another `draft_request`, which would re-brief the agent to
+    # start the whole process over. `active_app_id` is left alone, so the run
+    # block below keeps the same thread_id and the checkpoint carries the plan,
+    # todos, and history that `grant-writer chat --app-id X` would have resumed.
+    st.session_state.payload = {"messages": [{"role": "user", "content": followup}]}
+    st.session_state.error = ""
+    st.session_state.phase = RUNNING
+    # Rerun before streaming, for the reason the form handler does: `busy` was
+    # read at the top of this pass, before this handler set the phase, so every
+    # control on screen right now was drawn enabled -- the input just above it
+    # included. The next pass draws them disabled and runs the turn.
+    st.rerun()
 
 # --- Run one turn ------------------------------------------------------------
 
@@ -665,8 +721,9 @@ with status_slot:
     elif st.session_state.phase == STOPPED:
         st.warning(
             f"Run stopped before it finished. Progress for "
-            f"`{st.session_state.active_app_id}` is checkpointed — submit the "
-            "same application id to carry on from where it left off.",
+            f"`{st.session_state.active_app_id}` is checkpointed — carry on "
+            "from the box under the activity feed, or re-submit the same "
+            "application id to send the opening brief again.",
             icon=":material/pause_circle:",
         )
 

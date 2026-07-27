@@ -55,6 +55,14 @@ writes to `final/` with the drafted text in front of you, and read the results
 next to the source PDF. It shares the CLI's checkpoint, so a run started in the
 browser continues with `grant-writer chat --app-id X` and back again.
 
+The chat box under the activity feed refines a run without leaving the browser.
+It sends what `grant-writer chat` sends — a plain message on the same thread,
+not a second brief, so the agent keeps the plan and todos it already has instead
+of starting the whole process over. It is disabled while a turn is streaming,
+and while an approval is pending: the graph is parked on the interrupt then, and
+a message sent into that starts a new turn rather than answering it, abandoning
+the pending submission-bound write instead of approving or rejecting it.
+
 Two things it does that the CLI cannot: it shows you the *content* of each
 submission-bound file at the approval prompt rather than just the path, and it
 counts the unresolved `[NEEDS INPUT]` markers across the drafts — the number
@@ -179,7 +187,7 @@ every number, and every citation.
 
 ```bash
 uv sync                     # installs the dev group, streamlit included
-uv run pytest tests/ -q     # 120 offline tests, no API calls
+uv run pytest tests/ -q     # 126 offline tests, no API calls
 uvx ruff check src/ tests/ streamlit_app.py
 ```
 
