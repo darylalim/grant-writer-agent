@@ -93,9 +93,21 @@ TODO_ICONS = {
 }
 PENDING_TODO_ICON = ":gray[:material/radio_button_unchecked:]"
 
-# Which files render inline as markdown. Anything else is offered as a
-# download, so a stray binary cannot be pushed through st.markdown.
-TEXT_SUFFIXES = {".md", ".txt", ".json", ".csv", ".yaml", ".yml"}
+# How each non-markdown text file is shown in the browser, as the
+# syntax-highlighting language or None for plain monospace. Only markdown goes
+# to st.markdown: it *transforms* what it is given and these formats do not
+# survive the trip -- a YAML comment becomes an <h1>, an indented block becomes
+# a code fence, and a CSV collapses into one paragraph. A viewer that quietly
+# shows something other than the file is worse than one that refuses to.
+# Anything listed in neither is offered as a download, so a stray binary cannot
+# be pushed through a text element.
+CODE_LANGUAGES: dict[str, str | None] = {
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".csv": None,
+    ".txt": None,
+}
 
 # A long run can emit thousands of events, and every rerun -- each entry in the
 # reason box, each file click -- replays the whole feed. Keep all of them in
@@ -323,6 +335,105 @@ def approval_panel(requests: list[dict]) -> None:
                 resume_with(approval_decisions(requests, approve=True))
             if st.button("Reject", icon=":material/close:"):
                 resume_with(approval_decisions(requests, approve=False, message=reason))
+
+
+def render_file(path: Path) -> None:
+    """Draw one application file into the current container.
+
+    Markdown gets the same Source/Rendered control as the approval panel, and
+    files under `final/` default to source for the reason spelled out there:
+    st.markdown shows a citation's link text and not its URL, and those are the
+    files that go to a funder. That argument does not stop applying once the
+    approval is clicked -- this is where the same file gets re-read. Everything
+    under `sections/`, `research/`, and `review/` is a working draft read for
+    its content, so it defaults to rendered.
+
+    Other text formats are never markdown; see CODE_LANGUAGES.
+    """
+    if not path.is_file():
+        # The listing is a snapshot and the agent keeps writing, so a file can
+        # be gone by the time it is picked. Say so, rather than drawing the
+        # empty string `read_text` returns -- which reads as an empty file.
+        st.caption("That file is no longer on disk.")
+        return
+
+    if path.suffix == ".md":
+        view = st.segmented_control(
+            "View",
+            ("Source", "Rendered"),
+            default="Source" if path.parent.name == "final" else "Rendered",
+            # Keyed per file, so picking another one lands on that file's own
+            # default instead of inheriting the last one's view. No explicit
+            # reset is needed: a keyed widget's value is dropped once it stops
+            # being rendered, and only one file is rendered at a time.
+            key=f"browse_view_{path}",
+            label_visibility="collapsed",
+        )
+        # Deselecting the control returns None, which lands on source -- the
+        # same fallback the approval panel takes, and the safe one either way.
+        if view == "Rendered":
+            st.markdown(read_text(path))
+        else:
+            st.code(read_text(path), language="markdown", wrap_lines=True)
+    elif path.suffix in CODE_LANGUAGES:
+        st.code(read_text(path), language=CODE_LANGUAGES[path.suffix], wrap_lines=True)
+    elif (blob := read_bytes(path)) is None:
+        # Same message, a narrower window: the file survived the check above
+        # and vanished before the read.
+        st.caption("That file is no longer on disk.")
+    elif path.suffix == ".pdf":
+        st.pdf(blob, height=430)
+    else:
+        st.download_button(
+            "Download", blob, file_name=path.name, icon=":material/download:"
+        )
+
+
+@st.fragment
+def file_browser(app_dir: Path, files: list[Path], gaps: int, verdict: str) -> None:
+    """Draw the application-directory browser for one listing.
+
+    A fragment for the same reason `approval_panel` is one. Picking a file
+    changes only which text the right-hand pane shows, but as a plain part of
+    the script that click reran the whole app: replaying up to
+    MAX_RENDERED_EVENTS events through st.markdown, re-walking the application
+    directory, and re-reading every draft to recount gaps and re-read the
+    verdict -- all to swap one pane.
+
+    Everything derived from the listing is passed in rather than computed here,
+    and that is what makes the fragment worth having: a fragment rerun reuses
+    the last arguments, so a file click touches disk once, for the file it is
+    about to show. Recomputing `gaps` and `verdict` in this body would re-read
+    every draft on every click and leave only the feed replay saved.
+
+    Neither can go stale under a fragment rerun. Nothing writes into the
+    directory except a turn, and a turn ends in a full-app rerun -- see the
+    `st.rerun` closing the run block -- which recomputes both.
+    """
+    with st.container(horizontal=True):
+        st.metric("Files", len(files), border=True)
+        st.metric(
+            "Needs input",
+            gaps,
+            border=True,
+            help="Unresolved `[NEEDS INPUT]` markers — facts the agent refused "
+            "to invent and a human must supply.",
+        )
+        st.metric(
+            "Compliance",
+            verdict,
+            border=True,
+            help="The compliance reviewer's latest verdict, from `review/`.",
+        )
+
+    names = [str(path.relative_to(app_dir)) for path in files]
+    picker_col, content_col = st.columns([1, 2], vertical_alignment="top")
+    with picker_col, st.container(height=480, border=True):
+        selected = st.radio(
+            "File", names, key="file_pick", label_visibility="collapsed"
+        )
+    with content_col, st.container(height=480, border=True):
+        render_file(app_dir / selected)
 
 
 # --- Sidebar: run settings ---------------------------------------------------
@@ -595,41 +706,9 @@ with results_slot:
             if not files:
                 st.caption(f"Nothing in `applications/{browse_id}/` yet.")
             else:
-                with st.container(horizontal=True):
-                    st.metric("Files", len(files), border=True)
-                    st.metric(
-                        "Needs input",
-                        count_gaps(files),
-                        border=True,
-                        help="Unresolved `[NEEDS INPUT]` markers — facts the "
-                        "agent refused to invent and a human must supply.",
-                    )
-                    st.metric(
-                        "Compliance",
-                        compliance_verdict(files),
-                        border=True,
-                        help="The compliance reviewer's latest verdict, from "
-                        "`review/`.",
-                    )
-
-                names = [str(path.relative_to(app_dir)) for path in files]
-                picker_col, content_col = st.columns([1, 2], vertical_alignment="top")
-                with picker_col, st.container(height=480, border=True):
-                    selected = st.radio(
-                        "File", names, key="file_pick", label_visibility="collapsed"
-                    )
-                with content_col, st.container(height=480, border=True):
-                    chosen = app_dir / selected
-                    if chosen.suffix in TEXT_SUFFIXES:
-                        st.markdown(read_text(chosen))
-                    elif (blob := read_bytes(chosen)) is None:
-                        st.caption("That file is no longer on disk.")
-                    elif chosen.suffix == ".pdf":
-                        st.pdf(blob, height=430)
-                    else:
-                        st.download_button(
-                            "Download",
-                            blob,
-                            file_name=chosen.name,
-                            icon=":material/download:",
-                        )
+                # Walk the directory here, in the full app run, and hand the
+                # results to the fragment -- see `file_browser` on why it does
+                # not read its own.
+                file_browser(
+                    app_dir, files, count_gaps(files), compliance_verdict(files)
+                )

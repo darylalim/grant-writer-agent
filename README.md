@@ -63,7 +63,10 @@ that says how much human input the proposal is still waiting on.
 That preview defaults to **source**, with a toggle to read it rendered. What
 you approve has to be the bytes that get written: rendered markdown shows a
 citation's link text and not its URL, which is the one thing worth checking at
-the moment you are asked to sign off on a submission.
+the moment you are asked to sign off on a submission. The file browser applies
+the same rule to the same files — anything under `final/` opens as source,
+working drafts open rendered — because that is where a submission-bound file
+gets re-read after the approval.
 
 The app lives outside `src/`, so the package itself never imports streamlit —
 installing the console script pulls in no web dependencies. The flip side is

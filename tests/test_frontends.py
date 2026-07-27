@@ -710,6 +710,101 @@ def test_a_pdf_in_the_application_directory_renders(application_with_a_pdf):
     assert app.radio(key="file_pick").value == "solicitation.pdf"
 
 
+@pytest.fixture
+def application_with_drafts():
+    """A real application directory spanning the browser's rendering branches.
+
+    Same constraint as `application_with_a_pdf`: it has to live under the
+    project's own `applications/`, since that is the only tree
+    `config.application_dir` resolves an id into.
+    """
+    app_id = "zz-pytest-drafts"
+    app_dir = PROJECT_ROOT / "applications" / app_id
+    contents = {
+        "requirements.md": "# Requirements\n\n[NEEDS INPUT: the deadline]\n",
+        "research/notes.yaml": "# funder priorities\nawards:\n  - median: 400000\n",
+        "sections/need.md": "# Need\n\nWorking draft.\n",
+        # The link text and the URL deliberately disagree: rendered, the URL is
+        # simply not on screen.
+        "final/need.md": "# Need\n\nSee [the 2025 report](https://example.org/r.pdf).\n",
+    }
+    for relative, text in contents.items():
+        target = app_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    try:
+        yield app_id
+    finally:
+        shutil.rmtree(app_dir, ignore_errors=True)
+
+
+def test_the_file_browser_renders_from_inside_its_fragment(application_with_drafts):
+    """The browser is an `st.fragment` so that picking a file does not rerun the
+    whole app: that click replayed the activity feed through st.markdown,
+    re-walked the application directory, and re-read every draft to recount
+    gaps and re-read the verdict, all to swap one pane.
+
+    What this pins is that the fragment is wired up at all. Fragment misuse --
+    writing into a container that received no write during the full app run --
+    raises at run time, not import time. It cannot pin the saving itself:
+    AppTest replays every interaction as a full-script rerun, so a fragment
+    rerun and an app rerun are indistinguishable from here. The counts below
+    stand in for the arguments the fragment is handed rather than computes.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.run()
+
+    assert not app.exception
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["Files"] == "4"
+    # Only requirements.md carries a marker, and `review/` is excluded by design.
+    assert metrics["Needs input"] == "1"
+
+
+def test_a_submission_bound_draft_is_shown_as_source(application_with_drafts):
+    """The approval panel defaults `final/` to source because st.markdown shows
+    a citation's link text and not its URL, and those are the files that go to
+    a funder. That argument does not expire when the approval is clicked --
+    the browser is where the same file gets re-read, and it offered no way to
+    see the bytes. Working drafts are read for their content, so they render.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.run()
+
+    app.radio(key="file_pick").set_value("sections/need.md").run()
+    assert not app.exception
+    assert "Working draft." in " ".join(block.value for block in app.markdown)
+
+    app.radio(key="file_pick").set_value("final/need.md").run()
+    assert not app.exception
+    # On screen as source, which is the whole point: rendered, this line shows
+    # "the 2025 report" and the URL that would actually be submitted is hidden.
+    assert "https://example.org/r.pdf" in " ".join(block.value for block in app.code)
+
+
+def test_a_non_markdown_file_is_not_run_through_the_markdown_renderer(
+    application_with_drafts,
+):
+    """Five of the six suffixes the browser called text were mangled by
+    st.markdown: a YAML comment became an <h1>, the indented block became a
+    code fence, and a CSV collapsed into one paragraph. A viewer that quietly
+    shows something other than the file is worse than one that refuses to.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.run()
+    app.radio(key="file_pick").set_value("research/notes.yaml").run()
+
+    assert not app.exception
+    assert "# funder priorities" in " ".join(block.value for block in app.code)
+    assert "funder priorities" not in " ".join(block.value for block in app.markdown)
+
+
 def test_missing_api_keys_disable_the_run_button(monkeypatch):
     """Better to grey out the button than to fail three tool calls into a run."""
     monkeypatch.setattr(
