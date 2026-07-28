@@ -100,6 +100,11 @@ runs, and still produces plausible output.
    upload into. All must stay in sync with `build_permissions`, and all resolve `..` *before* the
    prefix check — validating the raw string lets `/applications/../src/x` pass and then escape
    when `..` collapses. A fourth such writer needs the same treatment, not its own variant.
+   `config.application_ids` is the read side of the same boundary — it supplies the UI's picker,
+   so an id it offers must be one `application_dir` accepts. It gets that by calling
+   `application_dir` on each candidate rather than by re-testing `_SAFE_APP_ID`: sharing the regex
+   is not sharing the boundary, and the difference is `applications/legacy -> /elsewhere`, which
+   passes any name test and is then refused once the symlink resolves.
 3. **Custom subagents do not inherit `skills` from the parent.** `subagents.py` passes
    `"skills": [SKILLS_DIR]` explicitly to `section-drafter` and `compliance-checker`. Omit it and
    the drafter still answers — just generically.
@@ -140,6 +145,16 @@ runs, and still produces plausible output.
     both deciding which application is on screen disagree the moment a run starts on
     one the picker is not showing, and whichever the code reads first is then wrong
     half the time.
+
+    What the move costs, and what pays for it: `browse_id` follows a live widget while
+    the graph runs on `active_app_id`, which only the submit handler assigns, so the two
+    *can* differ. That is wanted — reading an old draft must not cost a billed turn — so
+    the results block says which is which on screen rather than silently retargeting one
+    of them. It is bounded on the other side by `id_locked`, which is `busy or phase ==
+    AWAITING`, not `busy` alone: on AWAITING the approval panel is asking a human to vet
+    a submission-bound write for `active_app_id`, and the file browser directly under it
+    describing a different application is the one moment that context has to be right.
+    The follow-up input is disabled on AWAITING for the same reason.
 
 ## Backend profiles
 
@@ -189,6 +204,13 @@ at all — a typed value that is not already an option raises `ValueError`. That
 application id is a `st.text_input` with a picker beside it rather than one combined
 widget: the combined version is neater and would have made the path-escape cases, the most
 security-sensitive input in the app, impossible to test.
+
+The `AppTest` cases run against the project's own `applications/`, because that is the only
+tree `application_dir` resolves an id into — and it is gitignored, so its contents differ per
+machine. Assert *membership*, never equality, on anything derived from that listing, and force
+the empty case by patching `config.application_ids` rather than waiting for the directory to be
+empty. A case that assumes empty passes on a clean CI checkout and fails on any machine that has
+run the app once.
 
 ## Domain rules baked into the prompts
 

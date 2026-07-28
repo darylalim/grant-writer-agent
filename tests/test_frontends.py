@@ -848,6 +848,166 @@ def test_the_browse_picker_fills_the_id_box_and_clears_itself(
     assert app.session_state["phase"] == "idle"
 
 
+def test_the_application_id_and_its_picker_freeze_while_a_turn_is_in_flight(
+    monkeypatch, application_with_drafts
+):
+    """`test_the_sidebar_is_frozen...` covers the four sidebar widgets and
+    stops there, so when the id box moved out of the form nothing pinned its
+    `disabled`. Deleting both arguments left all 131 cases green under a comment
+    calling them load-bearing.
+
+    The regression is the same one the sidebar case exists for: out here these
+    two can trigger a rerun, and touching either mid-stream aborts the pass at
+    the next element call and drops a turn that may be minutes of model calls
+    into STOPPED. That the id box was harmless inside the form is exactly why
+    this is easy to leave off.
+    """
+    streamlit = pytest.importorskip("streamlit", reason="dev dependency")
+
+    class _HaltingAgent:
+        def stream(self, *_args, **_kwargs):
+            streamlit.stop()
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _HaltingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.button[0].click().run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "running"
+    assert app.text_input(key="app_id_input").disabled
+    assert app.selectbox(key="browse_pick").disabled
+
+
+def test_the_application_id_stays_frozen_while_an_approval_is_pending(
+    monkeypatch, application_with_drafts
+):
+    """AWAITING is not idleness, and `busy` does not cover it.
+
+    The graph is parked on an interrupt and the approval panel is asking a human
+    to vet a submission-bound write for `active_app_id`. Gating these two on
+    `busy` alone leaves them live there, so a pick retargets the file browser
+    while the panel above it still describes a different application -- at the
+    one moment the surrounding context has to be right. The follow-up input is
+    disabled on AWAITING for the same reason; this reaches that state from the
+    other side.
+    """
+    agent = SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[
+                SimpleNamespace(
+                    interrupts=[
+                        SimpleNamespace(
+                            value={
+                                "action_requests": [
+                                    {
+                                        "name": "write_file",
+                                        "args": {
+                                            "file_path": "/applications/x/final/n.md"
+                                        },
+                                    }
+                                ]
+                            }
+                        )
+                    ]
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = application_with_drafts
+    app.run()
+
+    assert not app.exception
+    assert "Approval required" in {sub.value for sub in app.subheader}
+    assert app.text_input(key="app_id_input").disabled
+    assert app.selectbox(key="browse_pick").disabled
+
+
+def test_browsing_away_from_the_running_application_says_so(
+    monkeypatch, application_with_drafts
+):
+    """The one thing moving the id box out of the form gave up.
+
+    `browse_id` follows a live widget; the graph runs on `active_app_id`, which
+    only the submit handler assigns. So after a run on A, picking B points the
+    files pane at B while the follow-up box -- and any pending approval -- still
+    belong to A. Both behaviours are wanted, so the divergence is allowed and
+    stated rather than resolved by silently retargeting one of them. Drop the
+    caption and the page shows B's files under a follow-up box that rewrites A,
+    with nothing on screen saying which is which.
+    """
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: SimpleNamespace()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "done"
+    app.session_state["active_app_id"] = "zz-pytest-elsewhere"
+    app.run()
+    app.selectbox(key="browse_pick").set_value(application_with_drafts).run()
+
+    assert not app.exception
+    # Reading really did move; the run target did not.
+    assert {m.label: m.value for m in app.metric}["Files"] == "4"
+    assert app.session_state["active_app_id"] == "zz-pytest-elsewhere"
+    captions = " ".join(caption.value for caption in app.caption)
+    assert f"Reading `{application_with_drafts}`" in captions
+    assert "continues `zz-pytest-elsewhere`" in captions
+
+
+def test_the_server_profile_offers_no_browse_picker(
+    monkeypatch, application_with_drafts
+):
+    """`server` keeps drafts in ephemeral graph state and the results pane says
+    so. A picker there lists whatever an earlier `local` run left on disk,
+    promises a read it structurally cannot perform, and still retargets the
+    thread id on the way to refusing it -- and walks the directory on every
+    rerun for the one profile whose whole premise is that `applications/` is not
+    the source of truth.
+    """
+    app = _app_test(monkeypatch)
+    app.run()
+    # The fixture guarantees the picker has something to offer. Membership, not
+    # equality: `applications/` is the developer's real directory, so whatever
+    # else is sitting in it is not this case's business.
+    assert application_with_drafts in app.selectbox(key="browse_pick").options
+
+    app.selectbox(key="profile_select").set_value("server").run()
+
+    assert not app.exception
+    assert "Browse an existing application" not in {s.label for s in app.selectbox}
+    assert any("Switch to `local` to browse files" in i.value for i in app.info)
+
+
+def test_the_empty_browser_caption_does_not_point_at_an_absent_picker(monkeypatch):
+    """On a fresh install `applications/` is empty, so `existing_ids` is empty,
+    so no picker is drawn -- and this branch is exactly the state that install
+    starts in. "Pick an application id above" named a control that is not on
+    screen; "Enter" covers both states, which is why the wording is pinned.
+
+    The empty listing is forced rather than assumed: `applications/` is the
+    developer's real directory and is gitignored, so a case that waits for it to
+    be empty passes on CI and fails on any machine that has run the app once.
+    """
+    monkeypatch.setattr("grant_writer.config.application_ids", lambda _s: [])
+    app = _app_test()
+    app.run()
+
+    assert not app.exception
+    assert "Browse an existing application" not in {s.label for s in app.selectbox}
+    assert any(
+        "Enter an application id above" in caption.value for caption in app.caption
+    )
+
+
 @pytest.fixture
 def application_with_a_pdf():
     """A real application directory holding a PDF, removed afterwards.

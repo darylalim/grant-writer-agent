@@ -246,8 +246,14 @@ def _pick_application() -> None:
     Two controls both deciding which application is on screen disagree the
     moment a run starts on an id the picker is not showing, and whichever one
     the code reads first is then wrong half the time. Funnelling through the id
-    box keeps `browse_id` a single expression and keeps the run target and the
-    browsed application the same value by construction.
+    box keeps `browse_id` a single expression.
+
+    That makes the *browsed* application single-valued. It does not make it the
+    same value as the run: `active_app_id` is assigned only by the submit
+    handler, so picking here after a run points the file browser somewhere the
+    graph is not. That is deliberate -- reading an old draft must not cost a
+    billed turn -- and the results block below says so on screen rather than
+    leaving the two to disagree quietly.
 
     Legal only because widget callbacks run *before* the script body: the id
     box is not instantiated yet, so assigning its key here is a default rather
@@ -535,9 +541,16 @@ settings = persistent_settings(
 )
 
 # Read once per pass, before the id box that the picker fills. `application_ids`
-# filters to what `application_dir` will accept, so nothing offered here can be
-# picked and then refused by the boundary below.
-existing_ids = application_ids(settings)
+# runs every candidate through `application_dir` itself, so nothing offered here
+# can be picked and then refused by the boundary below.
+#
+# Gated on the profile, and not just to save the walk. `server` keeps drafts in
+# ephemeral graph state and the results pane below says so; a picker there would
+# list whatever an earlier `local` run happened to leave on disk, promise a read
+# it structurally cannot perform, and still retarget the thread id on the way to
+# refusing. Disk is not the source of truth in that profile, so it is not
+# offered as one.
+existing_ids = application_ids(settings) if profile == "local" else []
 
 # --- Header and run form -----------------------------------------------------
 
@@ -564,7 +577,7 @@ if missing:
 # billed run on them, and the caption below promising otherwise was unreachable.
 # Out here, committing the box reruns the script and the browser follows.
 #
-# `disabled=busy` is load-bearing *because* of the move, not decoration copied
+# The lock below is load-bearing *because* of the move, not decoration copied
 # from the sidebar. In the form this input could not trigger a rerun, so it was
 # harmless mid-stream; out here typing into it during a turn would abort the
 # streaming pass at the next element call and drop minutes of model calls into
@@ -580,12 +593,22 @@ if missing:
 # new application -- including the ones pinning that `../evil` is refused --
 # would become untestable, and these AppTest cases are the only coverage this
 # file has.
+# `busy` is RUNNING alone, and RUNNING is not the only phase where retargeting
+# this box lies about the page. On AWAITING the graph is parked on an interrupt
+# and the approval panel below is asking a human to vet a `final/` write for
+# `active_app_id`; moving the box there leaves that panel and the files pane
+# under it describing two different applications, at the one moment the
+# surrounding context has to be right. The follow-up input is disabled on
+# AWAITING for the same reason -- see its `disabled` -- and this is the control
+# that reaches the same state from the other direction.
+id_locked = busy or st.session_state.phase == AWAITING
+
 with st.container(horizontal=True):
     app_id = st.text_input(
         "Application id",
         key="app_id_input",
         placeholder="nsf-aisl-2026",
-        disabled=busy,
+        disabled=id_locked,
         help="Also the LangGraph thread id. Reuse it to continue a run, or to "
         "browse an earlier one below.",
     )
@@ -599,7 +622,7 @@ with st.container(horizontal=True):
             key="browse_pick",
             on_change=_pick_application,
             placeholder="Pick one to read…",
-            disabled=busy,
+            disabled=id_locked,
             help="Fills the id box on the left. Reading an application does not "
             "start a run.",
         )
@@ -824,8 +847,27 @@ with results_slot:
             icon=":material/cloud_off:",
         )
     elif not browse_id:
-        st.caption("Pick an application id above to browse its files.")
+        # "Enter", not "Pick": the picker beside the box is only drawn once
+        # `existing_ids` is non-empty, and this branch is exactly the state a
+        # fresh install starts in -- no applications, so no picker to point at.
+        st.caption("Enter an application id above to browse its files.")
     else:
+        # The one thing the move out of the form gave up. `browse_id` follows a
+        # live widget; the graph still runs on `active_app_id`, which only the
+        # submit handler assigns. So after a run on A, picking B points this
+        # pane at B while the follow-up box above -- and any pending approval --
+        # still belong to A. Both behaviours are wanted (read an old draft
+        # without spending a turn; keep a follow-up on the thread it continues),
+        # so the divergence is allowed and said out loud rather than resolved by
+        # silently retargeting one of them.
+        if (
+            st.session_state.active_app_id
+            and browse_id != st.session_state.active_app_id
+        ):
+            st.caption(
+                f"Reading `{browse_id}`. The follow-up box above still "
+                f"continues `{st.session_state.active_app_id}`."
+            )
         try:
             # Same boundary as the write side, and it matters more here: without
             # it an id of ".." lists the repo root, and the download branch

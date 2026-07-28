@@ -349,8 +349,9 @@ def test_workspace_readers_tolerate_a_vanished_file(tmp_path):
 def test_application_ids_offers_only_what_the_boundary_will_accept(tmp_path):
     """The picker's options get joined onto a path by `application_dir`, so an
     entry that boundary would refuse must never be offered in the first place.
-    Both sides filter on `_SAFE_APP_ID`, which is what keeps them from drifting
-    into a dropdown whose entries raise when they are selected.
+    `application_ids` runs each candidate through that function rather than
+    through a copy of its rules, which is what keeps the two from drifting into
+    a dropdown whose entries raise when they are selected.
     """
     settings = Settings(root=tmp_path)
     apps = tmp_path / "applications"
@@ -371,3 +372,68 @@ def test_application_ids_is_empty_before_the_directory_exists(tmp_path):
     """First run, nothing drafted yet. Returning [] rather than raising is what
     lets the frontend simply not draw the picker."""
     assert application_ids(Settings(root=tmp_path)) == []
+
+
+def test_application_ids_does_not_offer_a_symlink_out_of_the_tree(tmp_path):
+    """The case a name filter cannot see.
+
+    `applications/legacy -> /elsewhere` passes any test applied to the string
+    `legacy`, and `is_dir()` follows the link and agrees. It is only when
+    `application_dir` *resolves* it that the escape shows up -- and by then the
+    id is in the box and the user gets a refusal where their files should be.
+    Matching `_SAFE_APP_ID` on both sides was never the same thing as agreeing
+    with the boundary; calling the boundary is.
+    """
+    settings = Settings(root=tmp_path)
+    apps = tmp_path / "applications"
+    apps.mkdir()
+    (apps / "real").mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (apps / "legacy").symlink_to(outside, target_is_directory=True)
+    # Inside the tree is still fine: the boundary's objection is the escape.
+    (apps / "alias").symlink_to(apps / "real", target_is_directory=True)
+
+    assert application_ids(settings) == ["alias", "real"]
+    with pytest.raises(ValueError, match="outside applications/"):
+        application_dir(settings, "legacy")
+
+
+def test_application_ids_hides_dot_directories(tmp_path):
+    """`_SAFE_APP_ID` admits a leading dot -- only `.` and `..` are special-cased
+    -- so the regex alone puts `.git` and `.ipynb_checkpoints` in the picker
+    beside real applications. Harmless to the boundary, which resolves them
+    inside the tree quite happily; the objection is that this is a listing of
+    the user's applications and editor droppings are not among them.
+    """
+    settings = Settings(root=tmp_path)
+    apps = tmp_path / "applications"
+    apps.mkdir()
+    (apps / "nsf-aisl-2026").mkdir()
+    (apps / ".ipynb_checkpoints").mkdir()
+    (apps / ".git").mkdir()
+
+    assert application_ids(settings) == ["nsf-aisl-2026"]
+    # Not a security claim: the boundary accepts these, it just should not be
+    # asked to. Pinned so the reason for the extra filter stays legible.
+    assert application_dir(settings, ".git").name == ".git"
+
+
+def test_application_ids_survives_an_unreadable_applications_directory(tmp_path):
+    """This is called from the Streamlit script body, outside any try, so an
+    `OSError` here takes down the whole page -- no title, no sidebar, no way to
+    resume a checkpointed run -- rather than just the picker. `is_dir()` returns
+    True for a directory with no read permission, so the precheck it replaced
+    would not have caught this either.
+    """
+    settings = Settings(root=tmp_path)
+    apps = tmp_path / "applications"
+    apps.mkdir()
+    (apps / "nsf-aisl-2026").mkdir()
+    apps.chmod(0o000)
+    try:
+        if os.access(apps, os.R_OK):  # running as root; the chmod means nothing
+            pytest.skip("cannot make a directory unreadable as this user")
+        assert application_ids(settings) == []
+    finally:
+        apps.chmod(0o755)

@@ -182,25 +182,47 @@ def application_dir(settings: Settings, app_id: str) -> Path:
 def application_ids(settings: Settings) -> list[str]:
     """Every application on disk, as ids `application_dir` will accept.
 
-    The read-side counterpart to `application_dir`, and it lives here for the
-    same reason: the filter is `_SAFE_APP_ID`, so the two agree by construction.
-    The directory is *listed*, not trusted -- a name that arrived some other way
-    (a stray dotfile, a hand-made directory with a space in it) must not become
-    a browsable option that then raises when the boundary resolves it.
+    The read-side counterpart to `application_dir`. Each candidate is run
+    through that boundary rather than through a matching copy of its rules, so
+    the two agree *literally* -- an option this offers cannot be one the
+    boundary then refuses. Re-checking `_SAFE_APP_ID` here instead was not the
+    same thing: `ln -s /elsewhere applications/legacy` passes any name test, and
+    `application_dir` resolves the symlink, finds it outside the tree, and
+    raises. The directory is *listed*, not trusted.
+
+    Dot-leading names are dropped separately, because the regex admits them --
+    only `.` and `..` are special-cased -- so `.ipynb_checkpoints` and `.git`
+    would otherwise sit in the picker beside real applications. This is a
+    listing, and hiding the dotfiles is what a listing does.
+
+    `iterdir` is guarded because the Streamlit frontend calls this from its
+    script body, outside any try: an unreadable `applications/` must cost the
+    picker, not the whole page. It also covers the fresh-checkout case where the
+    directory does not exist yet, which is why there is no `is_dir` precheck.
 
     Sorted by name, not by mtime. This backs a dropdown, and a list that
     reorders itself under the pointer between reruns is worse than one that is
-    merely not in recency order. Sorting by name also needs no `stat`, so a
-    directory vanishing mid-listing cannot raise.
+    merely not in recency order.
     """
-    root = settings.applications_path
-    if not root.is_dir():
+    try:
+        names = sorted(path.name for path in settings.applications_path.iterdir())
+    except OSError:
         return []
-    return sorted(
-        path.name
-        for path in root.iterdir()
-        if path.is_dir() and _SAFE_APP_ID.match(path.name)
-    )
+
+    ids = []
+    for name in names:
+        if name.startswith("."):
+            continue
+        try:
+            resolved = application_dir(settings, name)
+        except ValueError:
+            continue
+        # After the boundary, not before: a name that escapes must be refused on
+        # that ground, and `is_dir` on the resolved path is what drops the loose
+        # `notes.md` sitting beside the application directories.
+        if resolved.is_dir():
+            ids.append(name)
+    return ids
 
 
 def persistent_settings(
