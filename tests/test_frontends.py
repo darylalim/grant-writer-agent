@@ -775,6 +775,79 @@ def test_approving_resumes_the_graph_from_inside_the_fragment(monkeypatch):
     assert app.session_state["phase"] == "done"
 
 
+def test_the_application_id_input_is_not_inside_the_form():
+    """The precondition every file-browser case below silently depends on.
+
+    `st.form` batches its widgets: their values reach the server only when
+    Submit is pressed. The id is also what the browser reads back to pick an
+    application, so inside the form it could only ever show one already
+    submitted this session -- reading an earlier application meant starting a
+    fresh billed run on it.
+
+    AppTest cannot catch that by behaviour. `ElementTree.get_widget_states`
+    walks every widget and serialises it regardless of `form_id`, so
+    `set_value(...).run()` publishes a form widget immediately and the cases
+    below pass either way. They did, against a browser where the pane stayed
+    empty. So pin the structural fact the harness does model -- `form_id` is on
+    the proto -- rather than the behaviour it fakes.
+    """
+    app = _app_test()
+    app.run()
+
+    assert not app.exception
+    assert app.text_input(key="app_id_input").form_id == ""
+    # The other run inputs belong in the form; nothing reads them back.
+    assert [t.label for t in app.text_input if t.form_id] == ["Funder"]
+
+
+def test_typing_an_application_id_browses_it_without_starting_a_run(
+    application_with_drafts,
+):
+    """The read path must not cost a turn.
+
+    This one cannot catch the input moving back into the form -- verified: it
+    passes against that code, because `get_widget_states` publishes a form
+    widget anyway. The check above is the one that fails there, and it is the
+    only one that can. What this pins instead is the `browse_id` expression:
+    drop the typed-id clause and leave the `active_app_id` fallback, and the
+    browser goes back to showing only what a submit put there. That regression
+    the harness does model, and this fails on it.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts).run()
+
+    assert not app.exception
+    assert {m.label: m.value for m in app.metric}["Files"] == "4"
+    # No run was started: the browser reads disk, it does not touch the graph.
+    assert app.session_state["phase"] == "idle"
+    assert app.session_state["active_app_id"] == ""
+
+
+def test_the_browse_picker_fills_the_id_box_and_clears_itself(
+    application_with_drafts,
+):
+    """The picker is an input method for the id box, not a rival source of
+    truth -- see `_pick_application`. Two controls deciding which application is
+    on screen disagree the moment a run starts on one the picker is not showing,
+    and whichever the code reads first is then wrong half the time.
+
+    The self-clear looks redundant and is not: left set, picking `alpha`, typing
+    `beta`, then picking `alpha` again fires no change event -- same value -- so
+    the box would sit on `beta` while the picker read `alpha`.
+    """
+    app = _app_test()
+    app.run()
+    app.selectbox(key="browse_pick").set_value(application_with_drafts).run()
+
+    assert not app.exception
+    assert app.text_input(key="app_id_input").value == application_with_drafts
+    assert {m.label: m.value for m in app.metric}["Files"] == "4"
+    assert app.session_state["browse_pick"] is None
+    # Reading is not running.
+    assert app.session_state["phase"] == "idle"
+
+
 @pytest.fixture
 def application_with_a_pdf():
     """A real application directory holding a PDF, removed afterwards.

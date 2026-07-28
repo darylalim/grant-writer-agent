@@ -179,6 +179,30 @@ def application_dir(settings: Settings, app_id: str) -> Path:
     return resolved
 
 
+def application_ids(settings: Settings) -> list[str]:
+    """Every application on disk, as ids `application_dir` will accept.
+
+    The read-side counterpart to `application_dir`, and it lives here for the
+    same reason: the filter is `_SAFE_APP_ID`, so the two agree by construction.
+    The directory is *listed*, not trusted -- a name that arrived some other way
+    (a stray dotfile, a hand-made directory with a space in it) must not become
+    a browsable option that then raises when the boundary resolves it.
+
+    Sorted by name, not by mtime. This backs a dropdown, and a list that
+    reorders itself under the pointer between reruns is worse than one that is
+    merely not in recency order. Sorting by name also needs no `stat`, so a
+    directory vanishing mid-listing cannot raise.
+    """
+    root = settings.applications_path
+    if not root.is_dir():
+        return []
+    return sorted(
+        path.name
+        for path in root.iterdir()
+        if path.is_dir() and _SAFE_APP_ID.match(path.name)
+    )
+
+
 def persistent_settings(
     *,
     backend_profile: BackendProfile = "local",

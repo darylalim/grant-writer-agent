@@ -36,6 +36,7 @@ from grant_writer.agent import build_agent
 from grant_writer.config import (
     BackendProfile,
     application_dir,
+    application_ids,
     persistent_settings,
     require_api_keys,
 )
@@ -236,6 +237,30 @@ def resume_with(decisions: list[dict]) -> None:
     # in the panel: `approval_round` is plain state, not a widget key.
     st.session_state.approval_round += 1
     st.rerun()
+
+
+def _pick_application() -> None:
+    """Copy the browse picker's choice into the application id box.
+
+    The picker is an input method for that box, not a second source of truth.
+    Two controls both deciding which application is on screen disagree the
+    moment a run starts on an id the picker is not showing, and whichever one
+    the code reads first is then wrong half the time. Funnelling through the id
+    box keeps `browse_id` a single expression and keeps the run target and the
+    browsed application the same value by construction.
+
+    Legal only because widget callbacks run *before* the script body: the id
+    box is not instantiated yet, so assigning its key here is a default rather
+    than the modification of a live widget, which Streamlit refuses.
+
+    Clearing the picker afterwards is what makes it behave like an action
+    rather than a selection. Left set, picking `alpha`, typing `beta`, then
+    picking `alpha` again fires no change event -- same value -- and the box
+    would stay on `beta` with the picker showing `alpha`.
+    """
+    if picked := st.session_state.browse_pick:
+        st.session_state.app_id_input = picked
+        st.session_state.browse_pick = None
 
 
 def render_feed(events: list[Event]) -> None:
@@ -509,6 +534,11 @@ settings = persistent_settings(
     backend_profile=profile, approve_final=approve, enable_search=search
 )
 
+# Read once per pass, before the id box that the picker fills. `application_ids`
+# filters to what `application_dir` will accept, so nothing offered here can be
+# picked and then refused by the boundary below.
+existing_ids = application_ids(settings)
+
 # --- Header and run form -----------------------------------------------------
 
 st.title("Grant writer", anchor=False)
@@ -525,15 +555,57 @@ if missing:
         icon=":material/key_off:",
     )
 
-with st.form("draft", border=True):
-    with st.container(horizontal=True):
-        app_id = st.text_input(
-            "Application id",
-            key="app_id_input",
-            placeholder="nsf-aisl-2026",
-            help="Also the LangGraph thread id. Reuse it to continue a run.",
+# Outside the form, deliberately. `st.form` batches its widgets and sends them
+# only when Submit is pressed -- "the values of the widgets inside it are never
+# sent to your app" otherwise. This id is not just a run input: the file browser
+# at the bottom reads it back to decide which application to show. Inside the
+# form that read could only ever see an id already submitted this session, so
+# opening yesterday's drafts meant clicking Draft proposal and starting a fresh
+# billed run on them, and the caption below promising otherwise was unreachable.
+# Out here, committing the box reruns the script and the browser follows.
+#
+# `disabled=busy` is load-bearing *because* of the move, not decoration copied
+# from the sidebar. In the form this input could not trigger a rerun, so it was
+# harmless mid-stream; out here typing into it during a turn would abort the
+# streaming pass at the next element call and drop minutes of model calls into
+# STOPPED, exactly as an ungated sidebar widget would. The key keeps its
+# identity stable across that toggle -- see the sidebar block on why.
+#
+# The picker beside it is an input method for this box, not a second source of
+# truth -- see `_pick_application`. So this stays the one value both the run and
+# the browser read, and a text input rather than a selectbox with
+# `accept_new_options`: AppTest serialises a selectbox by *index*
+# (`Selectbox.index` does `options.index(value)`), so a typed id that is not
+# already an option raises ValueError in the harness. Every case that names a
+# new application -- including the ones pinning that `../evil` is refused --
+# would become untestable, and these AppTest cases are the only coverage this
+# file has.
+with st.container(horizontal=True):
+    app_id = st.text_input(
+        "Application id",
+        key="app_id_input",
+        placeholder="nsf-aisl-2026",
+        disabled=busy,
+        help="Also the LangGraph thread id. Reuse it to continue a run, or to "
+        "browse an earlier one below.",
+    )
+    # Only worth drawing once there is something to pick, and it never gates the
+    # id box: typing an id that does not exist yet is how a new run is named.
+    if existing_ids:
+        st.selectbox(
+            "Browse an existing application",
+            existing_ids,
+            index=None,
+            key="browse_pick",
+            on_change=_pick_application,
+            placeholder="Pick one to read…",
+            disabled=busy,
+            help="Fills the id box on the left. Reading an application does not "
+            "start a run.",
         )
-        funder = st.text_input("Funder", placeholder="NSF")
+
+with st.form("draft", border=True):
+    funder = st.text_input("Funder", placeholder="NSF")
     rfp = st.file_uploader("Solicitation PDF", type="pdf")
     notes = st.text_area(
         "Additional context",
@@ -736,8 +808,11 @@ with status_slot:
 
 # --- Application files -------------------------------------------------------
 
-browse_id = (st.session_state.get("app_id_input") or "").strip()
-browse_id = browse_id or st.session_state.active_app_id
+# `app_id` is a live local now that its widget sits outside the form, so picking
+# or typing points the browser on the same pass -- no session-state round trip,
+# and no dependence on a submit having happened. The fallback keeps a finished
+# run's output on screen if the selection is cleared.
+browse_id = app_id.strip() or st.session_state.active_app_id
 
 with results_slot:
     st.subheader("Application files", anchor=False)
@@ -749,7 +824,7 @@ with results_slot:
             icon=":material/cloud_off:",
         )
     elif not browse_id:
-        st.caption("Enter an application id to browse its files.")
+        st.caption("Pick an application id above to browse its files.")
     else:
         try:
             # Same boundary as the write side, and it matters more here: without

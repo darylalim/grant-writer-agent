@@ -21,7 +21,12 @@ from grant_writer.backends import (
     seed_store_from_disk,
 )
 from grant_writer.cli import _build_parser, _resolve_interrupt
-from grant_writer.config import Settings, _resolve_root, application_dir
+from grant_writer.config import (
+    Settings,
+    _resolve_root,
+    application_dir,
+    application_ids,
+)
 from grant_writer.tools import build_search_tool
 from grant_writer.workspace import (
     NO_VERDICT,
@@ -339,3 +344,30 @@ def test_workspace_readers_tolerate_a_vanished_file(tmp_path):
     assert read_text(missing) == ""
     assert read_bytes(missing) is None
     assert modified_at(missing) == 0.0
+
+
+def test_application_ids_offers_only_what_the_boundary_will_accept(tmp_path):
+    """The picker's options get joined onto a path by `application_dir`, so an
+    entry that boundary would refuse must never be offered in the first place.
+    Both sides filter on `_SAFE_APP_ID`, which is what keeps them from drifting
+    into a dropdown whose entries raise when they are selected.
+    """
+    settings = Settings(root=tmp_path)
+    apps = tmp_path / "applications"
+    apps.mkdir()
+    (apps / "nsf-aisl-2026").mkdir()
+    (apps / "zz_ok.2").mkdir()
+    (apps / "has space").mkdir()  # not a legal id
+    (apps / "loose-file.md").write_text("x", encoding="utf-8")  # not a directory
+
+    listed = application_ids(settings)
+    assert listed == ["nsf-aisl-2026", "zz_ok.2"]
+    # Everything offered survives the boundary, which is the point.
+    for app_id in listed:
+        assert application_dir(settings, app_id).parent == apps.resolve()
+
+
+def test_application_ids_is_empty_before_the_directory_exists(tmp_path):
+    """First run, nothing drafted yet. Returning [] rather than raising is what
+    lets the frontend simply not draw the picker."""
+    assert application_ids(Settings(root=tmp_path)) == []

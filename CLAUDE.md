@@ -129,6 +129,17 @@ runs, and still produces plausible output.
    an unrecognized id safe — no test can enumerate those. `DEFAULT_MODELS` holds the shipped
    ids so `test_wiring` pins what the project ships rather than whatever the developer's
    environment overrides them to.
+10. **The application id input must stay outside `st.form`.** `st.form` batches its
+    widgets and sends them only when Submit is pressed. `streamlit_app.py` reads that
+    id back to decide which application the file browser shows, so inside the form the
+    browser could only ever show an id already submitted this session — reading an
+    earlier application meant clicking Draft proposal and starting a fresh billed run
+    on it. The page renders, the caption still says to enter an id, and nothing raises.
+    The picker beside it is an *input method* for that box: `_pick_application` writes
+    the box and clears the picker, so `browse_id` stays one expression. Two controls
+    both deciding which application is on screen disagree the moment a run starts on
+    one the picker is not showing, and whichever the code reads first is then wrong
+    half the time.
 
 ## Backend profiles
 
@@ -164,6 +175,20 @@ enabled state; otherwise the credential guard renders the disabled-button varian
 per-`AppTest`: without it a case that patches `build_agent` is handed whichever fake an earlier
 case cached under the same `(profile, approve, search)` key, and the suite passes or fails on
 test order.
+
+**`AppTest` does not model `st.form`, and this is the one place its green tick means less
+than it looks like.** `ElementTree.get_widget_states` walks every widget and serialises it
+regardless of `form_id`, so `set_value(...).run()` publishes a form widget immediately —
+which a browser never does. An assertion about a form widget's effect on the rest of the
+page is therefore only meaningful if the case also clicks the submit button; otherwise pin
+structure (`widget.form_id`) rather than behaviour, as invariant 10's test does. Four
+file-browser cases once passed against a browser where the pane stayed permanently empty.
+`AppTest` also serialises a selectbox by *index* (`Selectbox.index` calls
+`options.index(value)`), so `st.selectbox(accept_new_options=True)` cannot be driven here
+at all — a typed value that is not already an option raises `ValueError`. That is why the
+application id is a `st.text_input` with a picker beside it rather than one combined
+widget: the combined version is neater and would have made the path-escape cases, the most
+security-sensitive input in the app, impossible to test.
 
 ## Domain rules baked into the prompts
 
