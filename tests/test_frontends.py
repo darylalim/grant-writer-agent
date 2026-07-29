@@ -21,6 +21,7 @@ from grant_writer.activity import (
     PLAN,
     TOOL,
     approval_decisions,
+    is_parked,
     iter_activity,
     pending_action_requests,
 )
@@ -201,6 +202,27 @@ def test_pending_action_requests_flattens_across_interrupts():
     assert len(pending_action_requests(agent, {})) == 2
 
 
+def test_is_parked_does_not_depend_on_reading_the_payload():
+    """The whole reason it is not `bool(pending_action_requests(...))`.
+
+    A thread parked on an interrupt this app cannot parse is still parked, and
+    the two questions have to come apart: reading a request is a display concern
+    and may fail, while deciding whether a turn may start is control flow and
+    must not. Conflated, the guard fails open in exactly the case the
+    blind-approval panel exists for.
+    """
+    opaque = SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[SimpleNamespace(interrupts=[SimpleNamespace(value={})])]
+        )
+    )
+    assert pending_action_requests(opaque, {}) == []
+    assert is_parked(opaque, {}) is True
+
+    idle = SimpleNamespace(get_state=lambda _config: SimpleNamespace(tasks=[]))
+    assert is_parked(idle, {}) is False
+
+
 @pytest.mark.parametrize("n", [0, 1, 2, 5])
 def test_approval_decisions_returns_one_decision_per_request(n):
     """Both frontends build the resume payload here. A count that disagrees
@@ -259,6 +281,48 @@ def _app_test(monkeypatch=None):
             "grant_writer.config.require_api_keys", lambda **_kwargs: []
         )
     return AppTest.from_file(str(PROJECT_ROOT / "streamlit_app.py"), default_timeout=60)
+
+
+def _unparked(_config):
+    """`get_state` for a thread with nothing pending.
+
+    The submit handler reads the checkpoint before it starts a turn -- see
+    `parked` in streamlit_app.py -- so a stand-in agent driven through Draft
+    proposal has to answer that question too, not just `stream`. A fake with no
+    `get_state` raises AttributeError from inside the submit handler, which
+    surfaces as an unrelated-looking failure in whatever the case was actually
+    pinning.
+    """
+    return SimpleNamespace(tasks=[])
+
+
+def _parked_agent(*file_paths: str, **attrs):
+    """A stand-in whose thread is parked on one interrupt.
+
+    The interrupt carries one `write_file` action request per path -- the shape
+    `HumanInTheLoopMiddleware` produces and `pending_action_requests` flattens.
+    Built here rather than inlined per case because the payload shape is the
+    thing these tests exist to catch drifting: spelled out in each case, a
+    `deepagents` rename has to be applied everywhere to fail honestly, and a
+    copy updated late keeps passing against a shape nothing produces any more.
+    """
+    requests = [
+        {
+            "name": "write_file",
+            "args": {"file_path": path, "content": f"Final text for {path}."},
+        }
+        for path in file_paths
+    ]
+    return SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[
+                SimpleNamespace(
+                    interrupts=[SimpleNamespace(value={"action_requests": requests})]
+                )
+            ]
+        ),
+        **attrs,
+    )
 
 
 def test_streamlit_app_renders_without_error():
@@ -367,6 +431,8 @@ def test_the_run_button_is_disabled_while_a_turn_is_in_flight(monkeypatch):
         the same property the STOPPED guard at the top of the app relies on.
         """
 
+        get_state = staticmethod(_unparked)
+
         def stream(self, *_args, **_kwargs):
             streamlit.stop()
 
@@ -395,6 +461,8 @@ def test_the_run_button_comes_back_once_the_turn_ends(monkeypatch):
     class _FinishedAgent:
         """Streams nothing, so the turn ends immediately and offline."""
 
+        get_state = staticmethod(_unparked)
+
         def stream(self, *_args, **_kwargs):
             return iter(())
 
@@ -422,6 +490,8 @@ def test_a_follow_up_sends_what_the_cli_chat_loop_sends(monkeypatch):
 
     class _RecordingAgent:
         """Streams nothing, but keeps what it was asked to stream."""
+
+        get_state = staticmethod(_unparked)
 
         def stream(self, payload, config, **_kwargs):
             seen.append((payload, config))
@@ -458,29 +528,7 @@ def test_a_follow_up_cannot_be_sent_while_an_approval_is_pending(monkeypatch):
     pending submission-bound write rather than approving or rejecting it. The
     approval panel is the only way out of this state.
     """
-    agent = SimpleNamespace(
-        get_state=lambda _config: SimpleNamespace(
-            tasks=[
-                SimpleNamespace(
-                    interrupts=[
-                        SimpleNamespace(
-                            value={
-                                "action_requests": [
-                                    {
-                                        "name": "write_file",
-                                        "args": {
-                                            "file_path": "/applications/x/final/a.md",
-                                            "content": "Final text.",
-                                        },
-                                    }
-                                ]
-                            }
-                        )
-                    ]
-                )
-            ]
-        )
-    )
+    agent = _parked_agent("/applications/x/final/a.md")
     monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
 
     app = _app_test(monkeypatch)
@@ -493,6 +541,273 @@ def test_a_follow_up_cannot_be_sent_while_an_approval_is_pending(monkeypatch):
     assert app.chat_input(key="followup_input").disabled
     # The way forward is still on screen -- this gates the input, not the turn.
     assert any(button.label == "Approve" for button in app.button)
+
+
+def test_a_new_run_cannot_be_started_while_an_approval_is_pending(monkeypatch):
+    """The same hazard as the follow-up input, reached through the other control.
+
+    Submitting the form on AWAITING resumes nothing. It sends a fresh
+    `draft_request` on the same thread -- abandoning the pending
+    submission-bound write rather than approving or rejecting it -- and the
+    handler clears `activity` on the way, so the feed keeps no trace that a
+    write was ever pending. Locking the id box does not cover this on its own:
+    the brief is rebuilt from the id that box still holds, so the run restarts
+    on exactly the application whose approval it just discarded.
+    """
+    streamed: list[object] = []
+    agent = _parked_agent(
+        "/applications/x/final/a.md",
+        stream=lambda payload, **_kwargs: (streamed.append(payload), iter(()))[1],
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["active_app_id"] = "zz-pytest-parked"
+    app.session_state["app_id_input"] = "zz-pytest-parked"
+    app.session_state["phase"] = "awaiting"
+    app.run()
+
+    assert not app.exception
+    (submit,) = [button for button in app.button if button.label == "Draft proposal"]
+    assert submit.disabled
+    # The way out is the panel, not a new run -- as in the case above.
+    assert any(button.label == "Approve" for button in app.button)
+
+    # STOPPED stays clickable, because its banner tells you to re-submit the same
+    # id -- right whenever no interrupt survived the stop. What makes it safe
+    # when one did is the handler's checkpoint read, not this widget gate, so the
+    # click has to happen here: asserting only that the button is enabled pins a
+    # property of `turn_locked` alone, and stays green with the guard deleted.
+    app.session_state["phase"] = "stopped"
+    app.run()
+
+    assert not app.exception
+    (submit,) = [button for button in app.button if button.label == "Draft proposal"]
+    assert not submit.disabled
+    submit.click().run()
+
+    assert not app.exception
+    assert streamed == []  # no brief sent over the surviving interrupt
+    assert app.session_state["phase"] == "awaiting"
+
+
+def test_a_fresh_session_cannot_restart_a_thread_that_is_still_parked(monkeypatch):
+    """`phase` is this session's memory of the run; the checkpoint is the truth.
+
+    A reload starts a new session at IDLE with no `active_app_id`, so the submit
+    button renders enabled and the approval panel is gone -- while the thread is
+    still parked on a submission-bound write. No widget gate can see that, since
+    every one of them reads the same session state; only the checkpoint knows. A
+    second browser tab and `grant-writer chat --app-id X` arrive the same way.
+    Submitting has to route back into AWAITING rather than send a fresh brief
+    that discards the pending write with nothing on screen recording it existed.
+    """
+    streamed: list[object] = []
+    agent = _parked_agent(
+        "/applications/x/final/a.md",
+        stream=lambda payload, **_kwargs: (streamed.append(payload), iter(()))[1],
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    # A fresh session, exactly as a reload leaves one.
+    assert app.session_state["phase"] == "idle"
+    app.text_input(key="app_id_input").set_value("zz-pytest-parked")
+    (submit,) = [b for b in app.button if b.label == "Draft proposal"]
+    assert not submit.disabled  # nothing on screen knows the thread is parked
+    submit.click().run()
+
+    assert not app.exception
+    assert streamed == []  # no turn was started on top of the interrupt
+    assert app.session_state["phase"] == "awaiting"
+    assert app.session_state["active_app_id"] == "zz-pytest-parked"
+    # And the panel the user actually needs is now on screen.
+    assert any(button.label == "Approve" for button in app.button)
+
+
+def test_the_parked_guard_does_not_depend_on_reading_the_payload(monkeypatch):
+    """The guard asks `is_parked`, not whether any request could be read.
+
+    `pending_action_requests` returns [] for a parked thread whose payload it
+    cannot parse exactly as readily as for a thread with nothing pending, so a
+    guard written on its truthiness fails open in the one case the
+    blind-approval panel exists for: the graph is parked, the list is empty, and
+    a fresh brief streams over a submission-bound write nobody has seen.
+    """
+    streamed: list[object] = []
+    agent = SimpleNamespace(
+        # Parked, with the same unreadable payload shape that
+        # `test_an_unreadable_interrupt_does_not_offer_a_plain_approve` pins.
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[SimpleNamespace(interrupts=[SimpleNamespace(value={})])]
+        ),
+        stream=lambda payload, **_kwargs: (streamed.append(payload), iter(()))[1],
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-opaque")
+    next(b for b in app.button if b.label == "Draft proposal").click().run()
+
+    assert not app.exception
+    assert pending_action_requests(agent, {}) == []  # nothing readable...
+    assert streamed == []  # ...and still no turn started over it
+    assert app.session_state["phase"] == "awaiting"
+
+
+def test_a_follow_up_cannot_start_a_turn_on_a_parked_thread(monkeypatch):
+    """The other way to start a turn, and it needs the same checkpoint read.
+
+    `turn_locked` disables this input on AWAITING, but STOPPED is inferred from
+    a pass that stopped rather than from the graph: the toolbar's Stop can abort
+    the streaming pass after the interrupt is already committed. The input is
+    enabled there, and the STOPPED banner points the reader straight at it.
+    """
+    streamed: list[object] = []
+    agent = _parked_agent(
+        "/applications/x/final/a.md",
+        stream=lambda payload, **_kwargs: (streamed.append(payload), iter(()))[1],
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["active_app_id"] = "zz-pytest-parked"
+    app.session_state["phase"] = "stopped"
+    app.run()
+
+    # STOPPED is not AWAITING, so the widget gate does not cover this.
+    assert not app.chat_input(key="followup_input").disabled
+    app.chat_input(key="followup_input").set_value("tighten the need section").run()
+
+    assert not app.exception
+    assert streamed == []
+    assert app.session_state["phase"] == "awaiting"
+    # Not echoed into the feed either: it was never sent, and a prompt drawn
+    # there reads as one the agent has seen and is answering.
+    assert not any(event.kind == "prompt" for event in app.session_state["activity"])
+
+
+def test_recovering_a_parked_thread_drops_another_applications_feed(monkeypatch):
+    """The feed belongs to whichever thread this session last ran.
+
+    Recovering B while it still holds A's plan, delegations, and file writes
+    puts two applications on one screen at the moment invariant 11 calls the
+    most expensive -- and the results caption stays silent about it, because
+    `browse_id` and `active_app_id` now agree on B.
+    """
+    from grant_writer.activity import Event
+
+    agent = _parked_agent("/applications/x/final/a.md")
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["active_app_id"] = "zz-pytest-old"
+    app.session_state["activity"] = [Event(MESSAGE, detail="A's draft is complete.")]
+    app.session_state["phase"] = "done"
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-new")
+    next(b for b in app.button if b.label == "Draft proposal").click().run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "awaiting"
+    assert app.session_state["active_app_id"] == "zz-pytest-new"
+    assert app.session_state["activity"] == []
+
+
+def test_a_failing_agent_build_still_leaves_a_way_out_of_awaiting(monkeypatch):
+    """`get_agent` is inside the guarded block, not one line above it.
+
+    It builds the models and opens the SQLite connection (see
+    `agent._build_checkpointer`), so a read-only `.grant_writer/` or a dropped
+    ANTHROPIC_API_KEY raises there rather than in the checkpoint read below.
+    Left outside the try, it produced the identical unrecoverable page that try
+    exists to prevent -- a traceback over controls that are all disabled on
+    AWAITING, re-thrown on every rerun.
+    """
+
+    def _explode(*_args, **_kwargs):
+        msg = "unable to open database file"
+        raise OSError(msg)
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", _explode)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["active_app_id"] = "zz-pytest-nobuild"
+    app.session_state["phase"] = "awaiting"
+    app.run()
+
+    assert not app.exception
+    assert any(button.label == "Reject" for button in app.button)
+    assert any("unable to open database file" in error.value for error in app.error)
+
+
+def test_an_unreadable_checkpoint_still_leaves_a_way_out_of_awaiting(monkeypatch):
+    """AWAITING is the one phase with no enabled control that can leave it.
+
+    Every door into a turn is locked there, so the approval panel is the only
+    exit -- and it is drawn from a checkpoint read that can raise. `get_state`
+    goes to the SQLite file the CLI shares, so `database is locked` is a live
+    possibility rather than a hypothetical. Unguarded, that exception took the
+    panel with it: a traceback over a form that cannot be submitted and an id
+    box that cannot be edited, with no Approve or Reject anywhere, re-thrown on
+    every rerun because nothing left on screen could change the phase. Falling
+    through to the blind panel restores the exit -- Reject needs no readable
+    request to send, and releases the graph without writing.
+    """
+
+    def _locked(_config):
+        msg = "database is locked"
+        raise OSError(msg)
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent",
+        lambda *_a, **_k: SimpleNamespace(get_state=_locked),
+    )
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["active_app_id"] = "zz-pytest-locked"
+    app.session_state["phase"] = "awaiting"
+    app.run()
+
+    assert not app.exception
+    assert any(button.label == "Reject" for button in app.button)
+    # Named for what actually happened, rather than reported as the payload
+    # rename the blind panel explains by default.
+    assert any("database is locked" in error.value for error in app.error)
+
+
+def test_the_sidebar_freezes_while_an_approval_is_pending(monkeypatch):
+    """These settings decide which graph a resume runs through.
+
+    `get_agent` is keyed on (profile, approve, search), so flipping one on
+    AWAITING hands Approve a different graph from the one that parked: with
+    approve off, one built without the human-in-the-loop middleware whose
+    interrupt is sitting in the checkpoint; with profile `server`, one whose
+    drafts live in ephemeral graph state rather than in the files the pending
+    write targets. Gated on `busy` alone they stayed live at exactly that
+    moment -- the one control group that can change the lock while it is shut.
+    """
+    agent = _parked_agent("/applications/x/final/a.md")
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["active_app_id"] = "zz-pytest-parked"
+    app.session_state["phase"] = "awaiting"
+    app.run()
+
+    assert not app.exception
+    assert app.selectbox(key="profile_select").disabled
+    assert app.toggle(key="approve_toggle").disabled
+    assert app.toggle(key="search_toggle").disabled
+    assert app.number_input(key="recursion_limit_input").disabled
 
 
 def test_the_follow_up_input_is_disabled_before_any_run(monkeypatch):
@@ -611,6 +926,8 @@ def test_the_sidebar_is_frozen_while_a_turn_is_in_flight(monkeypatch):
     streamlit = pytest.importorskip("streamlit", reason="dev dependency")
 
     class _HaltingAgent:
+        get_state = staticmethod(_unparked)
+
         def stream(self, *_args, **_kwargs):
             streamlit.stop()
 
@@ -865,6 +1182,8 @@ def test_the_application_id_and_its_picker_freeze_while_a_turn_is_in_flight(
     streamlit = pytest.importorskip("streamlit", reason="dev dependency")
 
     class _HaltingAgent:
+        get_state = staticmethod(_unparked)
+
         def stream(self, *_args, **_kwargs):
             streamlit.stop()
 
@@ -895,28 +1214,7 @@ def test_the_application_id_stays_frozen_while_an_approval_is_pending(
     disabled on AWAITING for the same reason; this reaches that state from the
     other side.
     """
-    agent = SimpleNamespace(
-        get_state=lambda _config: SimpleNamespace(
-            tasks=[
-                SimpleNamespace(
-                    interrupts=[
-                        SimpleNamespace(
-                            value={
-                                "action_requests": [
-                                    {
-                                        "name": "write_file",
-                                        "args": {
-                                            "file_path": "/applications/x/final/n.md"
-                                        },
-                                    }
-                                ]
-                            }
-                        )
-                    ]
-                )
-            ]
-        )
-    )
+    agent = _parked_agent("/applications/x/final/n.md")
     monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
 
     app = _app_test(monkeypatch)

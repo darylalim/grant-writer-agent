@@ -125,6 +125,26 @@ def pending_action_requests(agent: Any, config: dict[str, Any]) -> list[dict[str
     return requests
 
 
+def is_parked(agent: Any, config: dict[str, Any]) -> bool:
+    """Whether the thread is stopped on an interrupt at all.
+
+    Deliberately not `bool(pending_action_requests(...))`, and the difference is
+    the whole reason this exists. That function returns `[]` just as readily for
+    a parked thread whose payload it could not parse -- a renamed `deepagents`
+    key, a non-dict interrupt value, both of which it skips without raising --
+    as for a thread with nothing pending at all. Deciding *may a new turn start*
+    on the count of readable requests therefore fails open in precisely the case
+    the blind-approval panel exists for: the graph is parked, the list is empty,
+    and a fresh turn streams over a submission-bound write no one ever saw.
+
+    Reading a request is a display concern and may fail; whether the graph is
+    parked is a control-flow one and must not. Callers that need both should ask
+    this first -- see invariant 5.
+    """
+    state = agent.get_state(config)
+    return any(getattr(task, "interrupts", None) for task in state.tasks)
+
+
 def approval_decisions(
     requests: list[dict[str, Any]],
     *,

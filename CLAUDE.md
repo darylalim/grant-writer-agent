@@ -150,11 +150,49 @@ runs, and still produces plausible output.
     the graph runs on `active_app_id`, which only the submit handler assigns, so the two
     *can* differ. That is wanted — reading an old draft must not cost a billed turn — so
     the results block says which is which on screen rather than silently retargeting one
-    of them. It is bounded on the other side by `id_locked`, which is `busy or phase ==
+    of them. It is bounded on the other side by `turn_locked`, which is `busy or phase ==
     AWAITING`, not `busy` alone: on AWAITING the approval panel is asking a human to vet
     a submission-bound write for `active_app_id`, and the file browser directly under it
     describing a different application is the one moment that context has to be right.
-    The follow-up input is disabled on AWAITING for the same reason.
+
+11. **Starting a turn on a parked thread abandons the pending write, and `phase` cannot
+    tell you the thread is parked.** A fresh `draft_request` or a plain message on a
+    thread sitting on an interrupt does not resume it — the submission-bound write a
+    human was asked to vet is discarded, the submit handler clears the feed that recorded
+    it, and nothing raises. Two mechanisms, and both are needed:
+
+    - `turn_locked` greys out every control that can start one — the sidebar, the id box,
+      the browse picker, the run form, the follow-up input. Gate them on that one
+      expression rather than on `busy` at each site, or a phase added later reaches only
+      some of them. The sidebar belongs in that list because `get_agent` is keyed on
+      `(profile, approve, search)`: flipping one on AWAITING hands Approve a *different*
+      graph than the one that parked — with approve off, one built without the
+      human-in-the-loop middleware whose interrupt is in the checkpoint.
+    - That is a courtesy, not a guarantee, because `phase` is one browser session's
+      memory. A reload starts a fresh session at IDLE, a second tab has its own, and
+      STOPPED and FAILED are both *inferred from a pass that stopped* rather than from the
+      graph, so either can be reached with an interrupt already committed. So **both**
+      handlers that start a turn — the run form and the follow-up input — ask the
+      checkpoint first and route back into AWAITING instead. That read is what actually
+      holds; it is also the only path that puts the approval panel back after a reload.
+      Guarding only the form leaves the hole open in the phase whose own banner points the
+      reader at the follow-up box.
+
+    Ask it with `activity.is_parked`, never `pending_action_requests(...)` being non-empty.
+    Per invariant 5 that returns `[]` for a parked thread whose payload could not be read
+    just as readily as for a thread with nothing pending, so a guard written on its
+    truthiness fails open in precisely the case the blind-approval panel exists for.
+    Reading a request is a display concern and may fail; whether the graph is parked is
+    control flow and must not.
+
+    AWAITING is then the one phase with no enabled way out, which makes the approval panel
+    the sole exit — so everything that draws it sits inside one `try`, **including
+    `get_agent`**, which builds models and opens the SQLite connection and so raises on a
+    read-only `.grant_writer/` or a dropped key. One line left outside that block produces
+    the identical unrecoverable page: a traceback over controls that are all disabled,
+    re-thrown every rerun. It falls through to the blind panel instead, whose Reject needs
+    no readable request to send, and which offers a retry when the cause was an exception
+    rather than a payload it could not parse.
 
 ## Backend profiles
 

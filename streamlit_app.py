@@ -29,6 +29,7 @@ from grant_writer.activity import (
     TOOL,
     Event,
     approval_decisions,
+    is_parked,
     iter_activity,
     pending_action_requests,
 )
@@ -147,6 +148,25 @@ if st.session_state.phase == RUNNING and st.session_state.payload is None:
 # STOPPED. Disabling the submit button alone would just move which control
 # throws the run away.
 busy = st.session_state.phase == RUNNING
+
+# Everything that can start a turn is gated on this rather than on `busy`.
+# RUNNING is not the only phase where starting one is wrong: on AWAITING the
+# graph is parked on an interrupt, and a fresh brief or a plain message there
+# resumes nothing -- it abandons the submission-bound write the approval panel
+# is asking a human to vet. Spelled once rather than at each site, so a phase
+# added here reaches every control instead of most of them, and named for the
+# rule rather than the first control it gated: it now covers the sidebar, the
+# id box, the browse picker, the run form, and the follow-up input.
+#
+# This is only the session's own guess, though. `phase` is *this* browser
+# session's memory of the run, and a reload, a second tab, or `grant-writer
+# chat` in another terminal all reach a still-parked thread with it back at
+# IDLE -- while STOPPED and FAILED can both be reached with an interrupt
+# already committed, since either is inferred from a pass that stopped rather
+# than from the graph. So this gates the controls and the submit handler asks
+# the checkpoint; see `parked` there. Disabled widgets are the courtesy, that
+# check is the guarantee.
+turn_locked = busy or st.session_state.phase == AWAITING
 
 
 @st.cache_resource(show_spinner=False)
@@ -279,7 +299,7 @@ def render_feed(events: list[Event]) -> None:
 
 
 @st.fragment
-def approval_panel(requests: list[dict]) -> None:
+def approval_panel(requests: list[dict], unreadable: str = "") -> None:
     """Draw the approval prompt for one interrupt's pending writes.
 
     A fragment because of the rejection-reason box. `st.text_input` commits on
@@ -293,6 +313,13 @@ def approval_panel(requests: list[dict]) -> None:
     reuses the last arguments instead of re-reading the checkpoint on every
     keystroke. They cannot go stale under it: only a resume clears the
     interrupt, and `resume_with` reruns the whole app.
+
+    `unreadable` is the *cause* when the caller already knows why the list is
+    empty, not a replacement message. An empty list has two very different
+    reasons -- a payload this app could not parse, or a checkpoint read that
+    raised -- and reporting a locked database as a `deepagents` rename sends the
+    reader after the wrong thing. Only one of the two is worth retrying, which
+    is the other thing this argument decides.
     """
     with st.container(border=True):
         st.subheader("Approval required", anchor=False)
@@ -307,14 +334,29 @@ def approval_panel(requests: list[dict]) -> None:
         # blind take a second, deliberate action.
         blind = not requests
         if blind:
+            # One safety sentence, composed here rather than written out at each
+            # call site. Only the cause differs between them, and a copy of the
+            # warning kept beside each cause is a copy that goes stale silently:
+            # the wording that tells a human not to approve blind is the last
+            # thing that should drift between two branches of the same panel.
+            cause = unreadable or (
+                "most likely a `deepagents` upgrade that renamed the interrupt payload"
+            )
             st.error(
-                "This run is waiting on an approval, but no pending write could "
-                "be read from it — most likely a `deepagents` upgrade that "
-                "renamed the interrupt payload. Approving would sign off on a "
-                "submission-bound file without seeing it. Rejecting is safe: it "
-                "releases the graph without writing.",
+                f"This run is waiting on an approval, but no pending write "
+                f"could be read from it — {cause}. Approving would sign off on "
+                "a submission-bound file without seeing it. Rejecting is safe: "
+                "it releases the graph without writing.",
                 icon=":material/error:",
             )
+            # A read that raised may simply have lost a race for the SQLite file
+            # the CLI shares. That case wants another look, not a decision --
+            # without it the only offers on screen are throwing away a good
+            # draft or approving one nobody has seen. Withheld when the payload
+            # merely did not parse: rereading returns the same bytes, and a
+            # retry that cannot help reads as one that was not tried hard enough.
+            if unreadable and st.button("Try again", icon=":material/refresh:"):
+                st.rerun()
         else:
             # `approval_decisions` owns the resume count, shared with the CLI
             # prompt: one decision per action request, not per interrupt.
@@ -494,7 +536,7 @@ with st.sidebar:
         "Backend profile",
         ("local", "server"),
         key="profile_select",
-        disabled=busy,
+        disabled=turn_locked,
         help=(
             "`local` writes real files under `applications/`. `server` keeps "
             "drafts in ephemeral graph state, so the file browser stays empty."
@@ -507,14 +549,14 @@ with st.sidebar:
         "Approve writes to final/",
         value=True,
         key="approve_toggle",
-        disabled=busy,
+        disabled=turn_locked,
         help="Pause before each submission-bound file and show it for review.",
     )
     search = st.toggle(
         "Web search",
         value=True,
         key="search_toggle",
-        disabled=busy,
+        disabled=turn_locked,
         help="Funder research needs TAVILY_API_KEY. Turn off to run without it.",
     )
     recursion_limit = st.number_input(
@@ -524,7 +566,7 @@ with st.sidebar:
         value=150,
         step=10,
         key="recursion_limit_input",
-        disabled=busy,
+        disabled=turn_locked,
         help="Maximum graph steps per turn.",
     )
     st.divider()
@@ -593,22 +635,19 @@ if missing:
 # new application -- including the ones pinning that `../evil` is refused --
 # would become untestable, and these AppTest cases are the only coverage this
 # file has.
-# `busy` is RUNNING alone, and RUNNING is not the only phase where retargeting
-# this box lies about the page. On AWAITING the graph is parked on an interrupt
-# and the approval panel below is asking a human to vet a `final/` write for
-# `active_app_id`; moving the box there leaves that panel and the files pane
-# under it describing two different applications, at the one moment the
-# surrounding context has to be right. The follow-up input is disabled on
-# AWAITING for the same reason -- see its `disabled` -- and this is the control
-# that reaches the same state from the other direction.
-id_locked = busy or st.session_state.phase == AWAITING
+# `turn_locked` (defined at the top) covers this box for a reason of its own,
+# beyond the shared "no turn may start on a parked thread": on AWAITING the
+# approval panel below is asking a human to vet a `final/` write for
+# `active_app_id`, and retargeting the box there leaves that panel and the files
+# pane under it describing two different applications, at the one moment the
+# surrounding context has to be right.
 
 with st.container(horizontal=True):
     app_id = st.text_input(
         "Application id",
         key="app_id_input",
         placeholder="nsf-aisl-2026",
-        disabled=id_locked,
+        disabled=turn_locked,
         help="Also the LangGraph thread id. Reuse it to continue a run, or to "
         "browse an earlier one below.",
     )
@@ -622,7 +661,7 @@ with st.container(horizontal=True):
             key="browse_pick",
             on_change=_pick_application,
             placeholder="Pick one to read…",
-            disabled=id_locked,
+            disabled=turn_locked,
             help="Fills the id box on the left. Reading an application does not "
             "start a run.",
         )
@@ -645,7 +684,23 @@ with st.form("draft", border=True):
         "Draft proposal",
         type="primary",
         icon=":material/play_arrow:",
-        disabled=bool(missing) or busy,
+        # `turn_locked`, not `busy` -- this is a door into the parked state the
+        # id box and the follow-up input are already gated against. Submitting
+        # on AWAITING does not resume the interrupt: it sends a fresh
+        # `draft_request` on the same thread, abandoning the pending
+        # submission-bound write, and clears `activity` on the way so the feed
+        # keeps no trace that one was ever pending. Locking the id box does not
+        # cover it -- the brief is rebuilt from the id that box still holds.
+        #
+        # Only the phases this session knows about, though; the handler's
+        # `parked` check is what actually holds. Left enabled on STOPPED and
+        # FAILED on purpose: their banners tell you to re-submit the same id,
+        # which is right whenever no interrupt survived, and the handler
+        # refuses the case where one did.
+        disabled=bool(missing) or turn_locked,
+        help="Resolve the pending approval below before starting a new run."
+        if turn_locked and not busy
+        else None,
     )
 
 # --- Reserve output slots before any slow work -------------------------------
@@ -665,6 +720,42 @@ if submitted:
         # `applications/` outright: pathlib discards the left operand for an
         # absolute right one, so an id of "/Users/me/.ssh" writes there.
         app_dir = application_dir(settings, app_id)
+
+        # Ask the graph, not the phase. `turn_locked` greys this button out
+        # whenever *this* session remembers parking on an interrupt, but that
+        # memory is the weakest thing in the room: a page reload starts a fresh
+        # session at IDLE, a second tab has its own, `grant-writer chat` has
+        # none, and STOPPED and FAILED are both inferred from a pass that
+        # stopped rather than from the graph -- so either can be reached with an
+        # interrupt already committed. In every one of those the button is
+        # enabled and the thread is still parked, and submitting would send a
+        # fresh brief that discards a submission-bound write a human was asked
+        # to vet, with nothing on screen recording that it existed.
+        #
+        # The checkpoint knows, and one read answers for all of them. Route it
+        # back into AWAITING rather than refusing outright: the panel that
+        # renders there is the thing the user actually needs, and this is the
+        # only path that puts it back on screen after a reload.
+        #
+        # `is_parked`, not `pending_action_requests(...)` being non-empty. That
+        # returns [] for a parked thread whose payload could not be read as
+        # readily as for one with nothing pending, so asking it here fails open
+        # in exactly the case the blind panel exists for -- see invariant 5.
+        if is_parked(
+            get_agent(profile, approve, search),
+            {"configurable": {"thread_id": app_id}},
+        ):
+            # The feed belongs to whichever thread this session last ran. Kept
+            # when that is the thread being resumed, cleared when it is not:
+            # otherwise A's plan and file writes sit under an approval panel
+            # asking about a `final/` write for B, with the results caption
+            # silent because `browse_id` and `active_app_id` now agree.
+            if app_id != st.session_state.active_app_id:
+                st.session_state.activity = []
+            st.session_state.active_app_id = app_id
+            st.session_state.error = ""
+            st.session_state.phase = AWAITING
+            st.rerun()
 
         rfp_path = None
         if rfp is not None:
@@ -724,7 +815,14 @@ with activity_slot:
     feed = st.container(height=440, border=True, autoscroll=True)
     with feed:
         render_feed(st.session_state.activity)
-        if not st.session_state.activity and st.session_state.phase != RUNNING:
+        # AWAITING is excluded, not just RUNNING. The reload-recovery path lands
+        # there with an empty feed -- a fresh session has no events -- and this
+        # would then invite the reader to submit, above a disabled button, under
+        # an approval panel that is the one thing they can actually act on.
+        if not st.session_state.activity and st.session_state.phase not in (
+            RUNNING,
+            AWAITING,
+        ):
             st.caption("Nothing yet. Submit a solicitation above to start a run.")
     # Nested inside a container on purpose. Called from the main body,
     # `st.chat_input` pins itself to the bottom of the viewport and would float
@@ -736,16 +834,14 @@ with activity_slot:
         if st.session_state.active_app_id
         else "Start a run above, then refine it here…",
         key="followup_input",
-        # AWAITING is not idleness. The graph is parked on an interrupt, and a
-        # fresh message there starts a new turn rather than answering it --
-        # abandoning the pending write instead of approving or rejecting it.
-        # Resolve the approval first; its panel is directly below.
-        disabled=(
-            busy
-            or bool(missing)
-            or not st.session_state.active_app_id
-            or st.session_state.phase == AWAITING
-        ),
+        # `turn_locked` carries the AWAITING half of this: the graph is parked
+        # on an interrupt there, and a fresh message starts a new turn rather
+        # than answering it -- abandoning the pending write instead of approving
+        # or rejecting it. Resolve the approval first; its panel is directly
+        # below. Shared rather than spelled out here, so a phase added to that
+        # expression reaches this input too; the extra clause is this control's
+        # own precondition, that there is a thread to continue at all.
+        disabled=(turn_locked or bool(missing) or not st.session_state.active_app_id),
         # Closes the window inside the submitting pass itself, before the rerun
         # below lands and `busy` takes over: `disabled` is computed from a phase
         # read at the top of this pass, so without this a second submission here
@@ -758,6 +854,27 @@ with activity_slot:
     )
 
 if followup:
+    # The same question the submit handler asks, for the same reason, because
+    # this is the other way to start a turn. `turn_locked` disables this input
+    # on AWAITING, but AWAITING is only what *this* session remembers: STOPPED
+    # and FAILED are both inferred from a pass that stopped rather than from the
+    # graph, so either can be reached with an interrupt already committed -- and
+    # the STOPPED banner points the user straight at this box. Sending there
+    # abandons the pending write exactly as a fresh brief would.
+    if is_parked(
+        get_agent(profile, approve, search),
+        {"configurable": {"thread_id": st.session_state.active_app_id}},
+    ):
+        # Not appended to the feed: it was never sent, and a prompt echoed there
+        # reads as one the agent has seen and is answering.
+        st.session_state.error = (
+            "That message was not sent — this run is waiting on an approval, "
+            "and a new message would abandon the pending write rather than "
+            "answer it. Resolve the approval below, then ask again."
+        )
+        st.session_state.phase = AWAITING
+        st.rerun()
+
     st.session_state.activity.append(Event(PROMPT, detail=followup))
     # A plain turn on the existing thread, the same payload shape `cli._chat`
     # sends -- not another `draft_request`, which would re-brief the agent to
@@ -807,11 +924,36 @@ with status_slot:
         st.error(st.session_state.error, icon=":material/error:")
 
     if st.session_state.phase == AWAITING:
-        agent = get_agent(profile, approve, search)
-        config = {"configurable": {"thread_id": st.session_state.active_app_id}}
         # Read the checkpoint here, in the full app run, and hand the result to
         # the fragment -- see approval_panel on why it does not fetch its own.
-        approval_panel(pending_action_requests(agent, config))
+        #
+        # Guarded because AWAITING is the one phase with no enabled way out:
+        # every control that could start a turn is locked, so the panel below is
+        # the only exit, and an exception escaping this read takes the panel with
+        # it. The page then shows a traceback over a form it cannot submit, an id
+        # box it cannot edit, and no Approve or Reject at all -- and every rerun
+        # re-throws, because nothing left on screen can change the phase.
+        # `agent.get_state` reads the SQLite checkpoint the CLI shares, so
+        # `database is locked` is a live possibility, not a hypothetical.
+        #
+        # Falling through to the blind panel is what restores the exit: Reject
+        # needs no readable request to send, and releases the graph without
+        # writing. Approve stays behind its acknowledgement checkbox.
+        #
+        # `get_agent` is inside the try, not above it. It builds models and
+        # opens the SQLite connection (see agent._build_checkpointer), so a
+        # read-only `.grant_writer/` or a dropped ANTHROPIC_API_KEY raises there
+        # rather than in the read below -- one line outside the guard, producing
+        # the identical unrecoverable page this whole block exists to prevent.
+        try:
+            agent = get_agent(profile, approve, search)
+            config = {"configurable": {"thread_id": st.session_state.active_app_id}}
+            pending = pending_action_requests(agent, config)
+            unreadable = ""
+        except Exception as exc:  # noqa: BLE001 - the panel is the only exit
+            pending = []
+            unreadable = f"{type(exc).__name__}: {exc}"
+        approval_panel(pending, unreadable)
 
     elif st.session_state.phase == STOPPED:
         st.warning(
@@ -864,8 +1006,17 @@ with results_slot:
             st.session_state.active_app_id
             and browse_id != st.session_state.active_app_id
         ):
+            # Name the control that actually belongs to `active_app_id` in the
+            # phase the reader is in. On AWAITING the follow-up box is disabled,
+            # so pointing at it explains the split with the one control on
+            # screen that cannot demonstrate it -- and the panel that *is*
+            # asking about a `final/` write for that application goes unnamed,
+            # in the state where confusing the two is most expensive.
             st.caption(
-                f"Reading `{browse_id}`. The follow-up box above still "
+                f"Reading `{browse_id}`. The approval above is for "
+                f"`{st.session_state.active_app_id}`."
+                if st.session_state.phase == AWAITING
+                else f"Reading `{browse_id}`. The follow-up box above still "
                 f"continues `{st.session_state.active_app_id}`."
             )
         try:

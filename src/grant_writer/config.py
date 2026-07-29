@@ -190,6 +190,12 @@ def application_ids(settings: Settings) -> list[str]:
     `application_dir` resolves the symlink, finds it outside the tree, and
     raises. The directory is *listed*, not trusted.
 
+    Two names are dropped on grounds the boundary has no opinion about, because
+    acceptance is not the only question a listing has to answer. The second is
+    identity: `application_dir` strips before it validates, so `"nsf-26 "` is
+    accepted and resolves to `applications/nsf-26`, and an entry that reads one
+    application and opens another is worse than one that is simply absent.
+
     Dot-leading names are dropped separately, because the regex admits them --
     only `.` and `..` are special-cased -- so `.ipynb_checkpoints` and `.git`
     would otherwise sit in the picker beside real applications. This is a
@@ -212,6 +218,16 @@ def application_ids(settings: Settings) -> list[str]:
     ids = []
     for name in names:
         if name.startswith("."):
+            continue
+        # `application_dir` strips before it validates, so `"nsf-26 "` is
+        # accepted and resolves to `applications/nsf-26` -- a different
+        # directory from the one being listed under that name. The narrow case
+        # this actually changes is both existing at once: `is_dir()` below
+        # already drops the padded name when the unpadded directory does not
+        # exist, so what is removed here is a second picker row that looks like
+        # `nsf-26`, is not, and opens it anyway. Not a containment fix -- the
+        # boundary below is still what decides acceptance.
+        if name != name.strip():
             continue
         try:
             resolved = application_dir(settings, name)

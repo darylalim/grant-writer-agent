@@ -419,6 +419,27 @@ def test_application_ids_hides_dot_directories(tmp_path):
     assert application_dir(settings, ".git").name == ".git"
 
 
+def test_application_ids_does_not_offer_a_name_that_opens_another_directory(tmp_path):
+    """Calling the boundary settles whether an id is *accepted*, not whether it
+    still denotes the directory that was listed. `application_dir` strips before
+    it validates, so `"nsf-26 "` -- a trailing space, which a hand-made
+    directory picks up easily -- is accepted and resolves to
+    `applications/nsf-26`. Listed verbatim it puts an entry in the picker that
+    reads one application and opens another, while the padded directory stays
+    unreachable through any frontend, since no accepted id resolves to it.
+    """
+    settings = Settings(root=tmp_path)
+    apps = tmp_path / "applications"
+    apps.mkdir()
+    (apps / "nsf-26").mkdir()
+    (apps / "nsf-26 ").mkdir()
+
+    assert application_ids(settings) == ["nsf-26"]
+    # The boundary does accept it -- that is exactly why the listing has to ask
+    # the further question rather than trusting acceptance alone.
+    assert application_dir(settings, "nsf-26 ") == (apps / "nsf-26").resolve()
+
+
 def test_application_ids_survives_an_unreadable_applications_directory(tmp_path):
     """This is called from the Streamlit script body, outside any try, so an
     `OSError` here takes down the whole page -- no title, no sidebar, no way to
