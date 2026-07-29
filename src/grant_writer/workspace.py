@@ -83,11 +83,19 @@ def count_gaps(files: list[Path]) -> int:
     refused to invent and a human still has to supply. Review reports are
     excluded because the compliance reviewer's job is to *collect* these
     markers, so counting its report would double every gap it found.
+
+    The suffix test is case-insensitive, and has to agree with whatever the
+    frontends call a draft: the file browser renders `NEEDS.MD` through the
+    markdown branch, so a case-sensitive test here would render a file's gaps
+    on screen while leaving them out of the count above it. Under-reporting
+    this number is the one direction that matters -- each marker is a fact the
+    agent refused to invent, and a total that silently omits some reads as
+    fewer questions outstanding rather than as a bug.
     """
     return sum(
         read_text(path).count("[NEEDS INPUT")
         for path in files
-        if path.suffix == ".md" and path.parent.name != "review"
+        if path.suffix.lower() == ".md" and path.parent.name != "review"
     )
 
 

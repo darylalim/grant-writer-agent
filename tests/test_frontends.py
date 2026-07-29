@@ -29,6 +29,7 @@ from grant_writer.activity import (
 from grant_writer.cli import _print_activity
 from grant_writer.config import Settings, persistent_settings
 from grant_writer.prompts import draft_request
+from grant_writer.workspace import application_files, count_gaps
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1561,6 +1562,13 @@ def application_with_awkward_files():
     (app_dir / "participants.csv").write_bytes(
         "name,site\nJos\xe9 Garc\xeda,Escuela\n".encode("latin-1")
     )
+    # The branches that decide whether a *draft* is readable, which `.PDF`
+    # alone does not reach. The marker is here so `count_gaps` can be held to
+    # the same suffix table the viewer uses.
+    (app_dir / "NARRATIVE.MD").write_text(
+        "# Need\n\n[NEEDS INPUT: the deadline]\n", encoding="utf-8"
+    )
+    (app_dir / "ROSTER.CSV").write_text("name,site\nA,B\n", encoding="utf-8")
     try:
         yield app_id
     finally:
@@ -1612,6 +1620,129 @@ def test_a_text_file_that_is_not_utf8_is_refused_rather_than_blanked(
     assert len(app.download_button) == 1
     # The bug was an empty code block sitting where the file should be.
     assert not [block for block in app.code if block.value == ""]
+
+
+def test_the_case_insensitive_suffix_reaches_the_text_branches_too(
+    application_with_awkward_files,
+):
+    """`.PDF` only exercises the `.pdf` branch. The branches that decide
+    whether a *draft* is readable are markdown and CODE_LANGUAGES, and a missed
+    lowercase there is a download button where the narrative should be.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_awkward_files)
+    app.run()
+
+    app.radio(key="file_pick").set_value("NARRATIVE.MD").run()
+    assert not app.exception
+    # Markdown, so it gets the Source/Rendered control and no download.
+    assert len(app.segmented_control) == 1
+    assert not app.download_button
+    assert "the deadline" in " ".join(block.value for block in app.markdown)
+
+    app.radio(key="file_pick").set_value("ROSTER.CSV").run()
+    assert not app.exception
+    # A CODE_LANGUAGES suffix, so monospace rather than markdown or download.
+    assert not app.download_button
+    assert "name,site" in " ".join(block.value for block in app.code)
+
+
+def test_the_gap_count_agrees_with_what_the_viewer_calls_a_draft(
+    application_with_awkward_files,
+):
+    """`count_gaps` classifies by suffix too, and it is the number the app
+    calls the most important one it can show. Left case-sensitive while the
+    viewer was made case-insensitive, the two disagreed: `NARRATIVE.MD` renders
+    as a draft in the pane while its `[NEEDS INPUT]` markers are missing from
+    the metric above it -- under-reporting, which reads as fewer questions
+    outstanding rather than as a bug.
+    """
+    app_dir = PROJECT_ROOT / "applications" / application_with_awkward_files
+    assert count_gaps(application_files(app_dir)) == 1
+
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_awkward_files)
+    app.run()
+
+    assert not app.exception
+    (needs_input,) = [m for m in app.metric if m.label == "Needs input"]
+    assert needs_input.value == "1"
+
+
+def test_the_view_toggles_cannot_be_deselected(application_with_drafts):
+    """Deselecting returned None and the pane fell back to source with no
+    segment lit, so the control described neither view. `required=True` is what
+    keeps the pair exhaustive, and nothing else in the file would fail if it
+    were dropped.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.run()
+
+    app.radio(key="file_pick").set_value("sections/need.md").run()
+    (control,) = app.segmented_control
+    assert control.value == "Rendered"
+    # `required` is what the widget carries; deselection is a frontend gesture
+    # AppTest cannot make, so the flag itself is the thing to pin.
+    assert control.proto.required, "the browser's view toggle is deselectable"
+
+
+def test_the_approval_view_toggle_cannot_be_deselected(monkeypatch):
+    """Same flag, on the panel where the stakes are highest: this is the one
+    moment a human vets a submission-bound file, and a deselect there unlit the
+    control above a pane still showing one of the two views.
+    """
+    agent = _parked_agent("/applications/zz-pytest-view/final/need.md")
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-view"
+    app.run()
+
+    (control,) = app.segmented_control
+    assert control.proto.required, "the approval view toggle is deselectable"
+
+
+def test_rejecting_a_blind_panel_does_not_take_the_page_with_it(monkeypatch):
+    """AWAITING has no enabled way out but the approval panel, and when the
+    checkpoint read raises it is the *blind* panel -- whose Reject needs no
+    readable request to send. That Reject lands in the run block, phase already
+    RUNNING and the payload consumed, and `get_agent` there was the one call
+    site outside a try. It raised again, escaped as a traceback, and the next
+    pass inferred STOPPED -- whose banner invites re-submitting the same id
+    over an interrupt still in the checkpoint, which is the abandonment
+    invariant 11 exists to prevent, reached through the one control that was
+    supposed to be the way out.
+    """
+
+    def _boom(*_args, **_kwargs):
+        msg = "unable to open database file"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", _boom)
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-blind"
+    app.run()
+
+    # The status block caught the read and fell through to the blind panel.
+    assert any("no pending write" in banner.value for banner in app.error)
+
+    (reject,) = [button for button in app.button if button.label == "Reject"]
+    reject.click().run()
+
+    assert not app.exception, "Reject on the blind panel raised"
+    # Reported rather than thrown, and the phase is terminal so the form is
+    # live again -- submitting the same id re-reads and routes back to AWAITING
+    # once the underlying cause clears.
+    assert app.session_state["phase"] == "failed"
+    assert "unable to open database file" in app.session_state["error"]
 
 
 def test_missing_api_keys_disable_the_run_button(monkeypatch):

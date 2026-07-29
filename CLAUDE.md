@@ -207,6 +207,17 @@ runs, and still produces plausible output.
     no readable request to send, and which offers a retry when the cause was an exception
     rather than a payload it could not parse.
 
+    That makes **three** sites that build the agent, and all three must guard it — the two
+    turn-starting reads via `parked_state`, the panel's own read, and the run block, which
+    is the one it is easiest to forget because nothing there looks like a checkpoint read.
+    It is reached from the blind panel: Reject sets `phase = RUNNING` and reruns, and the
+    run block then calls `get_agent` with the payload already consumed. Unguarded, the same
+    cause that produced the blind panel raises again and escapes — the resume `Command` is
+    gone, the panel is no longer drawn because the phase is no longer AWAITING, and the next
+    pass infers STOPPED, whose banner invites re-submitting the same id over an interrupt
+    still committed. The sole exit from AWAITING then ends in exactly the abandonment this
+    invariant exists to prevent.
+
 ## Backend profiles
 
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files

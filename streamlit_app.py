@@ -211,9 +211,9 @@ def parked_state(
     the SQLite file `grant-writer chat` also opens, so `database is locked`
     arrives as `sqlite3.OperationalError`, which is neither an `OSError` nor a
     `ValueError` -- the submit handler's own tuple did not cover it, and the
-    read reached that handler as a raw traceback over a half-set phase.
-    `st.rerun()` raises a BaseException subclass, so the callers' reruns still
-    pass through this untouched.
+    read reached that handler as a raw traceback over a half-set phase. The
+    breadth is bounded by how little is inside the try: two calls, neither of
+    which reruns, so nothing here can swallow control flow.
 
     `get_agent` is inside the try, not above it: it builds models and opens the
     SQLite connection, so a read-only `.grant_writer/` or a dropped API key
@@ -500,8 +500,7 @@ def render_file(path: Path) -> None:
     # CODE_LANGUAGES exists to prevent ("a viewer that quietly shows something
     # other than the file is worse than one that refuses to"), reached through
     # the encoding rather than the format. Decoding explicitly below tells the
-    # two apart, and reading once also stops the markdown branch touching disk
-    # twice per rerun.
+    # two apart.
     if (blob := read_bytes(path)) is None:
         # Same message, a narrower window: the file survived the check above
         # and vanished before the read.
@@ -612,14 +611,16 @@ with st.sidebar:
     # is derived from its value-shaping parameters -- `label`, `value`,
     # `options`, `help`, `width` -- and a widget whose identity changes remounts
     # and hands back its default, silently swapping the profile or switching
-    # search on for the pass that actually builds the graph. With a key,
-    # identity is the key alone (`key_as_main_identity=True` in
-    # `elements/lib/utils.py`), so these stay put no matter what else moves.
+    # search on for the pass that actually builds the graph. A key narrows what
+    # identity depends on, via `key_as_main_identity` in `elements/lib/utils.py`
+    # -- to nothing else at all for the toggles and the number input, and to
+    # `accept_new_options` alone for the selectbox, which is constant here.
     #
-    # `disabled` is not one of those parameters -- it is on that module's
-    # exclusion list beside `on_change` and `label_visibility` -- so gating
-    # these on `turn_locked` would not by itself have reset them. The keys are
-    # still what makes that safe to rely on rather than a fact about 1.60.
+    # `disabled` was never among those parameters, so gating these on
+    # `turn_locked` would not by itself have reset them; the widget docstrings
+    # list it with `on_change` and `label_visibility` as excluded. The keys are
+    # what makes the whole set safe to gate rather than a fact about 1.60 that
+    # a later parameter change could take back.
     profile = st.selectbox(
         "Backend profile",
         ("local", "server"),
@@ -839,7 +840,8 @@ if submitted:
                 f"Could not read the checkpoint for `{app_id}` ({unreadable}). "
                 "Not starting a turn: a run may be waiting on an approval, and "
                 "starting one would abandon that pending write rather than "
-                "resolve it. Try again."
+                "resolve it. Try again — if it repeats, the cause is not a "
+                "transient lock on the file the CLI shares."
             )
             raise ValueError(msg)
 
@@ -977,7 +979,8 @@ if followup:
             f"That message was not sent — the checkpoint for "
             f"`{st.session_state.active_app_id}` could not be read "
             f"({unreadable}), so a pending approval cannot be ruled out. "
-            "Try again."
+            "Try again — if it repeats, the cause is not a transient lock on "
+            "the file the CLI shares."
         )
         st.session_state.phase = FAILED
         st.rerun()
@@ -1014,13 +1017,26 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
     turn_payload = st.session_state.payload
     # Consume before running: a crash must not leave a payload that replays.
     st.session_state.payload = None
-    agent = get_agent(profile, approve, search)
-    config = {
-        "configurable": {"thread_id": st.session_state.active_app_id},
-        "recursion_limit": int(recursion_limit),
-    }
     with feed, st.spinner("Agent is working…", show_time=True):
         try:
+            # `get_agent` inside the try, the third site to need it and the one
+            # that had it outside: it builds models and opens the SQLite
+            # connection, so a read-only `.grant_writer/` or a dropped key
+            # raises here rather than in `stream_turn`. That mattered most on
+            # the path the blind approval panel opens. AWAITING has no enabled
+            # way out but that panel, its Reject needs no readable request to
+            # send -- and Reject lands *here*, phase already RUNNING with the
+            # payload consumed. Outside the try the raise escaped as a
+            # traceback, the resume Command was gone, and the next pass
+            # inferred STOPPED, whose banner invites re-submitting the same id
+            # over an interrupt still sitting in the checkpoint: the exact
+            # abandonment invariant 11 exists to prevent, reached through the
+            # one control that was supposed to be the way out.
+            agent = get_agent(profile, approve, search)
+            config = {
+                "configurable": {"thread_id": st.session_state.active_app_id},
+                "recursion_limit": int(recursion_limit),
+            }
             interrupted = stream_turn(agent, turn_payload, config)
         except Exception as exc:  # noqa: BLE001 - surface anything to the user
             st.session_state.error = f"{type(exc).__name__}: {exc}"
