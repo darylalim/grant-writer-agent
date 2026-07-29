@@ -47,7 +47,6 @@ from grant_writer.workspace import (
     compliance_verdict,
     count_gaps,
     read_bytes,
-    read_text,
 )
 
 st.set_page_config(
@@ -194,10 +193,50 @@ def get_agent(profile: BackendProfile, approve: bool, search: bool) -> Any:
     )
 
 
+def parked_state(
+    app_id: str, profile: BackendProfile, approve: bool, search: bool
+) -> tuple[bool | None, str]:
+    """Ask the checkpoint whether `app_id`'s thread is parked on an interrupt.
+
+    Returns `(parked, cause)`, where `parked` is None when the read itself
+    failed and `cause` names why. None rather than False, and the distinction is
+    the entire point: this is the check that stops a new turn abandoning a
+    submission-bound write a human was asked to vet (see both call sites), so a
+    caller that read a failed check as "not parked" would fail open in exactly
+    the case the check exists for -- the same trap `activity.is_parked` exists
+    to keep callers out of. Refusing the turn is the safe direction, because a
+    read that raised cannot rule a pending write out.
+
+    Catching `Exception` rather than a tuple is deliberate. The checkpoint is
+    the SQLite file `grant-writer chat` also opens, so `database is locked`
+    arrives as `sqlite3.OperationalError`, which is neither an `OSError` nor a
+    `ValueError` -- the submit handler's own tuple did not cover it, and the
+    read reached that handler as a raw traceback over a half-set phase.
+    `st.rerun()` raises a BaseException subclass, so the callers' reruns still
+    pass through this untouched.
+
+    `get_agent` is inside the try, not above it: it builds models and opens the
+    SQLite connection, so a read-only `.grant_writer/` or a dropped API key
+    raises there rather than in the read below. That is the same line the
+    approval block at the foot of this file keeps inside its own guard, for the
+    same reason.
+    """
+    try:
+        agent = get_agent(profile, approve, search)
+        return is_parked(agent, {"configurable": {"thread_id": app_id}}), ""
+    except Exception as exc:  # noqa: BLE001 - the caller refuses the turn
+        return None, f"{type(exc).__name__}: {exc}"
+
+
 def render_event(event: Event) -> None:
     """Draw one activity event into the current container."""
     if event.kind == PLAN:
-        with st.container(border=True):
+        # One element per todo, so the container's default 1rem gap is paid
+        # between every line of the checklist -- an eight-step plan spends more
+        # of the 440px feed on blank space than on text. `xxsmall` (0.25rem)
+        # still parts the heading from the first todo without spacing the list
+        # out like separate paragraphs.
+        with st.container(border=True, gap="xxsmall"):
             st.markdown(f"**Plan** · {len(event.todos)} steps")
             for todo in event.todos:
                 icon = TODO_ICONS.get(todo.status, PENDING_TODO_ICON)
@@ -379,12 +418,15 @@ def approval_panel(requests: list[dict], unreadable: str = "") -> None:
                 # `$...$` are read as directives. This is the one moment a
                 # human vets a submission-bound file, and approving a rendered
                 # view approves something other than the bytes that get
-                # written. Deselecting the control returns None, which lands
-                # on source too.
+                # written. `required` keeps the pair exhaustive: without it a
+                # click on the lit segment deselects, and the control then
+                # shows nothing lit above a pane that is still displaying one
+                # of the two views.
                 view = st.segmented_control(
                     "View",
                     ("Source", "Rendered"),
                     default="Source",
+                    required=True,
                     key=f"view_{st.session_state.approval_round}_{index}",
                     label_visibility="collapsed",
                 )
@@ -440,40 +482,79 @@ def render_file(path: Path) -> None:
     if not path.is_file():
         # The listing is a snapshot and the agent keeps writing, so a file can
         # be gone by the time it is picked. Say so, rather than drawing the
-        # empty string `read_text` returns -- which reads as an empty file.
+        # empty string a failed read returns -- which reads as an empty file.
         st.caption("That file is no longer on disk.")
         return
 
-    if path.suffix == ".md":
-        view = st.segmented_control(
-            "View",
-            ("Source", "Rendered"),
-            default="Source" if path.parent.name == "final" else "Rendered",
-            # Keyed per file, so picking another one lands on that file's own
-            # default instead of inheriting the last one's view. No explicit
-            # reset is needed: a keyed widget's value is dropped once it stops
-            # being rendered, and only one file is rendered at a time.
-            key=f"browse_view_{path}",
-            label_visibility="collapsed",
-        )
-        # Deselecting the control returns None, which lands on source -- the
-        # same fallback the approval panel takes, and the safe one either way.
-        if view == "Rendered":
-            st.markdown(read_text(path))
-        else:
-            st.code(read_text(path), language="markdown", wrap_lines=True)
-    elif path.suffix in CODE_LANGUAGES:
-        st.code(read_text(path), language=CODE_LANGUAGES[path.suffix], wrap_lines=True)
-    elif (blob := read_bytes(path)) is None:
+    # Lowercased before every comparison below. The upload is saved under the
+    # name the browser sent (see the submit handler), which keeps its case, so
+    # `SOLICITATION.PDF` missed the `.pdf` branch and was offered as a download
+    # instead of being shown in the viewer. CODE_LANGUAGES keys are already
+    # lowercase, so only the lookup had to change.
+    suffix = path.suffix.lower()
+
+    # One read, before the dispatch, and bytes rather than text. `read_text`
+    # collapses a vanished file and an undecodable one into the same "", and
+    # the text branches drew that as an empty pane -- a file that exists,
+    # rendered as though it were empty. That is the failure the comment on
+    # CODE_LANGUAGES exists to prevent ("a viewer that quietly shows something
+    # other than the file is worse than one that refuses to"), reached through
+    # the encoding rather than the format. Decoding explicitly below tells the
+    # two apart, and reading once also stops the markdown branch touching disk
+    # twice per rerun.
+    if (blob := read_bytes(path)) is None:
         # Same message, a narrower window: the file survived the check above
         # and vanished before the read.
         st.caption("That file is no longer on disk.")
-    elif path.suffix == ".pdf":
+        return
+
+    if suffix == ".pdf":
         st.pdf(blob, height=430)
-    else:
+        return
+
+    if suffix != ".md" and suffix not in CODE_LANGUAGES:
         st.download_button(
             "Download", blob, file_name=path.name, icon=":material/download:"
         )
+        return
+
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError:
+        # Listed as text but not decodable as text -- a CSV exported as
+        # latin-1, or a binary that borrowed the suffix. Say which of the two
+        # failures this is, and hand over the bytes, rather than pushing a
+        # replacement-character soup through st.code or drawing nothing.
+        st.caption("That file is not valid UTF-8 text.")
+        st.download_button(
+            "Download", blob, file_name=path.name, icon=":material/download:"
+        )
+        return
+
+    if suffix != ".md":
+        st.code(text, language=CODE_LANGUAGES[suffix], wrap_lines=True)
+        return
+
+    view = st.segmented_control(
+        "View",
+        ("Source", "Rendered"),
+        default="Source" if path.parent.name == "final" else "Rendered",
+        # Not deselectable. Without this, clicking the lit segment returned
+        # None and the pane fell back to source while no segment was lit, so
+        # the control described neither view -- worst on a working draft, which
+        # starts on Rendered and so is one click from that state.
+        required=True,
+        # Keyed per file, so picking another one lands on that file's own
+        # default instead of inheriting the last one's view. No explicit
+        # reset is needed: a keyed widget's value is dropped once it stops
+        # being rendered, and only one file is rendered at a time.
+        key=f"browse_view_{path}",
+        label_visibility="collapsed",
+    )
+    if view == "Rendered":
+        st.markdown(text)
+    else:
+        st.code(text, language="markdown", wrap_lines=True)
 
 
 @st.fragment
@@ -528,10 +609,17 @@ def file_browser(app_dir: Path, files: list[Path], gaps: int, verdict: str) -> N
 with st.sidebar:
     st.subheader("Run settings", anchor=False)
     # Every control here takes an explicit key. Without one a widget's identity
-    # is derived from its parameters, `disabled` among them, so gating these on
-    # `busy` would change their identity the moment a run starts and hand back
-    # defaults -- silently swapping the profile or switching search on for the
-    # pass that actually builds the graph. With a key, identity is the key.
+    # is derived from its value-shaping parameters -- `label`, `value`,
+    # `options`, `help`, `width` -- and a widget whose identity changes remounts
+    # and hands back its default, silently swapping the profile or switching
+    # search on for the pass that actually builds the graph. With a key,
+    # identity is the key alone (`key_as_main_identity=True` in
+    # `elements/lib/utils.py`), so these stay put no matter what else moves.
+    #
+    # `disabled` is not one of those parameters -- it is on that module's
+    # exclusion list beside `on_change` and `label_visibility` -- so gating
+    # these on `turn_locked` would not by itself have reset them. The keys are
+    # still what makes that safe to rely on rather than a fact about 1.60.
     profile = st.selectbox(
         "Backend profile",
         ("local", "server"),
@@ -569,7 +657,6 @@ with st.sidebar:
         disabled=turn_locked,
         help="Maximum graph steps per turn.",
     )
-    st.divider()
     st.caption(
         "Drafts land in `applications/<app-id>/`. State persists to "
         "`.grant_writer/checkpoints.sqlite`, shared with the CLI."
@@ -741,10 +828,22 @@ if submitted:
         # returns [] for a parked thread whose payload could not be read as
         # readily as for one with nothing pending, so asking it here fails open
         # in exactly the case the blind panel exists for -- see invariant 5.
-        if is_parked(
-            get_agent(profile, approve, search),
-            {"configurable": {"thread_id": app_id}},
-        ):
+        parked, unreadable = parked_state(app_id, profile, approve, search)
+        if unreadable:
+            # The read failed, so whether a write is pending is unknown -- and
+            # unknown has to be treated as pending. Raised rather than handled
+            # inline so it lands in the banner below with the rest of this
+            # block's failures; the phase stays out of AWAITING because nothing
+            # here confirmed an interrupt to approve.
+            msg = (
+                f"Could not read the checkpoint for `{app_id}` ({unreadable}). "
+                "Not starting a turn: a run may be waiting on an approval, and "
+                "starting one would abandon that pending write rather than "
+                "resolve it. Try again."
+            )
+            raise ValueError(msg)
+
+        if parked:
             # The feed belongs to whichever thread this session last ran. Kept
             # when that is the thread being resumed, cleared when it is not:
             # otherwise A's plan and file writes sit under an approval panel
@@ -853,6 +952,12 @@ with activity_slot:
         "with the same application id — progress is checkpointed each step."
     )
 
+# `st.chat_input` returns exactly what was typed, unstripped, so a stray space
+# submitted as truthy and started a whole billed turn on a message with no
+# content in it -- and echoed the blank into the feed on the way. Normalised
+# before the guard so everything below sees the same text the agent would.
+followup = (followup or "").strip()
+
 if followup:
     # The same question the submit handler asks, for the same reason, because
     # this is the other way to start a turn. `turn_locked` disables this input
@@ -861,10 +966,23 @@ if followup:
     # graph, so either can be reached with an interrupt already committed -- and
     # the STOPPED banner points the user straight at this box. Sending there
     # abandons the pending write exactly as a fresh brief would.
-    if is_parked(
-        get_agent(profile, approve, search),
-        {"configurable": {"thread_id": st.session_state.active_app_id}},
-    ):
+    parked, unreadable = parked_state(
+        st.session_state.active_app_id, profile, approve, search
+    )
+    if unreadable:
+        # Same refusal as the submit handler, for the same reason: an
+        # unreadable checkpoint cannot rule out a pending write, so the message
+        # is not sent. Not appended to the feed either -- see below.
+        st.session_state.error = (
+            f"That message was not sent — the checkpoint for "
+            f"`{st.session_state.active_app_id}` could not be read "
+            f"({unreadable}), so a pending approval cannot be ruled out. "
+            "Try again."
+        )
+        st.session_state.phase = FAILED
+        st.rerun()
+
+    if parked:
         # Not appended to the feed: it was never sent, and a prompt echoed there
         # reads as one the agent has seen and is answering.
         st.session_state.error = (

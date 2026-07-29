@@ -185,6 +185,19 @@ runs, and still produces plausible output.
     Reading a request is a display concern and may fail; whether the graph is parked is
     control flow and must not.
 
+    That read can itself *fail*, and the failure has to land somewhere. The checkpoint is
+    the SQLite file `grant-writer chat` also opens, so `database is locked` arrives as
+    `sqlite3.OperationalError` — neither an `OSError` nor a `ValueError`, so the submit
+    handler's except tuple did not cover the read later added above it, and the follow-up
+    handler wrapped its call in nothing at all. Both now go through
+    `streamlit_app.parked_state`, which owns the `try` (including `get_agent`, for the
+    reason spelled out below), and both then **refuse the turn** rather than start one: a
+    read that raised cannot rule a pending write out, so unknown has to be treated as
+    pending. That is why it returns `bool | None` and not `bool` — `None` (unreadable)
+    collapsing into `False` (not parked) starts the turn, which is this invariant's own
+    fail-open one level up. Refusing is safe in a way starting is not: the run is still
+    checkpointed and the same id picks it up.
+
     AWAITING is then the one phase with no enabled way out, which makes the approval panel
     the sole exit — so everything that draws it sits inside one `try`, **including
     `get_agent`**, which builds models and opens the SQLite connection and so raises on a

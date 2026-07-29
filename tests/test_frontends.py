@@ -10,6 +10,7 @@ shows up as a crash, so they are pinned here.
 from __future__ import annotations
 
 import shutil
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -520,6 +521,108 @@ def test_a_follow_up_sends_what_the_cli_chat_loop_sends(monkeypatch):
     # checkpoint carries the plan, todos, and history across to this turn.
     assert config["configurable"]["thread_id"] == "zz-pytest-followup"
     assert app.session_state["active_app_id"] == "zz-pytest-followup"
+
+
+def test_a_blank_follow_up_does_not_start_a_turn(monkeypatch):
+    """`st.chat_input` returns what was typed, unstripped, so a stray space was
+    truthy: it echoed a blank into the feed and spent a full billed turn asking
+    the agent to act on nothing.
+    """
+    turns: list[object] = []
+
+    class _CountingAgent:
+        get_state = staticmethod(_unparked)
+
+        def stream(self, payload, config, **_kwargs):
+            turns.append(payload)
+            return iter(())
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _CountingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-blank")
+    app.button[0].click().run()
+    turns.clear()  # drop the opening brief
+
+    app.chat_input(key="followup_input").set_value("   ").run()
+
+    assert not app.exception
+    assert turns == [], "whitespace started a turn"
+    # And nothing was echoed into the feed as though it had been sent.
+    assert not [
+        event for event in app.session_state["activity"] if event.kind == "prompt"
+    ]
+
+
+class _UnreadableCheckpoint:
+    """A stand-in whose checkpoint read fails the way a shared SQLite file does.
+
+    `sqlite3.OperationalError` is neither an `OSError` nor a `ValueError`, which
+    is the whole reason this case exists: the submit handler's original except
+    tuple did not cover it.
+    """
+
+    @staticmethod
+    def get_state(_config):
+        msg = "database is locked"
+        raise sqlite3.OperationalError(msg)
+
+    def stream(self, payload, config, **_kwargs):  # pragma: no cover - must not run
+        raise AssertionError("a turn started on an unreadable checkpoint")
+
+
+def test_an_unreadable_checkpoint_refuses_the_run_rather_than_starting_one(monkeypatch):
+    """The checkpoint is the SQLite file `grant-writer chat` also opens, so
+    `database is locked` is live rather than hypothetical -- and the read that
+    invariant 11 added to this handler sat inside an except tuple that predated
+    it. The failure was a raw traceback over a half-set phase.
+
+    Refusing is the safe direction: a read that raised cannot rule out a pending
+    write, so starting a turn might abandon a submission-bound file a human was
+    asked to vet.
+    """
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _UnreadableCheckpoint()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-locked")
+    app.button[0].click().run()
+
+    assert not app.exception, "the read escaped as a traceback"
+    assert app.session_state["phase"] == "failed"
+    assert "database is locked" in app.session_state["error"]
+    # Not AWAITING: nothing here confirmed an interrupt there is a panel for.
+    assert app.session_state["phase"] != "awaiting"
+
+
+def test_an_unreadable_checkpoint_also_refuses_a_follow_up(monkeypatch):
+    """The other way to start a turn, and the one whose call had no guard at
+    all. Guarding only the form leaves the hole open in the phase whose banner
+    points the reader at this box.
+    """
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _UnreadableCheckpoint()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    # The follow-up box needs a thread to continue, and the submit above is now
+    # refused, so `active_app_id` is set directly.
+    app.session_state["active_app_id"] = "zz-pytest-locked-chat"
+    app.run()
+
+    app.chat_input(key="followup_input").set_value("Tighten the need section.").run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "failed"
+    assert "could not be read" in app.session_state["error"]
+    # Never sent, so never echoed -- a prompt in the feed reads as one the agent
+    # has seen and is answering.
+    assert not [
+        event for event in app.session_state["activity"] if event.kind == "prompt"
+    ]
 
 
 def test_a_follow_up_cannot_be_sent_while_an_approval_is_pending(monkeypatch):
@@ -1437,6 +1540,78 @@ def test_a_non_markdown_file_is_not_run_through_the_markdown_renderer(
     assert not app.exception
     assert "# funder priorities" in " ".join(block.value for block in app.code)
     assert "funder priorities" not in " ".join(block.value for block in app.markdown)
+
+
+@pytest.fixture
+def application_with_awkward_files():
+    """The two files the browser used to mishandle, in a real directory.
+
+    Same constraint as the fixtures above: it has to live under the project's
+    own `applications/`.
+    """
+    app_id = "zz-pytest-awkward"
+    app_dir = PROJECT_ROOT / "applications" / app_id
+    app_dir.mkdir(parents=True, exist_ok=True)
+    # The upload is saved under the name the browser sent, case intact, so an
+    # uppercase suffix is not hypothetical -- it is whatever the funder named
+    # the file. Never parsed; the viewer fails long before it reads the bytes.
+    (app_dir / "SOLICITATION.PDF").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    # A participant export saved as latin-1, which is what a spreadsheet
+    # produces by default on a good deal of the world's data.
+    (app_dir / "participants.csv").write_bytes(
+        "name,site\nJos\xe9 Garc\xeda,Escuela\n".encode("latin-1")
+    )
+    try:
+        yield app_id
+    finally:
+        shutil.rmtree(app_dir, ignore_errors=True)
+
+
+def test_the_viewer_dispatches_on_a_case_insensitive_suffix(
+    application_with_awkward_files,
+):
+    """`SOLICITATION.PDF` missed the `.pdf` branch and fell through to the
+    download fallback, so the one document every run starts from could not be
+    read in the app that saved it. Nothing raised: a download button is a
+    perfectly ordinary thing to draw, which is why this needs pinning rather
+    than noticing.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_awkward_files)
+    app.run()
+
+    app.radio(key="file_pick").set_value("SOLICITATION.PDF").run()
+
+    assert not app.exception
+    # The fallback is exactly what a missed suffix looks like on screen.
+    assert not app.download_button, "an uppercase .PDF fell through to download"
+
+
+def test_a_text_file_that_is_not_utf8_is_refused_rather_than_blanked(
+    application_with_awkward_files,
+):
+    """`workspace.read_text` collapses a failed decode into "", and the text
+    branches drew that as an empty pane -- a file that exists, on screen as
+    though it were empty. That is the same "quietly shows something other than
+    the file" failure the CODE_LANGUAGES comment exists to prevent, reached
+    through the encoding instead of the format, and it is silent in the way
+    that matters: no exception, no empty-file marker, just nothing.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_awkward_files)
+    app.run()
+
+    app.radio(key="file_pick").set_value("participants.csv").run()
+
+    assert not app.exception
+    captions = " ".join(caption.value for caption in app.caption)
+    assert "not valid UTF-8" in captions
+    # Said, and then handed over -- the bytes are still reachable.
+    assert len(app.download_button) == 1
+    # The bug was an empty code block sitting where the file should be.
+    assert not [block for block in app.code if block.value == ""]
 
 
 def test_missing_api_keys_disable_the_run_button(monkeypatch):
