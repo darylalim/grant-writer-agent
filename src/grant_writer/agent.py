@@ -9,8 +9,14 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
-from grant_writer.backends import build_backend, build_permissions, seed_store_from_disk
+from grant_writer.backends import (
+    build_backend,
+    build_permissions,
+    discovery_permissions,
+    seed_store_from_disk,
+)
 from grant_writer.config import (
+    DISCOVERY_MODEL,
     DRAFTING_MODEL,
     GRADER_MODEL,
     MEMORY_FILE,
@@ -18,9 +24,15 @@ from grant_writer.config import (
     Settings,
     build_model,
 )
-from grant_writer.prompts import ORCHESTRATOR_PROMPT
-from grant_writer.subagents import build_subagents
-from grant_writer.tools import build_search_tool, extract_pdf_text, measure_text
+from grant_writer.prompts import DISCOVERY_PROMPT, ORCHESTRATOR_PROMPT
+from grant_writer.subagents import build_discovery_subagents, build_subagents
+from grant_writer.tools import (
+    build_search_tool,
+    extract_pdf_text,
+    fetch_grants_gov_opportunity,
+    measure_text,
+    search_grants_gov,
+)
 
 
 def _build_checkpointer(settings: Settings) -> BaseCheckpointSaver:
@@ -83,4 +95,64 @@ def build_agent(settings: Settings | None = None):
         checkpointer=checkpointer,
         store=store,
         name="grant-writer",
+    )
+
+
+def build_discovery_agent(settings: Settings | None = None):
+    """Build the opportunity-discovery agent.
+
+    A second graph rather than a mode of `build_agent`, and the deciding
+    reason is a permission rather than a preference: `discovery_permissions`
+    returns no interrupt rule at any setting, so a discovery thread *cannot*
+    park on an approval. That is a structural property worth having -- it means
+    the frontends need no approval panel, no `is_parked` check, and none of
+    invariant 11's machinery for this graph -- and it only holds if discovery
+    is its own graph with its own rules. Folding it into `build_agent` would
+    produce one graph that sometimes can be parked and sometimes cannot, which
+    is a far harder thing to keep true than two graphs that differ honestly.
+
+    Note it is `discovery_permissions()` and *not* `build_permissions(settings)`
+    here. Sharing the latter looked right and was not: it allows
+    `/applications/**` and, under `--approve`, interrupts on
+    `/applications/*/final/**` -- and this orchestrator has `write_file` like
+    any other, with `WORKSPACE_CONVENTIONS` describing that directory to it.
+    The roster having no drafter constrains the subagents, not the orchestrator.
+
+    The second reason is scope: dispatching between drafting and discovery
+    inside `ORCHESTRATOR_PROMPT` would put the choice in prose, where a
+    misread costs a wrong workflow, instead of in the roster, where it cannot
+    be misread at all -- this graph has no `section-drafter` to reach.
+
+    Everything below the orchestrator is shared as-is: the same `Settings`,
+    the same backend, the same permission builder, the same checkpoint file.
+    """
+    settings = settings or Settings()
+
+    tools = [search_grants_gov, fetch_grants_gov_opportunity]
+    # Web search covers what grants.gov does not index -- private foundations,
+    # state agencies, non-US funders -- so `--no-search` narrows a scan to US
+    # federal rather than disabling it.
+    if (search := build_search_tool(enabled=settings.enable_search)) is not None:
+        tools.append(search)
+
+    checkpointer = _build_checkpointer(settings)
+    store = InMemoryStore()
+    if settings.backend_profile == "server":
+        seed_store_from_disk(store, settings)
+
+    return create_deep_agent(
+        model=build_model(DISCOVERY_MODEL),
+        tools=tools,
+        system_prompt=DISCOVERY_PROMPT,
+        subagents=build_discovery_subagents(),
+        # No `skills`: the six guides under /skills/ are for drafting sections
+        # of a proposal, and nothing here drafts one. No RubricMiddleware
+        # either -- it grades a draft against a funder's review criteria, which
+        # is a question that only exists once there is a draft.
+        memory=[MEMORY_FILE],
+        backend=build_backend(settings),
+        permissions=discovery_permissions(),
+        checkpointer=checkpointer,
+        store=store,
+        name="opportunity-discovery",
     )

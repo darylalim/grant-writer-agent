@@ -12,6 +12,7 @@ uv run pytest tests/ -q -k permission         # by keyword
 uvx ruff check src/ tests/ streamlit_app.py   # lint (select list in [tool.ruff.lint])
 uvx ruff format --check src/ tests/ streamlit_app.py   # ruff's default 88-col
 
+uv run grant-writer discover --scan-id X --focus "rural health"   # before drafting
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
 uv run grant-writer chat --app-id X           # resume the same thread
 
@@ -36,17 +37,58 @@ the type-check step in `.github/workflows/ci.yml`; lower both when upstream fixe
 Common flags (`--profile`, `--approve`, `--no-search`, `--recursion-limit`) live on a shared
 parent parser and must be passed **after** the subcommand. `--app-id` is also the LangGraph
 `thread_id`; the CLI persists to `.grant_writer/checkpoints.sqlite`, so state resumes across
-processes. `applications/` and `.grant_writer/` are gitignored.
+processes. `applications/`, `opportunities/`, and `.grant_writer/` are gitignored.
+
+`discover` takes `--scan-id` rather than `--app-id`: a scan is not an application, and the two
+must not collide on a thread id even when a human reuses the name (invariant 12). It inherits
+`--approve` from the shared parent parser, where it is inert — nothing a scan writes is
+submission-bound, so no interrupt rule reaches it. Accepted rather than split out so every
+subcommand takes the same flags and the UI's one sidebar can drive both graphs.
 
 ## Architecture
 
-A [Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview) orchestrator plus three
-subagents. Module dependencies flow one way:
+Two [Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview) graphs over shared
+infrastructure: a drafting orchestrator plus three subagents, and a discovery orchestrator plus one.
+`agent.py` builds both — `build_agent` and `build_discovery_agent` — and everything below the
+orchestrator (`Settings`, backend, permission builder, checkpointer) is shared as-is.
+
+Discovery is a second graph rather than a mode of the first, and the deciding reason is a permission,
+not a preference: `backends.discovery_permissions` returns **no interrupt rule at any setting**, so a
+discovery thread cannot park on an approval. That is what lets both frontends skip the approval
+panel, the `is_parked` check, and the rest of invariant 11's machinery for a scan. Folded into
+`build_agent` it would be one graph that sometimes can park and sometimes cannot, which is far harder
+to keep true than two that differ honestly.
+
+**That guarantee is a property of the rules, not of the roster**, and the distinction is not
+academic — it was got wrong once. `build_discovery_agent` originally shared
+`build_permissions(settings)`, on the argument that this graph has no `section-drafter` to reach
+`/applications/*/final/**`. But the *orchestrator* has `write_file` like any other, and
+`WORKSPACE_CONVENTIONS` describes that directory to it, so one stray write there would have parked a
+thread nothing was watching — and with the frontends' `parked_state` check deliberately absent, the
+next scan would have discarded the pending write silently. Invariant 11's failure, reached through
+the graph built to be exempt from it. `test_a_scan_can_never_park_on_an_approval` now asserts the
+absence of `interrupt` across the whole write surface rather than the presence of `allow` on the
+happy path. The second
+reason is scope: dispatching between drafting and discovery inside `ORCHESTRATOR_PROMPT` puts the
+choice in prose, where a misread costs a wrong workflow; in the roster it cannot be misread, because
+the discovery graph has no `section-drafter` to reach.
+
+Module dependencies flow one way:
 
 ```
 config.py  →  tools.py, prompts.py  →  backends.py, subagents.py  →  agent.py  →  cli.py
+opportunities.py ─→ prompts.py, workspace.py, cli.py ─────────────────────────↗
               activity.py, workspace.py  ──────────────────────────────────────↗  streamlit_app.py
 ```
+
+**`opportunities.py`** is a pure leaf — the fit rubric, the grammar a scout writes, the parser, and
+the ranking. No filesystem, no network, no model, and no `grant_writer` imports of its own. That is
+what makes the scoring testable offline, which matters more here than anywhere else in the package:
+a shortlist is read once, acted on, and never audited, so a scorer that is quietly wrong is a funder
+never applied to. `prompts.py` imports `rubric_brief()` from it so the criteria the scout is asked
+for and the criteria the parser counts cannot drift — that failure is silent in the worst way, since
+the scout answers a criterion nobody scores and the only symptom is a total that comes out low.
+`workspace.py` owns the disk side (`scan_files`, `read_scored_opportunities`).
 
 Two frontends sit at the end of that chain, and what they share is deliberate — each item below
 was duplicated logic waiting to happen:
@@ -94,12 +136,22 @@ runs, and still produces plausible output.
    `backends.py::build_permissions`, specific allows must precede the catch-all
    `paths=["/**"], mode="deny"`. Reordering the list silently opens or closes the whole tree.
 2. **Anything writing to the real filesystem bypasses `FilesystemPermission` entirely** — the
-   permission rules only cover writes that go through the backend. Three places do not, and each
-   re-implements the boundary: `tools.py::_resolve_output_path` for `extract_pdf_text`'s output,
-   and `config.py::application_dir` for the application id the UI joins onto a path and saves an
-   upload into. All must stay in sync with `build_permissions`, and all resolve `..` *before* the
-   prefix check — validating the raw string lets `/applications/../src/x` pass and then escape
-   when `..` collapses. A fourth such writer needs the same treatment, not its own variant.
+   permission rules only cover writes that go through the backend. Two mechanisms do not, and each
+   enforces the boundary its own way: `tools.py::_resolve_output_path` for the virtual paths
+   `extract_pdf_text` and `fetch_grants_gov_opportunity` write to, and
+   `config.py::_resolve_content_id` for the ids a frontend joins onto a path. Both resolve `..`
+   *before* the prefix check — validating the raw string lets `/applications/../src/x` pass and
+   then escape when `..` collapses. A further such writer needs the same treatment, not its own
+   variant.
+
+   **The allowed set is `config.CONTENT_DIRS`, named once.** `build_permissions` derives
+   `/<name>/**` globs from it and `_resolve_output_path` derives `root / <name>` paths *and its
+   refusal message* from it, so a new content directory reaches both enforcement points at once.
+   Before this, each site spelled the pair out itself. The two id boundaries are likewise one
+   function: `application_dir` and `opportunities_dir` both call `_resolve_content_id`, which takes
+   the noun only to shape the message. Fixing an ordering bug in one copy and not the other is
+   exactly the failure having one copy prevents; `tests/test_review_fixes.py` §⑨ parametrizes the
+   same escape list over both to pin that sharing it did not loosen either side.
    `config.application_ids` is the read side of the same boundary — it supplies the UI's picker,
    so an id it offers must be one `application_dir` accepts. It gets that by calling
    `application_dir` on each candidate rather than by re-testing `_SAFE_APP_ID`: sharing the regex
@@ -218,6 +270,44 @@ runs, and still produces plausible output.
     still committed. The sole exit from AWAITING then ends in exactly the abandonment this
     invariant exists to prevent.
 
+12. **A scan id and an application id share a character set and one checkpoint file, but must
+    never share a thread id.** Reusing the name across `discover --scan-id X` and
+    `draft --app-id X` is the expected workflow — the CLI's closing line suggests it. Unprefixed,
+    those are the same checkpoint row: two structurally different graphs resuming each other's
+    conversation, nothing raised, and no symptom until someone notices the drafter answering as
+    though it had been searching. Every caller goes through `config.discovery_thread_id`, never a
+    literal. `_SAFE_ID` forbids `:`, so the prefix cannot collide with any valid application id
+    *by construction* rather than by convention.
+
+13. **The scout writes verdict words; the weights live only in `opportunities.py`.** `SCOUT_PROMPT`
+    never shows a point value, so a fabricated total is not caught — it is unrepresentable, because
+    the grammar has nowhere to put one. Keep it that way: adding weights to the prompt, or a
+    `Total:` line to the format, reintroduces exactly the class of invented number that
+    `COMPLIANCE_PROMPT` has to police with an arithmetic rule. `rubric_brief()` is rendered from
+    `RUBRIC` for the same reason — a criterion named in the prompt but not in the parser is
+    answered in good faith and scored zero, and the only symptom is a low total.
+
+14. **`fit_percent` is `float | None`, and `None` must never collapse into `0.0`.** "We could not
+    read this" and "this is a bad fit" are opposite instructions to whoever reads the shortlist.
+    Collapsed, a candidate written in the wrong format is indistinguishable from one that was
+    judged and rejected, and it sinks with no way to tell. Both frontends render `None` as
+    "unscored". For the same reason the parser is tolerant *toward keeping a score*: an uncited
+    verdict or an unrecognized citation source is flagged and still counted, because silently
+    zeroing a real judgement buries an opportunity in a list nobody re-checks. Only an unrecognized
+    *verdict word* scores zero — there, the alternative is guessing what the model meant.
+
+15. **`disqualified` is independent of `total_points`.** A gating `NONE` on eligibility marks a
+    candidate ineligible and sorts it below everything scored, without zeroing it. A surprising
+    ineligibility call is the one most worth challenging, and the evidence for it has to stay on
+    screen. `rank_opportunities` sorts in three tiers — scored, disqualified, unscorable — because
+    "not at the top" has two different meanings and one sort key would interleave them.
+
+16. **Neither discovery subagent gets `skills`, and that is deliberate.** Invariant 3 says custom
+    subagents do not inherit them, so a missing key usually *is* the bug. Here it is not: all six
+    guides under `/skills/` are about drafting a section, and none has anything to say about
+    whether to apply at all. `test_the_scout_is_deliberately_given_no_skills` inverts invariant 3's
+    test so the next reader finds the reason rather than "fixing" it.
+
 ## Backend profiles
 
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files
@@ -241,8 +331,9 @@ intentional (it is the only way to catch these failures offline) but brittle: a 
 may need these updated.
 
 `test_wiring.py` covers structural invariants; `test_review_fixes.py` pins specific past code-review
-findings and should gain a case whenever a review turns one up; `test_frontends.py` pins what the CLI
-and the UI must agree on — the stream parser, the approval decisions, the shared brief, and the
+findings and should gain a case whenever a review turns one up; `test_opportunities.py` is pure —
+strings in, dataclasses out — and is where every fit-scoring case belongs, because none of it needs
+a model or a network; `test_frontends.py` pins what the CLI and the UI must agree on — the stream parser, the approval decisions, the shared brief, and the
 terminal output the refactor must not have moved. Its `AppTest` cases run the Streamlit script
 headlessly, because a Streamlit app fails at run time rather than import time and nothing else would
 catch a bad layout call. They `pytest.importorskip("streamlit")`, which only bites under `--no-dev`.
@@ -260,6 +351,12 @@ which a browser never does. An assertion about a form widget's effect on the res
 page is therefore only meaningful if the case also clicks the submit button; otherwise pin
 structure (`widget.form_id`) rather than behaviour, as invariant 10's test does. Four
 file-browser cases once passed against a browser where the pane stayed permanently empty.
+**Select widgets by label, never by index.** `_button(app, "Draft proposal")` exists because
+`app.button[0]` addresses whichever button the script emits first — a fact about page layout,
+not about the button a case means. Adding the discovery form above the drafting one silently
+retargeted eleven cases, which went on asserting confidently about the wrong run. A label
+lookup raises instead.
+
 `AppTest` also serialises a selectbox by *index* (`Selectbox.index` calls
 `options.index(value)`), so `st.selectbox(accept_new_options=True)` cannot be driven here
 at all — a typed value that is not already an option raises `ValueError`. That is why the
@@ -276,9 +373,11 @@ run the app once.
 
 ## Domain rules baked into the prompts
 
-Fabricated preliminary data, personnel, or budget figures are misconduct, not a bad draft. When
-editing prompts or skills, preserve: unknowns become `[NEEDS INPUT: <question>]` and collect in
-`review/gaps.md`; lengths come from `measure_text`, never from eyeballing; the compliance reviewer
+Fabricated preliminary data, personnel, or budget figures are misconduct, not a bad draft. The same
+rule reaches discovery: an over-scored candidate costs a human the week they would have spent on a
+real one, so `SCOUT_PROMPT` requires a quoted citation per verdict and says plainly that an honest
+`NONE` beats a hopeful `STRONG`. When editing prompts or skills, preserve: unknowns become
+`[NEEDS INPUT: <question>]` and collect in `review/gaps.md`; lengths come from `measure_text`, never from eyeballing; the compliance reviewer
 writes only to `/applications/*/review/` and cannot edit what it reviews; `final/` files are written
 once as a complete `write_file`, never built up by `edit_file` (each write there may be a separate
 human approval).

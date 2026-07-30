@@ -33,20 +33,30 @@ from grant_writer.activity import (
     iter_activity,
     pending_action_requests,
 )
-from grant_writer.agent import build_agent
+from grant_writer.agent import build_agent, build_discovery_agent
 from grant_writer.config import (
     BackendProfile,
     application_dir,
     application_ids,
+    discovery_thread_id,
+    opportunities_dir,
+    opportunity_scan_ids,
     persistent_settings,
     require_api_keys,
 )
-from grant_writer.prompts import draft_request
+from grant_writer.opportunities import (
+    MAX_TOTAL_POINTS,
+    ScoredOpportunity,
+    rank_opportunities,
+)
+from grant_writer.prompts import discovery_request, draft_request
 from grant_writer.workspace import (
     application_files,
     compliance_verdict,
     count_gaps,
     read_bytes,
+    read_scored_opportunities,
+    scan_files,
 )
 
 st.set_page_config(
@@ -76,10 +86,17 @@ STOPPED = "stopped"
 # `Event` because the feed is a list of Events and `kind` is an open string.
 PROMPT = "prompt"
 
+# Which of the two graphs a turn runs on. Not a phase: a run is RUNNING or
+# AWAITING or DONE regardless of which graph it is, and folding the two axes
+# into one enum would double every phase comparison on the page.
+DRAFT = "draft"
+DISCOVER = "discover"
+
 SUBAGENT_ICONS = {
     "funder-researcher": ":material/travel_explore:",
     "section-drafter": ":material/edit_note:",
     "compliance-checker": ":material/fact_check:",
+    "opportunity-scout": ":material/plagiarism:",
 }
 
 TOOL_ICONS = {
@@ -93,6 +110,8 @@ TOOL_ICONS = {
     "measure_text": ":material/straighten:",
     "tavily_search": ":material/travel_explore:",
     "write_todos": ":material/checklist:",
+    "search_grants_gov": ":material/manage_search:",
+    "fetch_grants_gov_opportunity": ":material/download_for_offline:",
 }
 
 TODO_ICONS = {
@@ -126,6 +145,17 @@ st.session_state.setdefault("activity", [])
 st.session_state.setdefault("phase", IDLE)
 st.session_state.setdefault("payload", None)
 st.session_state.setdefault("active_app_id", "")
+# The scan the discovery graph is running on. A *separate* key from
+# `active_app_id` rather than a reuse of it, because the two name directories
+# in different trees and the file browser at the foot of the page reads
+# `active_app_id` as a fallback -- parking a scan id there would send it
+# looking for `applications/<scan-id>/`, find nothing, and report an empty
+# application rather than a scan it was never asked about.
+st.session_state.setdefault("active_scan_id", "")
+# Which graph the current turn belongs to: DRAFT or DISCOVER. One phase
+# machine drives both, so this is what tells the run block which agent to
+# build and which thread id to run it on. See `_active_thread_id`.
+st.session_state.setdefault("active_kind", DRAFT)
 st.session_state.setdefault("error", "")
 # Bumped on every resume, and mixed into the approval widgets' keys so each
 # interrupt gets its own. See `resume_with`.
@@ -191,6 +221,39 @@ def get_agent(profile: BackendProfile, approve: bool, search: bool) -> Any:
             backend_profile=profile, approve_final=approve, enable_search=search
         )
     )
+
+
+@st.cache_resource(show_spinner=False)
+def get_discovery_agent(profile: BackendProfile, approve: bool, search: bool) -> Any:
+    """Build the discovery graph once per settings combination.
+
+    Its own function, not a flag on `get_agent`, so the two graphs cannot share
+    a cache entry: `cache_resource` keys on the function *and* its arguments,
+    and `(local, True, True)` means a different graph here than it does there.
+
+    Takes `approve` even though nothing in a scan can interrupt -- the sidebar
+    toggle drives both graphs, and dropping the argument here would give the
+    two builders different cache keys for the same visible settings, so
+    flipping the toggle would rebuild one and hand back a cached other.
+    """
+    return build_discovery_agent(
+        persistent_settings(
+            backend_profile=profile, approve_final=approve, enable_search=search
+        )
+    )
+
+
+def _active_thread_id() -> str:
+    """The LangGraph thread id for whichever graph the current turn belongs to.
+
+    One expression, read by the run block and by the approval panel, so those
+    two can never disagree about which thread they are addressing. A scan runs
+    under a namespaced id (see `config.discovery_thread_id`) precisely so it
+    cannot land on the checkpoint row an identically-named application uses.
+    """
+    if st.session_state.active_kind == DISCOVER:
+        return discovery_thread_id(st.session_state.active_scan_id)
+    return st.session_state.active_app_id
 
 
 def parked_state(
@@ -326,6 +389,111 @@ def _pick_application() -> None:
     if picked := st.session_state.browse_pick:
         st.session_state.app_id_input = picked
         st.session_state.browse_pick = None
+
+
+def _pick_scan() -> None:
+    """Copy the scan picker's choice into the scan id box.
+
+    The same shape as `_pick_application`, for the same reasons and with the
+    same legality argument: widget callbacks run before the script body, so
+    assigning the box's key here is setting a default rather than mutating a
+    live widget. Clearing the picker afterwards is what makes it behave like an
+    action rather than a selection -- see that function for the re-picking case
+    that motivates it.
+    """
+    if picked := st.session_state.scan_pick:
+        st.session_state.scan_id_input = picked
+        st.session_state.scan_pick = None
+
+
+def _verdict_markup(criterion: Any) -> str:
+    """One rubric row, coloured by verdict.
+
+    Uses the theme's semantic colour names rather than hex, so the row stays
+    legible on both surfaces -- `.streamlit/config.toml` derives a per-mode
+    value from each, and hardcoding one picks a side.
+    """
+    colours = {"STRONG": "green", "MODERATE": "orange", "WEAK": "red", "NONE": "red"}
+    if criterion.verdict is None:
+        # Not the same as a bad verdict, and must not read like one: nothing
+        # was scored here, so there is no judgement to colour.
+        return f":gray[{criterion.label} — not scored]"
+    colour = colours.get(criterion.verdict, "gray")
+    return (
+        f":{colour}[**{criterion.verdict}**] {criterion.label} "
+        f":gray[({criterion.points}/{criterion.max_points})]"
+    )
+
+
+@st.fragment
+def opportunity_browser(
+    scan_dir: Path, ranked: list[ScoredOpportunity], gaps: int
+) -> None:
+    """Draw the ranked shortlist for one scan.
+
+    A fragment for the reason `file_browser` is one: expanding a candidate to
+    read its citations must not replay the whole feed and re-parse every other
+    candidate. Everything derived from disk is computed by the caller and
+    passed in, so a fragment rerun re-reads nothing -- and cannot go stale,
+    because only a turn writes here and a turn ends in a full-app rerun.
+    """
+    top = ranked[0].fit_percent if ranked else None
+    with st.container(horizontal=True):
+        st.metric("Candidates", len(ranked), border=True)
+        st.metric(
+            "Best fit",
+            "—" if top is None else f"{top:.0f}%",
+            border=True,
+            help=f"Weighted across the {MAX_TOTAL_POINTS}-point fit rubric. "
+            "Computed from the scout's verdicts — it never states a score.",
+        )
+        st.metric(
+            "Needs input",
+            gaps,
+            border=True,
+            help="Unresolved `[NEEDS INPUT]` markers — facts the scout refused "
+            "to invent and a human must supply.",
+        )
+
+    if not ranked:
+        st.caption("No scored candidates in this scan yet.")
+        return
+
+    for position, opportunity in enumerate(ranked, start=1):
+        # `score_label` and `display_title` come from `opportunities`, shared
+        # with the CLI: "unscored" and "0%" are opposite instructions to a
+        # reader, and that decision made twice is how one frontend starts
+        # printing the other's answer.
+        flag = " · INELIGIBLE" if opportunity.disqualified else ""
+        with st.expander(
+            f"{position}. {opportunity.display_title} — {opportunity.score_label}{flag}"
+        ):
+            if opportunity.fields:
+                st.caption(
+                    " · ".join(
+                        f"{label}: {value}"
+                        for label, value in opportunity.fields.items()
+                    )
+                )
+            for criterion in opportunity.criteria:
+                st.markdown(_verdict_markup(criterion))
+                for citation in criterion.citations:
+                    # A gap marker is not a quote and must not be italicised
+                    # like one -- it is the scout saying it had nothing to
+                    # quote, which is the opposite claim.
+                    quoted = citation.text if citation.is_gap else f"*{citation.text}*"
+                    st.markdown(f"  :gray[↳ {citation.source}:] {quoted}")
+                if criterion.note:
+                    st.caption(f"↳ {criterion.note}")
+            for warning in opportunity.warnings:
+                st.warning(warning, icon=":material/report:")
+            # The raw file, under the reading of it. The scoring is the
+            # product, but a citation is only worth what its source says, and
+            # this is where someone checks that.
+            candidate = scan_dir / "candidates" / f"{opportunity.key}.md"
+            if candidate.is_file():
+                with st.popover("Read the source", icon=":material/description:"):
+                    render_file(candidate)
 
 
 def render_feed(events: list[Event]) -> None:
@@ -681,6 +849,10 @@ settings = persistent_settings(
 # refusing. Disk is not the source of truth in that profile, so it is not
 # offered as one.
 existing_ids = application_ids(settings) if profile == "local" else []
+# The scan-side counterpart, gated on the profile for the same reason: under
+# `server` a scan's files live in ephemeral graph state, so a picker over disk
+# would offer reads it structurally cannot perform.
+existing_scan_ids = opportunity_scan_ids(settings) if profile == "local" else []
 
 # --- Header and run form -----------------------------------------------------
 
@@ -697,6 +869,81 @@ if missing:
         "Copy `.env.example` to `.env` and fill it in, then restart the app.",
         icon=":material/key_off:",
     )
+
+# --- Discovery: find opportunities worth drafting -----------------------------
+#
+# Above the drafting form because that is the order the work happens in: you
+# find an opportunity, then you write to it. Both sections start a turn, both
+# are gated on the same `turn_locked`, and both feed the same activity feed
+# below -- what differs is which graph runs and which tree it writes into.
+
+st.subheader("Find opportunities", anchor=False)
+st.caption(
+    "Searches grants.gov and the web, then scores each candidate against your "
+    "organization profile. Scoring is a rubric of verdicts with quoted "
+    "citations; the percentage is computed from those, never stated by the agent."
+)
+
+# Outside the form, and for the reason spelled out at the application id box
+# below: the shortlist at the foot of the page reads this back to decide which
+# scan to show, so inside a form it could only ever show a scan already
+# submitted this session -- making re-reading last week's scan cost a fresh
+# billed run.
+with st.container(horizontal=True):
+    scan_id = st.text_input(
+        "Scan id",
+        key="scan_id_input",
+        placeholder="rural-health-2026",
+        disabled=turn_locked,
+        help="Names the scan directory, and the discovery thread. Reuse it to "
+        "add to a scan, or to read one below.",
+    )
+    if existing_scan_ids:
+        st.selectbox(
+            "Browse an existing scan",
+            existing_scan_ids,
+            index=None,
+            key="scan_pick",
+            on_change=_pick_scan,
+            placeholder="Pick one to read…",
+            disabled=turn_locked,
+            help="Fills the id box on the left. Reading a scan does not start a run.",
+        )
+
+with st.form("discover", border=True):
+    focus = st.text_input(
+        "What to look for",
+        placeholder="afterschool STEM programs in rural districts",
+        help="Your programs and populations, in your own words. The scout "
+        "builds its search from this and the organization profile.",
+    )
+    agencies = st.text_input(
+        "Agencies (optional)",
+        placeholder="USDA|NSF",
+        help="Pipe-separated grants.gov agency codes. Leave empty to search "
+        "every agency — the results tell you which codes are worth filtering on.",
+    )
+    scan_notes = st.text_area(
+        "Additional context",
+        placeholder="Constraints, deadlines you cannot meet, funders to avoid.",
+        height=80,
+    )
+    discover_submitted = st.form_submit_button(
+        "Find opportunities",
+        icon=":material/search:",
+        # `turn_locked`, not `busy`, exactly as the drafting button is. A scan
+        # runs on its own thread so it cannot abandon a pending `final/` write
+        # the way a second draft brief would -- but it does clear the activity
+        # feed, which is the only on-screen record that one is pending, and on
+        # AWAITING the panel below is asking about that write.
+        disabled=bool(missing) or turn_locked,
+        help="Resolve the pending approval below before starting a new run."
+        if turn_locked and not busy
+        else None,
+    )
+
+st.divider()
+st.subheader("Draft a proposal", anchor=False)
 
 # Outside the form, deliberately. `st.form` batches its widgets and sends them
 # only when Submit is pressed -- "the values of the widgets inside it are never
@@ -795,7 +1042,61 @@ with st.form("draft", border=True):
 
 activity_slot = st.container()
 status_slot = st.container()
+discovery_slot = st.container()
 results_slot = st.container()
+
+if discover_submitted:
+    scan_id = scan_id.strip()
+    try:
+        if not scan_id:
+            msg = "A scan id is required."
+            raise ValueError(msg)
+
+        # The boundary, for the same reason the drafting handler applies it to
+        # an application id: this id names a directory the shortlist below
+        # joins onto a real path, and pathlib discards the base for an absolute
+        # right operand.
+        opportunities_dir(settings, scan_id)
+    except ValueError as exc:
+        st.session_state.error = str(exc)
+        st.session_state.phase = FAILED
+    else:
+        # No `parked_state` check here, and its absence is deliberate rather
+        # than an omission of invariant 11's rule. That check exists because a
+        # fresh brief on a parked thread discards the pending write; a scan
+        # runs on `discovery_thread_id(scan_id)`, a thread nothing can be
+        # pending on, because `backends.discovery_permissions` returns no
+        # interrupt rule at any setting.
+        #
+        # That guarantee is a property of the rules, not of the roster. Arguing
+        # it from "this graph has no drafter" was wrong and briefly true only by
+        # luck: the orchestrator has `write_file` itself, and the rules it used
+        # to share interrupt on `/applications/*/final/**`. It is enforced in
+        # one place now and pinned by
+        # `test_a_scan_can_never_park_on_an_approval`, which is what this
+        # missing read is entitled to rely on.
+        st.session_state.activity = []
+        st.session_state.error = ""
+        st.session_state.active_scan_id = scan_id
+        st.session_state.active_kind = DISCOVER
+        st.session_state.payload = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": discovery_request(
+                        scan_id,
+                        focus=focus.strip() or None,
+                        agencies=agencies.strip() or None,
+                        notes=scan_notes.strip() or None,
+                    ),
+                }
+            ]
+        }
+        st.session_state.phase = RUNNING
+        # Rerun before streaming, for the reason the drafting handler does:
+        # every control on screen was drawn from a `busy` read at the top of
+        # this pass, so they are all still live while this pass streams.
+        st.rerun()
 
 if submitted:
     app_id = app_id.strip()
@@ -854,6 +1155,10 @@ if submitted:
             if app_id != st.session_state.active_app_id:
                 st.session_state.activity = []
             st.session_state.active_app_id = app_id
+            # The interrupt being recovered belongs to a drafting thread -- it
+            # is a `final/` write -- so the panel must read that thread and not
+            # whichever scan this session last ran. See `_active_thread_id`.
+            st.session_state.active_kind = DRAFT
             st.session_state.error = ""
             st.session_state.phase = AWAITING
             st.rerun()
@@ -897,6 +1202,7 @@ if submitted:
         st.session_state.activity = []
         st.session_state.error = ""
         st.session_state.active_app_id = app_id
+        st.session_state.active_kind = DRAFT
         st.session_state.payload = payload
         st.session_state.phase = RUNNING
         # Rerun before streaming rather than falling through to the run block.
@@ -910,6 +1216,20 @@ if submitted:
         st.rerun()
 
 # --- Activity feed -----------------------------------------------------------
+
+# What the last turn was about, for prose. `active_ref` is the id a human
+# typed, never a thread id -- `_active_thread_id` owns that, and the two differ
+# for a scan on purpose. `active_noun` exists because the banners below are the
+# only place on the page where a scan and an application would otherwise be
+# indistinguishable, and "re-submit the same id" is advice that points at a
+# different box depending on which one it was.
+active_discovering = st.session_state.active_kind == DISCOVER
+active_ref = (
+    st.session_state.active_scan_id
+    if active_discovering
+    else st.session_state.active_app_id
+)
+active_noun = "scan" if active_discovering else "application"
 
 with activity_slot:
     st.subheader("Activity", anchor=False)
@@ -931,8 +1251,16 @@ with activity_slot:
     # run. This is not a chat app; the follow-up belongs to the feed it
     # continues, so it renders inline under it.
     followup = st.chat_input(
-        f"Ask for a revision to {st.session_state.active_app_id}…"
-        if st.session_state.active_app_id
+        # Names whichever graph is being continued. A follow-up goes to the
+        # thread that last ran, so on a scan this box refines the search rather
+        # than the drafts -- saying which avoids a message meant for one
+        # landing on the other.
+        (
+            f"Ask for another sweep of {active_ref}…"
+            if active_discovering
+            else f"Ask for a revision to {active_ref}…"
+        )
+        if active_ref
         else "Start a run above, then refine it here…",
         key="followup_input",
         # `turn_locked` carries the AWAITING half of this: the graph is parked
@@ -942,7 +1270,7 @@ with activity_slot:
         # below. Shared rather than spelled out here, so a phase added to that
         # expression reaches this input too; the extra clause is this control's
         # own precondition, that there is a thread to continue at all.
-        disabled=(turn_locked or bool(missing) or not st.session_state.active_app_id),
+        disabled=(turn_locked or bool(missing) or not active_ref),
         # Closes the window inside the submitting pass itself, before the rerun
         # below lands and `busy` takes over: `disabled` is computed from a phase
         # read at the top of this pass, so without this a second submission here
@@ -968,8 +1296,15 @@ if followup:
     # graph, so either can be reached with an interrupt already committed -- and
     # the STOPPED banner points the user straight at this box. Sending there
     # abandons the pending write exactly as a fresh brief would.
-    parked, unreadable = parked_state(
-        st.session_state.active_app_id, profile, approve, search
+    # Only a drafting thread can be parked, so only a drafting follow-up has
+    # anything to abandon: `backends.discovery_permissions` returns no
+    # interrupt rule at any setting, which is enforced there and pinned by
+    # `test_a_scan_can_never_park_on_an_approval`. Asking anyway would build
+    # the wrong graph to read the checkpoint with and return False every time.
+    parked, unreadable = (
+        (False, "")
+        if active_discovering
+        else parked_state(st.session_state.active_app_id, profile, approve, search)
     )
     if unreadable:
         # Same refusal as the submit handler, for the same reason: an
@@ -1032,9 +1367,17 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
             # over an interrupt still sitting in the checkpoint: the exact
             # abandonment invariant 11 exists to prevent, reached through the
             # one control that was supposed to be the way out.
-            agent = get_agent(profile, approve, search)
+            # Which builder, decided by the turn's own kind rather than by
+            # which id happens to be set: both can be set at once, since
+            # browsing a scan does not clear the application that last ran.
+            builder = (
+                get_discovery_agent
+                if st.session_state.active_kind == DISCOVER
+                else get_agent
+            )
+            agent = builder(profile, approve, search)
             config = {
-                "configurable": {"thread_id": st.session_state.active_app_id},
+                "configurable": {"thread_id": _active_thread_id()},
                 "recursion_limit": int(recursion_limit),
             }
             interrupted = stream_turn(agent, turn_payload, config)
@@ -1080,8 +1423,23 @@ with status_slot:
         # rather than in the read below -- one line outside the guard, producing
         # the identical unrecoverable page this whole block exists to prevent.
         try:
-            agent = get_agent(profile, approve, search)
-            config = {"configurable": {"thread_id": st.session_state.active_app_id}}
+            # The same builder switch the run block uses, though AWAITING
+            # should only ever be reachable from a drafting turn --
+            # `discovery_permissions` returns no interrupt rule, so a scan
+            # cannot park. Switching anyway is a one-line hedge against that
+            # stopping being true: reading a thread through the wrong graph
+            # object means a different roster and a different state shape than
+            # the one that produced the interrupt, and the failure would land
+            # in the one phase with no other way out. The thread id goes
+            # through `_active_thread_id` for the same reason, so the panel and
+            # the resume it queues address the same row.
+            builder = (
+                get_discovery_agent
+                if st.session_state.active_kind == DISCOVER
+                else get_agent
+            )
+            agent = builder(profile, approve, search)
+            config = {"configurable": {"thread_id": _active_thread_id()}}
             pending = pending_action_requests(agent, config)
             unreadable = ""
         except Exception as exc:  # noqa: BLE001 - the panel is the only exit
@@ -1091,19 +1449,50 @@ with status_slot:
 
     elif st.session_state.phase == STOPPED:
         st.warning(
-            f"Run stopped before it finished. Progress for "
-            f"`{st.session_state.active_app_id}` is checkpointed — carry on "
-            "from the box under the activity feed, or re-submit the same "
-            "application id to send the opening brief again.",
+            f"Run stopped before it finished. Progress for {active_noun} "
+            f"`{active_ref}` is checkpointed — carry on from the box under the "
+            f"activity feed, or re-submit the same {active_noun} id to send the "
+            "opening brief again.",
             icon=":material/pause_circle:",
         )
 
     elif st.session_state.phase == DONE:
         st.success(
-            f"Run finished for `{st.session_state.active_app_id}`. Review every "
-            "number, citation, and `[NEEDS INPUT]` marker before submitting.",
+            f"Run finished for {active_noun} `{active_ref}`. Review every "
+            "number, citation, and `[NEEDS INPUT]` marker before acting on it.",
             icon=":material/task_alt:",
         )
+
+# --- Opportunity shortlist ----------------------------------------------------
+
+# Follows the live scan box, exactly as `browse_id` follows the live id box:
+# reading a previous scan must not cost a billed turn. The fallback keeps a
+# finished scan on screen if the box is cleared.
+browse_scan_id = scan_id.strip() or st.session_state.active_scan_id
+
+with discovery_slot:
+    if profile == "local" and browse_scan_id:
+        st.subheader("Opportunity shortlist", anchor=False)
+        try:
+            # Same boundary as the write side. Without it a scan id of ".."
+            # lists the repo root, and `render_file`'s download branch would
+            # hand `.env` -- live API keys -- to the browser.
+            scan_dir = opportunities_dir(settings, browse_scan_id)
+        except ValueError as exc:
+            st.warning(str(exc), icon=":material/warning:")
+        else:
+            # Read and rank here, in the full app run, then hand the result to
+            # the fragment -- see `opportunity_browser` on why it reads none of
+            # its own. Ranking is pure and lives in `opportunities`, because
+            # the agent never stated an order and the CLI computes the same one
+            # from the same two calls.
+            ranked = rank_opportunities(read_scored_opportunities(scan_dir))
+            files = scan_files(scan_dir)
+            if not files:
+                st.caption(f"Nothing in `opportunities/{browse_scan_id}/` yet.")
+            else:
+                opportunity_browser(scan_dir, ranked, count_gaps(files))
+
 
 # --- Application files -------------------------------------------------------
 

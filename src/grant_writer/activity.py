@@ -78,7 +78,17 @@ def _message_events(node: str, message: Any) -> Iterator[Event]:
         yield _call_event(call)
 
     text = getattr(message, "text", None)
-    if callable(text):  # langchain messages expose `.text` as a method
+    # `str` first, `callable` second, and the order is the whole point. On
+    # langchain-core 1.x `.text` is a property returning a `TextAccessor` --
+    # a `str` subclass that is *also* callable, kept that way so older code
+    # calling `.text()` still works. Testing `callable` first therefore took
+    # the back-compat path on every message and printed a deprecation warning
+    # per event, which on a long run buries the activity trace it is
+    # interleaved with. Testing `str` first takes the property, and the
+    # callable branch stays for a message type that still exposes a plain
+    # method -- there the value is a bound method, and rendering that into the
+    # feed would put `<bound method ...>` on screen where the prose goes.
+    if not isinstance(text, str) and callable(text):
         text = text()
     # Only the orchestrator node's untooled messages are prose worth showing;
     # a message that carries tool calls has already been rendered as those.

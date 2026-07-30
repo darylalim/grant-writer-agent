@@ -14,7 +14,10 @@ read; a raised FileNotFoundError here would take down whichever frontend asked.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
+
+from grant_writer.opportunities import ScoredOpportunity, parse_scored_markdown
 
 # The order WORKSPACE_CONVENTIONS lays out an application directory in, so a
 # listing reads the way the agent works rather than alphabetically.
@@ -26,6 +29,10 @@ DIRECTORY_ORDER = (
     "review",
     "final",
 )
+
+# The same, for a discovery scan: raw candidate text first, then the scoring
+# written from it.
+SCAN_DIRECTORY_ORDER = ("candidates", "scored")
 
 # The two verdicts COMPLIANCE_PROMPT requires. Matched as whole tokens so a
 # report that merely discusses one in prose cannot decide the headline.
@@ -58,22 +65,55 @@ def modified_at(path: Path) -> float:
         return 0.0
 
 
-def application_files(app_dir: Path) -> list[Path]:
-    """Every file under an application directory, in workspace order."""
-    if not app_dir.is_dir():
+def _ordered_files(root: Path, order: Sequence[str]) -> list[Path]:
+    """Every file under `root`, sorted to read the way a convention lays it out.
+
+    `order` names top-level entries -- a file or a subdirectory. Shared by the
+    application and scan listings because what differs between those two is the
+    order, not the walk, and a second copy of the walk would be a second place
+    for the missing-directory guard to be forgotten.
+    """
+    if not root.is_dir():
         return []
 
     def sort_key(path: Path) -> tuple[int, str]:
-        relative = path.relative_to(app_dir)
+        relative = path.relative_to(root)
         head = relative.parts[0]
-        rank = (
-            DIRECTORY_ORDER.index(head)
-            if head in DIRECTORY_ORDER
-            else len(DIRECTORY_ORDER)
-        )
+        rank = order.index(head) if head in order else len(order)
         return rank, str(relative)
 
-    return sorted((p for p in app_dir.rglob("*") if p.is_file()), key=sort_key)
+    return sorted((p for p in root.rglob("*") if p.is_file()), key=sort_key)
+
+
+def application_files(app_dir: Path) -> list[Path]:
+    """Every file under an application directory, in workspace order."""
+    return _ordered_files(app_dir, DIRECTORY_ORDER)
+
+
+def scan_files(scan_dir: Path) -> list[Path]:
+    """Every file under a discovery scan directory, in workspace order."""
+    return _ordered_files(scan_dir, SCAN_DIRECTORY_ORDER)
+
+
+def read_scored_opportunities(scan_dir: Path) -> list[ScoredOpportunity]:
+    """Parse every scored candidate in a scan, unranked.
+
+    One file per candidate, and the filename stem is the candidate's key --
+    see `opportunities.parse_scored_markdown` on why that beats anything in the
+    body. A file that vanished or will not decode parses as empty rather than
+    raising, so one bad candidate costs its own row and not the shortlist:
+    `read_text` already returns "" for both, and the parser records the absence
+    as warnings.
+
+    Unranked on purpose. `opportunities.rank_opportunities` is pure and this is
+    not, so keeping them apart is what lets the ordering rules be tested
+    without a directory on disk.
+    """
+    return [
+        parse_scored_markdown(read_text(path), key=path.stem)
+        for path in sorted((scan_dir / "scored").glob("*.md"))
+        if path.is_file()
+    ]
 
 
 def count_gaps(files: list[Path]) -> int:

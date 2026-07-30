@@ -8,12 +8,22 @@ Give it a solicitation and an organization profile; it extracts the
 requirements, researches the funder, plans and drafts each section, audits the
 result against the solicitation, and assembles a submission-ready draft.
 
+It also finds the solicitation. `grant-writer discover` sweeps grants.gov and
+the web for opportunities, then scores each against your organization profile —
+eligibility, mission, capacity, award size, deadline — so you know which are
+worth the week that drafting costs.
+
 ## Quick start
 
 ```bash
 uv sync
 cp .env.example .env        # add ANTHROPIC_API_KEY, TAVILY_API_KEY
 $EDITOR memories/org/AGENTS.md   # fill in your organization
+
+# Find something worth applying to
+uv run grant-writer discover --scan-id rural-health-2026 --focus "rural health education"
+
+# Then write it
 uv run grant-writer draft --app-id nsf-aisl-2026 --rfp ~/Downloads/solicitation.pdf --funder NSF
 ```
 
@@ -54,6 +64,13 @@ Upload a solicitation, watch the plan and delegations stream in, approve the
 writes to `final/` with the drafted text in front of you, and read the results
 next to the source PDF. It shares the CLI's checkpoint, so a run started in the
 browser continues with `grant-writer chat --app-id X` and back again.
+
+Both stages are on one page, in the order the work happens: **Find
+opportunities** above, **Draft a proposal** below. The shortlist expands each
+candidate to its six verdicts and their citations, with the source text one
+click away — the scoring is the product, but a citation is only worth what its
+source says. The two run on separate threads, so browsing an old scan never
+disturbs a draft, and a scan and an application may safely share a name.
 
 The chat box under the activity feed refines a run without leaving the browser.
 It sends what `grant-writer chat` sends — a plain message on the same thread,
@@ -103,9 +120,46 @@ The app injects no CSS and should not start: theme tokens are the supported way
 to restyle Streamlit, and `st.markdown(..., unsafe_allow_html=True)` styling
 breaks silently across upgrades when the class names it targets change.
 
+## Finding opportunities
+
+```bash
+uv run grant-writer discover --scan-id rural-health-2026 \
+    --focus "afterschool STEM in rural districts" --agencies "USDA|NSF"
+```
+
+Output lands in `opportunities/rural-health-2026/` — the full text of each
+candidate under `candidates/`, one fit-scoring file per candidate under
+`scored/` — and the ranked shortlist prints when the run ends.
+
+grants.gov needs no API key, so `discover --no-search` still covers US federal
+opportunities; web search is what adds private foundations, state agencies, and
+non-US funders.
+
+**The agent never states a score.** It answers six criteria with one of four
+verdict words, each carrying a quoted citation from either the opportunity text
+or your profile. The weights live in `opportunities.py` and are never shown to
+the model, so the percentage is computed from the verdicts rather than asserted
+— a fabricated total is not caught here, it is unrepresentable. Anything the
+profile does not answer becomes `[NEEDS INPUT: …]` rather than a guess, and a
+candidate whose file cannot be parsed reads as **unscored**, never as 0%: those
+are opposite claims, and only one of them means the opportunity was judged.
+
+Eligibility is gating — a `NONE` there marks the candidate ineligible — but it
+does not zero the score, because a surprising ineligibility call is exactly the
+one worth checking, and the evidence for it should still be on screen.
+
 ## Architecture
 
+Two graphs over shared infrastructure. Discovery is separate rather than a mode
+of the drafting orchestrator because nothing under `/opportunities/` is
+submission-bound: it never gets an `interrupt` permission, so a scan
+structurally *cannot* pause for approval, and neither frontend needs an
+approval path for it.
+
 ```
+discovery (sonnet)   searches grants.gov + web, triages, delegates scoring
+└── opportunity-scout (sonnet, write-limited)  scores one candidate per call
+
 orchestrator (opus)  reads RFP, extracts requirements, plans, delegates, assembles
 ├── funder-researcher   (sonnet + web search)  what this funder actually rewards
 ├── section-drafter     (opus + skills)        one section per call
@@ -158,15 +212,24 @@ at your content with `GRANT_WRITER_ROOT=/path/to/project`.
 
 ### Permissions
 
-The agent may write only to `/applications/` and `/memories/`; everything else,
-including its own `skills/` and this source tree, is read-only. Rules are
-evaluated **first-match-wins**, so specific allows must precede the catch-all
-deny — see `backends.py`.
+The drafting agent may write only to `/applications/`, `/memories/`, and
+`/opportunities/` — the set is named once, as `config.CONTENT_DIRS`, and both
+enforcement points read it. Everything else, including its own `skills/` and
+this source tree, is read-only. Rules are evaluated **first-match-wins**, so
+specific allows must precede the catch-all deny — see `backends.py`.
 
 `--approve` adds an `interrupt` rule on `/applications/*/final/**`. That is
 deliberately narrower than interrupting every write: gate the submission-bound
 files and you read each prompt, gate every scratch note and you learn to
 rubber-stamp.
+
+The discovery graph gets a **narrower set of its own** (`discovery_permissions`)
+which returns no interrupt rule at any setting and denies `/applications/`
+outright. That is what makes "a scan cannot pause for approval" structural, and
+both frontends rely on it: neither checks for a pending write before starting a
+scan. Sharing the drafting rules looked equivalent and was not — the discovery
+orchestrator has `write_file` like any other, so one write under `final/` would
+have parked a thread nothing was watching.
 
 ### Self-grading against review criteria
 
@@ -196,7 +259,7 @@ every number, and every citation.
 
 ```bash
 uv sync                     # installs the dev group, streamlit included
-uv run pytest tests/ -q     # 167 offline tests, no API calls
+uv run pytest tests/ -q     # the whole suite: offline, no API calls
 uvx ruff check src/ tests/ streamlit_app.py
 ```
 

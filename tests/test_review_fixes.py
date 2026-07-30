@@ -26,6 +26,9 @@ from grant_writer.config import (
     _resolve_root,
     application_dir,
     application_ids,
+    discovery_thread_id,
+    opportunities_dir,
+    opportunity_scan_ids,
 )
 from grant_writer.tools import build_search_tool
 from grant_writer.workspace import (
@@ -458,3 +461,142 @@ def test_application_ids_survives_an_unreadable_applications_directory(tmp_path)
         assert application_ids(settings) == []
     finally:
         apps.chmod(0o755)
+
+
+# ---- ⑨ the scan-id boundary is the application-id boundary -----------------
+
+
+@pytest.mark.parametrize(
+    "scan_id",
+    [
+        "/Users/me/.ssh",
+        "../evil",
+        "../../etc",
+        "..",
+        ".",
+        "nsf/../../etc",
+        "nsf\\..\\..",
+        "",
+        "   ",
+    ],
+)
+def test_opportunities_dir_rejects_ids_that_leave_the_tree(scan_id, tmp_path):
+    """The scan id is the same hazard as the application id, one tree over.
+
+    Parametrized over the same list on purpose. `_resolve_content_id` is now
+    shared, so what this pins is that sharing it did not quietly loosen either
+    side -- a refactor that fixed the ordering for one caller and not the other
+    is precisely what having one function is meant to make impossible.
+    """
+    with pytest.raises(ValueError, match=r"scan id|outside opportunities"):
+        opportunities_dir(Settings(root=tmp_path), scan_id)
+
+
+@pytest.mark.parametrize("scan_id", ["rural-health-2026", "Q1_2026.v2", "a", "2026"])
+def test_opportunities_dir_accepts_plain_ids_and_stays_inside(scan_id, tmp_path):
+    settings = Settings(root=tmp_path)
+    resolved = opportunities_dir(settings, scan_id)
+    assert resolved.is_relative_to(settings.opportunities_path.resolve())
+    assert resolved.name == scan_id
+
+
+def test_the_two_boundaries_refuse_with_their_own_noun(tmp_path):
+    """A refusal must name the field the reader actually typed into.
+
+    One shared implementation, two callers -- so the message is the only thing
+    telling someone which box was wrong, and getting it from `base.name` is
+    what keeps it right without a second copy of the rules.
+    """
+    settings = Settings(root=tmp_path)
+    with pytest.raises(ValueError, match="application id"):
+        application_dir(settings, "../evil")
+    with pytest.raises(ValueError, match="scan id"):
+        opportunities_dir(settings, "../evil")
+
+
+def test_opportunity_scan_ids_offers_only_what_the_boundary_will_accept(tmp_path):
+    """The read side of the same boundary, backing the scan picker.
+
+    Runs each candidate through `opportunities_dir` rather than re-testing the
+    regex, for the reason `application_ids` documents at length: a symlink out
+    of the tree passes every name test and is caught only on resolution.
+    """
+    settings = Settings(root=tmp_path)
+    scans = tmp_path / "opportunities"
+    scans.mkdir()
+    (scans / "rural-2026").mkdir()
+    (scans / ".ipynb_checkpoints").mkdir()
+    (scans / "notes.md").write_text("loose file", encoding="utf-8")
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    try:
+        (scans / "legacy").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform
+        pytest.skip("symlinks unavailable")
+
+    listed = opportunity_scan_ids(settings)
+    assert listed == ["rural-2026"]
+    with pytest.raises(ValueError):
+        opportunities_dir(settings, "legacy")
+
+
+def test_opportunity_scan_ids_is_empty_before_the_directory_exists(tmp_path):
+    """A fresh checkout has no `opportunities/`, and the Streamlit script calls
+    this from its body, outside any try."""
+    assert opportunity_scan_ids(Settings(root=tmp_path)) == []
+
+
+def test_ensure_dirs_creates_the_opportunities_directory(tmp_path):
+    """So the first scan has somewhere to land.
+
+    `build_backend` calls this on the local profile, which is what makes the
+    directory exist before a picker or a writer looks for it.
+    """
+    settings = Settings(root=tmp_path)
+    settings.ensure_dirs()
+    assert settings.opportunities_path.is_dir()
+
+
+def test_a_scan_and_an_application_of_the_same_name_are_different_threads():
+    """The expected workflow reuses the name; the checkpoint must not.
+
+    `discover --scan-id X` then `draft --app-id X` is exactly what the CLI's
+    closing line suggests. Sharing a thread id would put two structurally
+    different graphs on one checkpoint row -- each resuming the other's
+    conversation, with nothing raised and no symptom until the drafter answers
+    as though it had been searching.
+    """
+    assert discovery_thread_id("rural-2026") != "rural-2026"
+    assert discovery_thread_id("a") != discovery_thread_id("b")
+
+
+# ---- ⑩ the activity parser reads `.text` as a property ---------------------
+
+
+def test_message_text_is_read_without_calling_it():
+    """`.text` is a property whose value is also callable, and order matters.
+
+    On langchain-core 1.x it returns a `TextAccessor` -- a `str` subclass kept
+    callable so older `.text()` code still works, and calling it emits a
+    deprecation warning. Testing `callable` before `str` took that back-compat
+    path on every message, printing a warning per event into the middle of the
+    activity trace on every real run.
+
+    Pinned as an error rather than a warning count so this fails loudly. The
+    `str`-first order also guards the worse direction: against a message type
+    exposing a plain method, the un-called value is a bound method, and the
+    feed would render `<bound method ...>` where the agent's prose belongs.
+    """
+    import warnings
+
+    from langchain_core.messages import AIMessage
+
+    from grant_writer.activity import MESSAGE, iter_activity
+
+    chunk = {"model": {"messages": [AIMessage(content="Draft complete.")]}}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        events = list(iter_activity(chunk))
+
+    assert [(e.kind, e.detail) for e in events] == [(MESSAGE, "Draft complete.")]

@@ -9,6 +9,11 @@
 # personnel data -- keep them out of git by default.
 applications/
 
+# Discovery scans. Same reasoning: a scored shortlist quotes the organization
+# profile back, so it carries the same data the drafts do -- plus a record of
+# which funders were considered and rejected, which is nobody else's business.
+opportunities/
+
 # Persisted checkpoint (conversation/todo state) written by the CLI.
 .grant_writer/
 

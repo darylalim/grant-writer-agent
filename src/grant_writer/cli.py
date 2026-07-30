@@ -17,9 +17,17 @@ from grant_writer.activity import (
     iter_activity,
     pending_action_requests,
 )
-from grant_writer.agent import build_agent
-from grant_writer.config import Settings, persistent_settings, require_api_keys
-from grant_writer.prompts import draft_request
+from grant_writer.agent import build_agent, build_discovery_agent
+from grant_writer.config import (
+    Settings,
+    discovery_thread_id,
+    opportunities_dir,
+    persistent_settings,
+    require_api_keys,
+)
+from grant_writer.opportunities import rank_opportunities
+from grant_writer.prompts import discovery_request, draft_request
+from grant_writer.workspace import count_gaps, read_scored_opportunities, scan_files
 
 
 def _settings_from_args(args: argparse.Namespace) -> Settings:
@@ -166,6 +174,88 @@ def _chat(args: argparse.Namespace) -> int:
         _run(agent, {"messages": [{"role": "user", "content": line}]}, config)
 
 
+def _print_shortlist(scan_dir: Path, scan_id: str) -> None:
+    """Print the ranked shortlist a scan produced.
+
+    Reads the files rather than the transcript, and computes the ranking here,
+    because the agent never stated one -- see `opportunities`. That also makes
+    this the same view the UI draws, from the same two functions, rather than a
+    second summary that could disagree with it.
+    """
+    ranked = rank_opportunities(read_scored_opportunities(scan_dir))
+    if not ranked:
+        print(
+            f"\nNo scored candidates in ./opportunities/{scan_id}/scored/.",
+            flush=True,
+        )
+        return
+
+    print(f"\n--- shortlist ({len(ranked)}) ---", flush=True)
+    for position, opportunity in enumerate(ranked, start=1):
+        flag = " [INELIGIBLE]" if opportunity.disqualified else ""
+        print(
+            f"  {position:>2}. {opportunity.score_label:>8}  "
+            f"{opportunity.display_title}{flag}",
+            flush=True,
+        )
+        for warning in opportunity.warnings:
+            print(f"        ! {warning}", flush=True)
+
+    # `count_gaps` over the scan's files, which is what the UI shows beside the
+    # same wording. Counting parsed gap *citations* instead was a second way to
+    # arrive at one number: it misses a marker written into a `- Note:` line,
+    # and the two frontends then printed different totals for the same
+    # directory under captions that claimed they meant the same thing.
+    gaps = count_gaps(scan_files(scan_dir))
+    if gaps:
+        print(
+            f"\n{gaps} unresolved [NEEDS INPUT] marker(s) — facts the scout "
+            "refused to invent.",
+            flush=True,
+        )
+
+
+def _discover(args: argparse.Namespace) -> int:
+    settings = _settings_from_args(args)
+    missing = require_api_keys(needs_search=settings.enable_search)
+    if missing:
+        print(f"Missing environment variables: {', '.join(missing)}", file=sys.stderr)
+        print("Copy .env.example to .env and fill it in.", file=sys.stderr)
+        return 1
+
+    try:
+        # The same boundary the drafting side applies to `--app-id`. A scan id
+        # names a directory the UI later joins onto a real path, so it is
+        # checked here rather than trusted because it came from a flag.
+        scan_dir = opportunities_dir(settings, args.scan_id)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    instruction = discovery_request(
+        args.scan_id,
+        focus=args.focus,
+        agencies=args.agencies,
+        notes=args.notes,
+    )
+    agent = build_discovery_agent(settings)
+    config = {
+        # Namespaced, so scanning and then drafting under the same name do not
+        # resume each other -- see `config.discovery_thread_id`.
+        "configurable": {"thread_id": discovery_thread_id(args.scan_id)},
+        "recursion_limit": args.recursion_limit,
+    }
+    _run(agent, {"messages": [{"role": "user", "content": instruction}]}, config)
+
+    _print_shortlist(scan_dir, args.scan_id)
+    print(
+        f"\nDone. Candidates and scoring in ./opportunities/{args.scan_id}/. "
+        f"Draft one with: grant-writer draft --app-id <id> --funder <funder>",
+        flush=True,
+    )
+    return 0
+
+
 def _add_common_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--profile",
@@ -192,7 +282,10 @@ def _add_common_flags(parser: argparse.ArgumentParser) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="grant-writer",
-        description="Draft a grant proposal from a solicitation.",
+        description=(
+            "Find funding opportunities worth applying to, and draft a "
+            "proposal from the solicitation."
+        ),
     )
     # Common flags live on a parent parser inherited by each subcommand, so they
     # are accepted AFTER the subcommand (e.g. `grant-writer draft --approve`),
@@ -220,6 +313,29 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     chat.add_argument("--app-id", required=True)
     chat.set_defaults(func=_chat)
+
+    # Inherits `common` like the others, including `--approve`, which is inert
+    # here: `backends.discovery_permissions` returns no interrupt rule at any
+    # setting, so this graph has nothing to pause on. Accepted rather than split
+    # out, so every subcommand takes the same flags and the UI's one sidebar can
+    # drive both graphs -- an approve toggle that silently changed meaning
+    # between the two would be worse than one that does nothing.
+    discover = sub.add_parser(
+        "discover",
+        parents=[common],
+        help="find and fit-score candidate funding opportunities, before drafting",
+    )
+    discover.add_argument(
+        "--scan-id", required=True, help="short id, e.g. rural-health-2026"
+    )
+    discover.add_argument(
+        "--focus", help="what to search for, e.g. 'afterschool STEM in rural districts'"
+    )
+    discover.add_argument(
+        "--agencies", help="pipe-separated grants.gov agency codes, e.g. 'USDA|NSF'"
+    )
+    discover.add_argument("--notes", help="extra context for this scan")
+    discover.set_defaults(func=_discover)
 
     return parser
 

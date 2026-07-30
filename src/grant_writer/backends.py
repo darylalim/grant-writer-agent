@@ -31,7 +31,7 @@ from deepagents.backends import (
 from deepagents.backends.utils import create_file_data
 from langgraph.store.base import BaseStore
 
-from grant_writer.config import Settings
+from grant_writer.config import CONTENT_DIRS, Settings
 
 BackendFactory = BackendProtocol | Callable[[Any], BackendProtocol]
 
@@ -130,7 +130,11 @@ def build_permissions(settings: Settings) -> list[FilesystemPermission]:
         [
             FilesystemPermission(
                 operations=["write"],
-                paths=["/applications/**", "/memories/**"],
+                # Derived from `config.CONTENT_DIRS`, which `_resolve_output_path`
+                # also reads. The two enforce this boundary in different shapes --
+                # globs here, real paths there -- and spelling the directories out
+                # at each site is what let them drift apart; see invariant 2.
+                paths=[f"/{name}/**" for name in CONTENT_DIRS],
                 mode="allow",
             ),
             # Everything else is read-only: the agent can consult /skills/ but
@@ -139,6 +143,62 @@ def build_permissions(settings: Settings) -> list[FilesystemPermission]:
         ]
     )
     return rules
+
+
+def discovery_permissions() -> list[FilesystemPermission]:
+    """Write rules for the discovery graph. **Never returns an interrupt rule.**
+
+    This is what makes "a scan cannot park on an approval" a structural fact
+    rather than a hopeful one, and both frontends depend on it: neither runs a
+    `parked_state` check before starting a scan, on the grounds that there is
+    nothing for a scan to abandon.
+
+    Handing this graph `build_permissions` was not enough, and the gap is worth
+    naming. That function allows every `CONTENT_DIRS` entry -- `/applications/`
+    included -- and, with `approve_final` on, puts an interrupt on
+    `/applications/*/final/**`. The discovery *orchestrator* has `write_file`
+    like any other, and `WORKSPACE_CONVENTIONS` describes that exact directory
+    to it. So one stray write there would park a thread nothing is watching,
+    and the next scan submitted would discard the pending write silently --
+    invariant 11's failure, reached through the graph built to be exempt from
+    it. The claim has to be enforced here, not argued from the roster.
+
+    `/memories/` stays writable because the shared conventions text invites the
+    agent to record durable facts about the organization there, and no rule
+    interrupts a write to it -- so allowing it keeps the prompt honest without
+    reopening the hole.
+    """
+    return [
+        FilesystemPermission(
+            operations=["write"],
+            paths=["/opportunities/**", "/memories/**"],
+            mode="allow",
+        ),
+        FilesystemPermission(operations=["write"], paths=["/**"], mode="deny"),
+    ]
+
+
+def scouting_permissions() -> list[FilesystemPermission]:
+    """Read-widely, write-narrowly rules for the opportunity scout.
+
+    Same shape and same argument as `compliance_permissions`: a scout that can
+    write outside its own scan can edit the applications it is supposed to be
+    finding work for. It reads `/memories/org/AGENTS.md` to score against, so
+    the read side stays open -- only writes are confined.
+
+    Narrower than the parent's allow rule on purpose. `/opportunities/**` is
+    writable by the discovery orchestrator, but a subagent that only ever emits
+    one scored file per call has no reason to reach the rest of the tree, and
+    the interrupt rule that protects `final/` does not exist here to catch it.
+    """
+    return [
+        FilesystemPermission(
+            operations=["write"],
+            paths=["/opportunities/**"],
+            mode="allow",
+        ),
+        FilesystemPermission(operations=["write"], paths=["/**"], mode="deny"),
+    ]
 
 
 def compliance_permissions() -> list[FilesystemPermission]:

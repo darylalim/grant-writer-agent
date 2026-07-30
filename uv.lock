@@ -591,6 +591,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "deepagents" },
+    { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
     { name = "langchain-core" },
@@ -610,6 +611,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "deepagents", specifier = ">=0.6.12" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "langchain", specifier = ">=1.0,<2.0" },
     { name = "langchain-anthropic", specifier = ">=1.5.2,<2.0" },
     { name = "langchain-core", specifier = ">=1.0,<2.0" },

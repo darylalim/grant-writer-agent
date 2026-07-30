@@ -28,7 +28,7 @@ from grant_writer.activity import (
 )
 from grant_writer.cli import _print_activity
 from grant_writer.config import Settings, persistent_settings
-from grant_writer.prompts import draft_request
+from grant_writer.prompts import discovery_request, draft_request
 from grant_writer.workspace import application_files, count_gaps
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -165,6 +165,44 @@ def test_draft_request_routes_the_pdf_through_extract_pdf_text():
     assert "The funder is NSF." in request
 
 
+def test_discovery_request_names_the_scan_directory():
+    assert "/opportunities/rural-2026/" in discovery_request("rural-2026")
+
+
+def test_discovery_request_omits_sections_it_was_given_nothing_for():
+    minimal = discovery_request("rural-2026")
+    assert "Focus the search on" not in minimal
+    assert "agencies" not in minimal
+    assert "Additional context" not in minimal
+    # The process instruction is unconditional -- it is what drives the scan.
+    assert "read the organization profile" in minimal
+
+
+def test_discovery_request_carries_every_option_it_is_given():
+    request = discovery_request(
+        "rural-2026",
+        focus="afterschool STEM",
+        agencies="USDA|NSF",
+        notes="no cost share",
+    )
+    assert "afterschool STEM" in request
+    assert "USDA|NSF" in request
+    assert "no cost share" in request
+
+
+def test_the_two_briefs_do_not_send_each_other_s_workflow():
+    """A scan brief must not read as a drafting brief, or vice versa.
+
+    They steer different graphs. The failure if they blur is not an error: the
+    agent does the other job, competently, on the wrong tree.
+    """
+    scan = discovery_request("rural-2026")
+    draft = draft_request("nsf-26")
+    assert "requirements checklist" not in scan
+    assert "/applications/" not in scan
+    assert "/opportunities/" not in draft
+
+
 # ---- ③ frontends persist, libraries do not ----------------------------------
 
 
@@ -285,6 +323,20 @@ def _app_test(monkeypatch=None):
     return AppTest.from_file(str(PROJECT_ROOT / "streamlit_app.py"), default_timeout=60)
 
 
+def _button(app, label: str):
+    """Select a button by its label rather than its position.
+
+    Indexing into `app.button` addresses whichever button the script emits
+    first, which is a fact about page layout, not about the button a case
+    means. Adding
+    the discovery form above the drafting one silently retargeted eleven cases
+    to a different button, and they went on asserting -- about the wrong run.
+    A label lookup fails loudly instead: rename the button and the next line
+    raises StopIteration naming it, rather than clicking its neighbour.
+    """
+    return next(button for button in app.button if button.label == label)
+
+
 def _unparked(_config):
     """`get_state` for a thread with nothing pending.
 
@@ -370,8 +422,10 @@ def test_a_run_cannot_start_without_an_application_id(monkeypatch):
     """It doubles as the thread id; a blank one would checkpoint to nowhere."""
     app = _app_test(monkeypatch)
     app.run()
-    assert not app.button[0].disabled  # the app is in its normal, runnable state
-    app.button[0].click().run()
+    assert not _button(
+        app, "Draft proposal"
+    ).disabled  # the app is in its normal, runnable state
+    _button(app, "Draft proposal").click().run()
 
     assert not app.exception
     assert app.session_state["phase"] == "failed"
@@ -386,7 +440,7 @@ def test_the_ui_refuses_an_application_id_that_escapes_the_tree(monkeypatch, app
     app = _app_test(monkeypatch)
     app.run()
     app.text_input(key="app_id_input").set_value(app_id)
-    app.button[0].click().run()
+    _button(app, "Draft proposal").click().run()
 
     assert not app.exception
     assert app.session_state["phase"] == "failed"
@@ -407,7 +461,7 @@ def test_a_stopped_run_does_not_wedge_the_app(monkeypatch):
 
     assert not app.exception
     assert app.session_state["phase"] == "stopped"
-    assert not app.button[0].disabled
+    assert not _button(app, "Draft proposal").disabled
     assert any("checkpointed" in warning.value for warning in app.warning)
 
 
@@ -444,11 +498,11 @@ def test_the_run_button_is_disabled_while_a_turn_is_in_flight(monkeypatch):
     app = _app_test(monkeypatch)
     app.run()
     app.text_input(key="app_id_input").set_value("zz-pytest-inflight")
-    app.button[0].click().run()
+    _button(app, "Draft proposal").click().run()
 
     assert not app.exception
     assert app.session_state["phase"] == "running"  # genuinely mid-turn
-    assert app.button[0].disabled
+    assert _button(app, "Draft proposal").disabled
 
 
 def test_the_run_button_comes_back_once_the_turn_ends(monkeypatch):
@@ -474,11 +528,11 @@ def test_the_run_button_comes_back_once_the_turn_ends(monkeypatch):
     app = _app_test(monkeypatch)
     app.run()
     app.text_input(key="app_id_input").set_value("zz-pytest-finished")
-    app.button[0].click().run()
+    _button(app, "Draft proposal").click().run()
 
     assert not app.exception
     assert app.session_state["phase"] == "done"
-    assert not app.button[0].disabled
+    assert not _button(app, "Draft proposal").disabled
 
 
 def test_a_follow_up_sends_what_the_cli_chat_loop_sends(monkeypatch):
@@ -505,7 +559,7 @@ def test_a_follow_up_sends_what_the_cli_chat_loop_sends(monkeypatch):
     app = _app_test(monkeypatch)
     app.run()
     app.text_input(key="app_id_input").set_value("zz-pytest-followup").run()
-    app.button[0].click().run()
+    _button(app, "Draft proposal").click().run()
     assert app.session_state["phase"] == "done"
     seen.clear()  # drop the opening brief; the follow-up is what is under test
 
@@ -544,7 +598,7 @@ def test_a_blank_follow_up_does_not_start_a_turn(monkeypatch):
     app = _app_test(monkeypatch)
     app.run()
     app.text_input(key="app_id_input").set_value("zz-pytest-blank")
-    app.button[0].click().run()
+    _button(app, "Draft proposal").click().run()
     turns.clear()  # drop the opening brief
 
     app.chat_input(key="followup_input").set_value("   ").run()
@@ -590,7 +644,7 @@ def test_an_unreadable_checkpoint_refuses_the_run_rather_than_starting_one(monke
     app = _app_test(monkeypatch)
     app.run()
     app.text_input(key="app_id_input").set_value("zz-pytest-locked")
-    app.button[0].click().run()
+    _button(app, "Draft proposal").click().run()
 
     assert not app.exception, "the read escaped as a traceback"
     assert app.session_state["phase"] == "failed"
@@ -923,7 +977,7 @@ def test_the_follow_up_input_is_disabled_before_any_run(monkeypatch):
     app.run()
 
     assert not app.exception
-    assert not app.button[0].disabled  # the app is otherwise runnable
+    assert not _button(app, "Draft proposal").disabled  # the app is otherwise runnable
     assert app.chat_input(key="followup_input").disabled
 
 
@@ -1044,7 +1098,7 @@ def test_the_sidebar_is_frozen_while_a_turn_is_in_flight(monkeypatch):
     app.selectbox(key="profile_select").set_value("server").run()
     app.toggle(key="search_toggle").set_value(False).run()
     app.text_input(key="app_id_input").set_value("zz-pytest-sidebar")
-    app.button[0].click().run()
+    _button(app, "Draft proposal").click().run()
 
     assert not app.exception
     assert app.session_state["phase"] == "running"
@@ -1196,8 +1250,8 @@ def test_approving_resumes_the_graph_from_inside_the_fragment(monkeypatch):
     assert app.session_state["phase"] == "done"
 
 
-def test_the_application_id_input_is_not_inside_the_form():
-    """The precondition every file-browser case below silently depends on.
+def test_neither_id_input_is_inside_a_form():
+    """The precondition every browser case below silently depends on.
 
     `st.form` batches its widgets: their values reach the server only when
     Submit is pressed. The id is also what the browser reads back to pick an
@@ -1216,9 +1270,21 @@ def test_the_application_id_input_is_not_inside_the_form():
     app.run()
 
     assert not app.exception
+    # Both ids, for the same reason: each is read back further down the page to
+    # decide which directory the browser under it shows. The scan box is the
+    # newer of the two and the argument transfers unchanged -- reading last
+    # month's shortlist must not require starting a fresh billed scan.
     assert app.text_input(key="app_id_input").form_id == ""
-    # The other run inputs belong in the form; nothing reads them back.
-    assert [t.label for t in app.text_input if t.form_id] == ["Funder"]
+    assert app.text_input(key="scan_id_input").form_id == ""
+    # Everything else is a run input that nothing reads back, so it belongs in
+    # a form. Asserted as a set: these come from two forms now, and pinning
+    # their emission order would make this fail on a layout change it has no
+    # opinion about.
+    assert {t.label for t in app.text_input if t.form_id} == {
+        "Funder",
+        "What to look for",
+        "Agencies (optional)",
+    }
 
 
 def test_typing_an_application_id_browses_it_without_starting_a_run(
@@ -1297,7 +1363,7 @@ def test_the_application_id_and_its_picker_freeze_while_a_turn_is_in_flight(
     app = _app_test(monkeypatch)
     app.run()
     app.text_input(key="app_id_input").set_value(application_with_drafts)
-    app.button[0].click().run()
+    _button(app, "Draft proposal").click().run()
 
     assert not app.exception
     assert app.session_state["phase"] == "running"
@@ -1756,4 +1822,208 @@ def test_missing_api_keys_disable_the_run_button(monkeypatch):
 
     assert not app.exception
     assert any("ANTHROPIC_API_KEY" in error.value for error in app.error)
-    assert app.button[0].disabled
+    assert _button(app, "Draft proposal").disabled
+
+
+# ---- ⑨ the discovery surface ------------------------------------------------
+
+
+def test_a_scan_cannot_start_without_a_scan_id(monkeypatch):
+    """It names the directory and the thread; a blank one checkpoints nowhere."""
+    app = _app_test(monkeypatch)
+    app.run()
+    assert not _button(app, "Find opportunities").disabled
+    _button(app, "Find opportunities").click().run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "failed"
+    assert app.session_state["payload"] is None
+    assert any("scan id is required" in e.value for e in app.error)
+
+
+@pytest.mark.parametrize("scan_id", ["../evil", "/tmp/evil", "nsf/../.."])
+def test_the_ui_refuses_a_scan_id_that_escapes_the_tree(monkeypatch, scan_id):
+    """The shortlist below joins this onto a real path and reads files there,
+    and `render_file`'s download branch would hand back whatever it finds."""
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="scan_id_input").set_value(scan_id)
+    _button(app, "Find opportunities").click().run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "failed"
+    assert app.session_state["payload"] is None
+    assert any("invalid scan id" in e.value for e in app.error)
+
+
+def test_a_scan_sends_the_discovery_brief_on_its_own_thread(monkeypatch):
+    """The two graphs must not meet on one checkpoint row.
+
+    Pins both halves of that: the brief is `discovery_request`'s (not a
+    drafting one), and the thread id is namespaced, so a later
+    `draft --app-id zz-pytest-scan` resumes a different conversation.
+    """
+    seen: list[tuple] = []
+
+    class _RecordingAgent:
+        get_state = staticmethod(_unparked)
+
+        def stream(self, payload, config, **_kwargs):
+            seen.append((payload, config))
+            return iter(())
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_discovery_agent", lambda *_a, **_k: _RecordingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="scan_id_input").set_value("zz-pytest-scan")
+    _button(app, "Find opportunities").click().run()
+
+    assert not app.exception
+    assert len(seen) == 1
+    payload, config = seen[0]
+    content = payload["messages"][0]["content"]
+    assert "/opportunities/zz-pytest-scan/" in content
+    assert "requirements checklist" not in content, "sent the drafting brief"
+    assert config["configurable"]["thread_id"] == "discover:zz-pytest-scan"
+    assert app.session_state["active_scan_id"] == "zz-pytest-scan"
+    assert app.session_state["active_kind"] == "discover"
+    # And the application id is untouched, so the file browser below keeps
+    # pointing at applications/ rather than hunting for a scan id there.
+    assert app.session_state["active_app_id"] == ""
+
+
+def test_the_discovery_form_freezes_while_a_turn_is_in_flight(monkeypatch):
+    """Both flows share one `turn_locked`, so either running locks both.
+
+    Touching any widget mid-stream aborts the pass at the next element call and
+    drops minutes of model calls into STOPPED -- a fact about Streamlit, not
+    about which form the widget belongs to.
+    """
+
+    class _HangingAgent:
+        get_state = staticmethod(_unparked)
+
+        def stream(self, payload, config, **_kwargs):
+            yield {"__interrupt__": ()}
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _HangingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-lock")
+    _button(app, "Draft proposal").click().run()
+
+    assert not app.exception
+    # A drafting turn parked on an approval; the scan controls must be shut too,
+    # or a scan clears the feed that records the pending write.
+    assert app.session_state["phase"] == "awaiting"
+    assert _button(app, "Find opportunities").disabled
+    assert app.text_input(key="scan_id_input").disabled
+
+
+@pytest.fixture
+def scan_with_candidates():
+    """A real scan directory, scored.
+
+    Lives under the project's own `opportunities/`, since that is the only tree
+    `config.opportunities_dir` resolves an id into -- the same constraint the
+    application fixtures carry, for the same reason.
+    """
+    scan_id = "zz-pytest-scan-results"
+    scan_dir = PROJECT_ROOT / "opportunities" / scan_id
+
+    def scored(title, eligibility, mission):
+        return (
+            f"# Opportunity: {title}\n\n"
+            "- Number: TEST-1\n"
+            "- Agency: Test Agency\n\n"
+            f"## eligibility\n- Verdict: {eligibility}\n"
+            '- Citation (opportunity): "eligible applicants include nonprofits"\n\n'
+            f"## mission-alignment\n- Verdict: {mission}\n"
+            '- Citation (org profile): "we run out-of-school STEM"\n\n'
+            "## program-fit\n- Verdict: MODERATE\n"
+            '- Citation (opportunity): "serves youth 10-18"\n\n'
+            "## track-record\n- Verdict: WEAK\n"
+            '- Citation (org profile): "[NEEDS INPUT: prior federal awards?]"\n\n'
+            "## award-size-fit\n- Verdict: STRONG\n"
+            '- Citation (opportunity): "awards up to $300,000"\n\n'
+            "## timeline-feasibility\n- Verdict: STRONG\n"
+            '- Citation (opportunity): "closes in 90 days"\n'
+        )
+
+    contents = {
+        "candidates/strong-one.md": "# Strong One\n\nFull opportunity text.\n",
+        "scored/strong-one.md": scored("Strong One", "STRONG", "STRONG"),
+        "scored/barred-one.md": scored("Barred One", "NONE", "STRONG"),
+        # Deliberately unparseable: the scout wrote prose instead of the format.
+        "scored/garbled-one.md": "The model wrote a paragraph here instead.\n",
+    }
+    for relative, text in contents.items():
+        target = scan_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    try:
+        yield scan_id
+    finally:
+        shutil.rmtree(scan_dir, ignore_errors=True)
+
+
+def test_a_scan_shows_its_ranked_shortlist(scan_with_candidates):
+    """Reading a scan must not cost a turn, and the order must be the ranking.
+
+    The agent never states a rank -- `rank_opportunities` computes it from the
+    files. If this rendered in filename order instead, `barred-one` would come
+    first and the headline of the whole feature would be wrong.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="scan_id_input").set_value(scan_with_candidates).run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "idle", "browsing started a run"
+    labels = [e.label for e in app.expander]
+    assert any("Strong One" in label for label in labels)
+    ranked = [label for label in labels if "One" in label]
+    assert ranked[0].startswith("1. Strong One")
+    assert any("INELIGIBLE" in label for label in ranked)
+
+
+def test_an_unscorable_candidate_reads_as_unscored_not_as_a_bad_fit(
+    scan_with_candidates,
+):
+    """`None` and `0%` are opposite claims about a candidate.
+
+    A file the parser could not read has not been judged. Rendering it as 0%
+    says it was, and buries it under candidates that genuinely scored low.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="scan_id_input").set_value(scan_with_candidates).run()
+
+    assert not app.exception
+    labels = [e.label for e in app.expander]
+    unscorable = [label for label in labels if "Garbled" in label or "garbled" in label]
+    assert unscorable, "the unparseable candidate was dropped from the list entirely"
+    assert "unscored" in unscorable[0]
+    assert "0%" not in unscorable[0]
+
+
+def test_the_shortlist_counts_the_gaps_the_scout_refused_to_invent(
+    scan_with_candidates,
+):
+    """The same `[NEEDS INPUT` marker `count_gaps` scans applications for.
+
+    Spelled differently in `opportunities.py` and the markers would render on
+    screen while being left out of the count above them.
+    """
+    app = _app_test()
+    app.run()
+    app.text_input(key="scan_id_input").set_value(scan_with_candidates).run()
+
+    assert not app.exception
+    needs_input = [m for m in app.metric if m.label == "Needs input"]
+    assert needs_input, "the shortlist drew no gap count"
+    assert int(needs_input[0].value) >= 2
