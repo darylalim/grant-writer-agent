@@ -33,6 +33,8 @@ from grant_writer.config import (
 )
 from grant_writer.subagents import build_discovery_subagents, build_subagents
 from grant_writer.tools import (
+    _DISCOVERY_WRITE_DIRS,
+    _DRAFTING_WRITE_DIRS,
     _format_opportunity,
     _format_search_hits,
     _parse_page_spec,
@@ -162,17 +164,54 @@ def test_extract_pdf_text_reports_missing_file():
 
 
 @pytest.mark.parametrize(
-    "out_path",
+    ("out_path", "allowed"),
     [
-        "/applications/x/rfp.md",
-        "applications/x/rfp.md",
-        "/memories/org/AGENTS.md",
-        "/opportunities/rural-2026/candidates/353201.md",
-        "opportunities/rural-2026/scored/353201.md",
+        ("/applications/x/rfp.md", _DRAFTING_WRITE_DIRS),
+        ("applications/x/rfp.md", _DRAFTING_WRITE_DIRS),
+        ("/memories/org/AGENTS.md", _DRAFTING_WRITE_DIRS),
+        ("/opportunities/rural-2026/candidates/353201.md", _DISCOVERY_WRITE_DIRS),
+        ("opportunities/rural-2026/scored/353201.md", _DISCOVERY_WRITE_DIRS),
     ],
 )
-def test_output_paths_inside_content_dirs_are_allowed(out_path):
-    assert _resolve_output_path(out_path).is_relative_to(PROJECT_ROOT)
+def test_output_paths_inside_a_tools_own_dirs_are_allowed(out_path, allowed):
+    assert _resolve_output_path(out_path, allowed).is_relative_to(PROJECT_ROOT)
+
+
+@pytest.mark.parametrize(
+    "out_path",
+    [
+        "/applications/nsf-26/final/proposal.md",
+        "/applications/nsf-26/sections/need.md",
+        "/memories/org/AGENTS.md",
+    ],
+)
+def test_the_discovery_tool_cannot_write_into_an_application(out_path):
+    """The bypass that `discovery_permissions` alone does not close.
+
+    `fetch_grants_gov_opportunity` writes to real disk, so the permission rules
+    never run for it -- and those rules are the only thing that denies
+    `/applications/**` to the discovery graph, and the only thing that
+    interrupts a write under `final/`. Handed the project-wide `CONTENT_DIRS`,
+    one `out_path="/applications/x/final/proposal.md"` therefore overwrote a
+    submission-bound file with grants.gov synopsis text: no approval prompt, no
+    error, and both the permission test and the README still green, because
+    neither exercises the writer.
+
+    A tool gets its own graph's directories, not the union of everyone's.
+    """
+    with pytest.raises(ValueError, match=re.escape("refusing to write outside")):
+        _resolve_output_path(out_path, _DISCOVERY_WRITE_DIRS)
+
+
+def test_the_drafting_tool_cannot_write_into_a_scan():
+    """The same rule in the other direction, so neither set is a superset.
+
+    `extract_pdf_text` archives a solicitation beside the drafts; a scan
+    directory is not its business, and letting it write there would put a tool
+    the discovery graph does not carry into the tree that graph owns.
+    """
+    with pytest.raises(ValueError, match=re.escape("refusing to write outside")):
+        _resolve_output_path("/opportunities/s/candidates/x.md", _DRAFTING_WRITE_DIRS)
 
 
 @pytest.mark.parametrize(
@@ -196,18 +235,17 @@ def test_output_paths_outside_content_dirs_are_refused(out_path):
     the guard were replaced by some *other* ValueError -- a path-parsing crash,
     say -- and report a boundary that is no longer enforced as still holding.
 
-    The message names all three directories because it is built from
-    `CONTENT_DIRS`. That is the point of the constant: a fourth content
-    directory changes this string, and this line, rather than being added at
-    one enforcement site and forgotten at the other.
+    The message names the *caller's* directories, not the project's. A tool
+    permitted only `/opportunities/` must say so when it refuses, or the
+    message invites a retry into a directory it will refuse again -- and a
+    message built from the union would offer `/applications/` to a tool that,
+    since the write-bypass fix, may not touch it.
     """
     with pytest.raises(
         ValueError,
-        match=re.escape(
-            "refusing to write outside /applications/ or /memories/ or /opportunities/"
-        ),
+        match=re.escape("refusing to write outside /applications/ or /memories/"),
     ):
-        _resolve_output_path(out_path)
+        _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS)
 
 
 def test_content_dirs_agrees_with_the_settings_paths():
@@ -547,6 +585,90 @@ def test_an_opportunity_that_does_not_exist_is_an_error_not_an_empty_document(
     assert isinstance(result, str), "an absent record was passed on as data"
     assert result.startswith("Error:")
     assert "no record found" in result
+
+
+def test_an_award_floor_of_zero_does_not_erase_the_whole_range():
+    """A stated floor of 0 is a fact, and `or` reads it as absence.
+
+    grants.gov reports a zero floor routinely. Testing truthiness dropped the
+    entire range -- ceiling included -- so a $3.5M opportunity archived as
+    "not stated", and the scout scored `award-size-fit` against a document that
+    had withheld a number the funder actually published.
+    """
+    out = _format_opportunity(
+        {"synopsis": {"awardCeilingFormatted": "3,500,000", "awardFloor": 0}}
+    )
+    assert "USD 0 to USD 3,500,000" in out
+
+    # A ceiling with no floor at all is still worth stating.
+    ceiling_only = _format_opportunity({"synopsis": {"awardCeiling": "500000"}})
+    assert "up to USD 500000" in ceiling_only
+    assert "not stated" not in ceiling_only.split("Award range:")[1].split("\n")[0]
+
+
+@pytest.mark.parametrize(
+    ("synopsis", "expected"),
+    [
+        ({}, "not stated"),
+        ({"costSharing": False}, "no"),
+        ({"costSharing": True}, "yes"),
+    ],
+)
+def test_cost_sharing_never_renders_a_raw_none(synopsis, expected):
+    """`{None}` formats to the literal "None", which reads as "not required".
+
+    That is an affirmative claim the funder never made, in the one file the
+    gating eligibility criterion is scored from -- and cost-sharing capacity is
+    named in that criterion's own question. Every neighbouring line already
+    said "not stated"; this was the only one that did not.
+    """
+    line = next(
+        ln
+        for ln in _format_opportunity({"synopsis": synopsis}).splitlines()
+        if ln.startswith("- Cost sharing required:")
+    )
+    assert line == f"- Cost sharing required: {expected}"
+
+
+def test_a_non_object_json_body_is_an_error_not_an_exception(monkeypatch):
+    """Valid JSON need not be an object, and `.get` on a list raises.
+
+    A captive portal or an intercepting proxy answers 200 with `[]`, which
+    clears both `raise_for_status` and `response.json()` -- and the raise then
+    escapes this function's "never raises" contract, killing the sweep instead
+    of telling the model to try web search.
+    """
+
+    class _ListBody:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> list:
+            return []
+
+    from grant_writer.tools import _grants_gov_post
+
+    monkeypatch.setattr("grant_writer.tools.httpx.post", lambda *_a, **_k: _ListBody())
+    result = _grants_gov_post("search2", {})
+
+    assert isinstance(result, str)
+    assert result.startswith("Error:")
+
+
+@pytest.mark.parametrize("bad_id", ["²", "353201²", "①", "3.5", "", "abc"])
+def test_a_non_decimal_opportunity_id_is_refused_not_raised(bad_id):
+    """`isdigit` admits superscripts that `int()` then rejects.
+
+    `"²".isdigit()` is True, so the helpful guard was skipped and the
+    conversion raised -- handing the model a framework-level traceback in place
+    of the message this branch exists to give it.
+    """
+    from grant_writer.tools import fetch_grants_gov_opportunity
+
+    result = fetch_grants_gov_opportunity.invoke({"opportunity_id": bad_id})
+    assert result.startswith("Error: opportunity_id must be the numeric id")
 
 
 def test_a_missing_synopsis_degrades_rather_than_raising():

@@ -109,10 +109,27 @@ def read_scored_opportunities(scan_dir: Path) -> list[ScoredOpportunity]:
     not, so keeping them apart is what lets the ordering rules be tested
     without a directory on disk.
     """
+    # Suffix compared case-insensitively, matching `count_gaps`. `glob("*.md")`
+    # is case-sensitive on this filesystem, so a scout that wrote `NSF-26.MD`
+    # had its markers counted by the metric above the list and its candidate
+    # dropped from the list itself -- absent rather than flagged, since
+    # `warnings` only exist for a file that was parsed. That is the same drift
+    # `count_gaps` documents, inverted: there a case-sensitive test would have
+    # shown gaps on screen and left them out of the count.
+    # Guarded because `iterdir` raises on a directory that is not there, where
+    # the `glob` it replaced returned []. A scan has no `scored/` until its
+    # first scoring call lands, and both frontends read this from their script
+    # body -- so the window between starting a scan and the first score is one
+    # where an unguarded read takes down the whole page.
+    try:
+        entries = sorted((scan_dir / "scored").iterdir())
+    except OSError:
+        return []
+
     return [
         parse_scored_markdown(read_text(path), key=path.stem)
-        for path in sorted((scan_dir / "scored").glob("*.md"))
-        if path.is_file()
+        for path in entries
+        if path.is_file() and path.suffix.lower() == ".md"
     ]
 
 

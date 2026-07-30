@@ -437,15 +437,38 @@ def opportunity_browser(
     passed in, so a fragment rerun re-reads nothing -- and cannot go stale,
     because only a turn writes here and a turn ends in a full-app rerun.
     """
-    top = ranked[0].fit_percent if ranked else None
+    # Best *pursuable* fit. `rank_opportunities` sorts disqualified candidates
+    # into their own tier rather than zeroing them (invariant 15), so
+    # `ranked[0]` can be one the row below it flags INELIGIBLE -- and a
+    # headline metric is what a scanning reader takes away. An all-ineligible
+    # scan reporting a confident percentage is the worst version of that.
+    eligible = [o for o in ranked if not o.disqualified and o.fit_percent is not None]
+    top = eligible[0].fit_percent if eligible else None
+
+    # Counts what was *found*, not what was scored. `ranked` comes from
+    # `scored/`, so a scan stopped part-way through its delegations reported
+    # only the candidates it had got to -- a 30-candidate sweep scored 5 deep
+    # read as a sweep that found 5.
+    archived = len(
+        {path.stem for path in (scan_dir / "candidates").glob("*") if path.is_file()}
+    )
+
     with st.container(horizontal=True):
-        st.metric("Candidates", len(ranked), border=True)
+        st.metric(
+            "Candidates",
+            archived or len(ranked),
+            border=True,
+            help=f"Archived under `candidates/`. {len(ranked)} scored so far."
+            if archived and archived != len(ranked)
+            else "Archived and scored.",
+        )
         st.metric(
             "Best fit",
             "—" if top is None else f"{top:.0f}%",
             border=True,
-            help=f"Weighted across the {MAX_TOTAL_POINTS}-point fit rubric. "
-            "Computed from the scout's verdicts — it never states a score.",
+            help=f"Weighted across the {MAX_TOTAL_POINTS}-point fit rubric, and "
+            "the best candidate that is not disqualified. Computed from the "
+            "scout's verdicts — it never states a score.",
         )
         st.metric(
             "Needs input",
@@ -490,10 +513,22 @@ def opportunity_browser(
             # The raw file, under the reading of it. The scoring is the
             # product, but a citation is only worth what its source says, and
             # this is where someone checks that.
+            #
+            # Gated on a toggle rather than tucked inside a popover or a nested
+            # expander, because neither of those defers anything: Streamlit
+            # executes a container's body on every pass whether or not it is
+            # open, so `render_file` read *every* candidate off disk on *every*
+            # rerun -- the exact per-rerun cost this fragment exists to avoid,
+            # and the reason `ranked` and `gaps` are computed by the caller and
+            # passed in. The toggle is cheap; the read now happens for the one
+            # candidate someone actually asked to see.
             candidate = scan_dir / "candidates" / f"{opportunity.key}.md"
-            if candidate.is_file():
-                with st.popover("Read the source", icon=":material/description:"):
-                    render_file(candidate)
+            if candidate.is_file() and st.toggle(
+                "Read the source",
+                key=f"scan_src_{opportunity.key}",
+                help="The archived opportunity text these citations quote.",
+            ):
+                render_file(candidate)
 
 
 def render_feed(events: list[Event]) -> None:
@@ -1471,7 +1506,18 @@ with status_slot:
 browse_scan_id = scan_id.strip() or st.session_state.active_scan_id
 
 with discovery_slot:
-    if profile == "local" and browse_scan_id:
+    if profile == "server":
+        # Said out loud, as the applications pane says it. The scan form above
+        # is still enabled and still bills a full run under this profile, so a
+        # section that simply does not appear reads as "nothing was found"
+        # rather than "this profile keeps nothing to show you".
+        st.subheader("Opportunity shortlist", anchor=False)
+        st.info(
+            "The `server` profile keeps scans in ephemeral graph state, not on "
+            "disk. Switch to `local` to browse a shortlist.",
+            icon=":material/cloud_off:",
+        )
+    elif browse_scan_id:
         st.subheader("Opportunity shortlist", anchor=False)
         try:
             # Same boundary as the write side. Without it a scan id of ".."
@@ -1535,13 +1581,27 @@ with results_slot:
             # screen that cannot demonstrate it -- and the panel that *is*
             # asking about a `final/` write for that application goes unnamed,
             # in the state where confusing the two is most expensive.
-            st.caption(
-                f"Reading `{browse_id}`. The approval above is for "
-                f"`{st.session_state.active_app_id}`."
-                if st.session_state.phase == AWAITING
-                else f"Reading `{browse_id}`. The follow-up box above still "
-                f"continues `{st.session_state.active_app_id}`."
-            )
+            # Names whatever the follow-up box actually continues, which after
+            # a scan is the scan and not this application. Asserting
+            # `active_app_id` unconditionally was a caption that contradicted
+            # the chat input's own placeholder two panes up -- and this caption
+            # exists precisely so two controls never disagree quietly about
+            # which thread they address.
+            if st.session_state.phase == AWAITING:
+                st.caption(
+                    f"Reading `{browse_id}`. The approval above is for "
+                    f"`{st.session_state.active_app_id}`."
+                )
+            elif active_discovering:
+                st.caption(
+                    f"Reading application `{browse_id}`. The follow-up box "
+                    f"above continues scan `{active_ref}`, not this application."
+                )
+            else:
+                st.caption(
+                    f"Reading `{browse_id}`. The follow-up box above still "
+                    f"continues `{st.session_state.active_app_id}`."
+                )
         try:
             # Same boundary as the write side, and it matters more here: without
             # it an id of ".." lists the repo root, and the download branch

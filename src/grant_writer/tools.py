@@ -28,6 +28,18 @@ from langchain.tools import tool
 WORDS_PER_PAGE_SINGLE = 500
 WORDS_PER_PAGE_DOUBLE = 250
 
+# What each real-disk writer may reach, per tool rather than per project.
+#
+# These are deliberately narrower than `config.CONTENT_DIRS`, which is the union
+# the *permission rules* legitimately cover. A tool that writes past the backend
+# gets only the directories its own graph has business in: `extract_pdf_text`
+# belongs to drafting and archives a solicitation beside the drafts;
+# `fetch_grants_gov_opportunity` belongs to discovery and has no reason to touch
+# an application at all -- least of all `final/`, where a write would bypass the
+# approval interrupt entirely. See `_resolve_output_path`.
+_DRAFTING_WRITE_DIRS: tuple[str, ...] = ("applications", "memories")
+_DISCOVERY_WRITE_DIRS: tuple[str, ...] = ("opportunities",)
+
 
 def _parse_page_spec(spec: str, n_pages: int) -> list[int]:
     """Turn ``"1-3,7"`` into zero-based page indices."""
@@ -47,24 +59,34 @@ def _parse_page_spec(spec: str, n_pages: int) -> list[int]:
     return [p for p in wanted if 0 <= p < n_pages]
 
 
-def _resolve_output_path(out_path: str) -> Path:
-    """Map a virtual write path onto disk, refusing anything outside content dirs.
+def _resolve_output_path(out_path: str, allowed_dirs: tuple[str, ...]) -> Path:
+    """Map a virtual write path onto disk, refusing anything outside `allowed_dirs`.
 
     The tools below write to the real filesystem rather than through the
     backend, so they do not inherit the FilesystemPermission rules and have to
-    enforce the same boundary themselves. Both the allowed set and the message
-    come from ``config.CONTENT_DIRS``, which ``build_permissions`` also reads --
-    a directory added there reaches both enforcement points at once, which is
-    the whole reason it is one constant and not two literals (invariant 2).
+    enforce the same boundary themselves (invariant 2). Every such writer routes
+    through this one function; a tool that joined a path itself would be the
+    variant CLAUDE.md warns against.
 
-    Every writer here routes through this one function. A second tool that
-    saved a file by joining a path itself would be the fourth writer CLAUDE.md
-    warns about -- and would need this treatment, not a variant of it.
+    **`allowed_dirs` is required, and it is not `CONTENT_DIRS`.** That is the
+    correction: this used to apply the union of every content directory to every
+    caller, which meant it had no idea which graph was calling. The discovery
+    orchestrator carries `fetch_grants_gov_opportunity`, and its own permission
+    rules deny `/applications/**` -- but those rules govern the *backend*, and a
+    tool writing to real disk never consults them. So a single
+    ``out_path="/applications/x/final/proposal.md"`` overwrote a submission-bound
+    file, with no approval interrupt and no error, straight through the boundary
+    the whole approval mechanism rests on.
+
+    A union cannot express "this tool belongs to that graph", so the caller
+    states its own set. `CONTENT_DIRS` remains the union `build_permissions`
+    needs -- the permission rules really do cover all three -- but no writer
+    should inherit the union just because it exists.
     """
-    from grant_writer.config import CONTENT_DIRS, PROJECT_ROOT
+    from grant_writer.config import PROJECT_ROOT
 
     root = PROJECT_ROOT.resolve()
-    allowed = tuple(root / name for name in CONTENT_DIRS)
+    allowed = tuple(root / name for name in allowed_dirs)
 
     # Resolve BEFORE checking. Validating the raw string first lets
     # "/applications/../src/agent.py" pass the prefix test and then escape when
@@ -73,7 +95,10 @@ def _resolve_output_path(out_path: str) -> Path:
     resolved = (root / virtual.lstrip("/")).resolve()
 
     if not any(resolved.is_relative_to(base) for base in allowed):
-        listed = " or ".join(f"/{name}/" for name in CONTENT_DIRS)
+        # Names the caller's own set, not the union. A tool that may only write
+        # to /opportunities/ must say so when it refuses, or the message invites
+        # a retry into a directory it will refuse again.
+        listed = " or ".join(f"/{name}/" for name in allowed_dirs)
         msg = f"refusing to write outside {listed}: {out_path!r}"
         raise ValueError(msg)
     return resolved
@@ -136,7 +161,7 @@ def extract_pdf_text(
 
     if out_path:
         try:
-            target = _resolve_output_path(out_path)
+            target = _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS)
         except ValueError as exc:
             return f"Error: {exc}"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -223,6 +248,14 @@ def _grants_gov_post(path: str, payload: dict) -> dict | str:
     except ValueError:
         return "Error: grants.gov returned a response that was not JSON."
 
+    # Valid JSON is not necessarily an object. A captive portal or an
+    # intercepting proxy answers 200 with `[]` or a bare string, which clears
+    # `raise_for_status` and `response.json()` alike -- and `body.get(...)`
+    # then raises AttributeError straight past this function's "never raises"
+    # contract, killing the sweep instead of telling the model to try the web.
+    if not isinstance(body, dict):
+        return "Error: grants.gov returned JSON that was not an object."
+
     if body.get("errorcode"):
         return (
             f"Error: grants.gov reported {body.get('msg') or 'an unspecified error'}."
@@ -306,9 +339,41 @@ def _format_opportunity(data: dict) -> str:
     # "$100,000" against a source that never said "$" is a figure the scout
     # invented -- small, and exactly the kind of invention the rest of this
     # system refuses to make.
-    ceiling = synopsis.get("awardCeilingFormatted") or synopsis.get("awardCeiling")
-    floor = synopsis.get("awardFloorFormatted") or synopsis.get("awardFloor")
-    award_range = f"USD {floor} to USD {ceiling}" if floor and ceiling else "not stated"
+    def amount(*keys: str) -> str | None:
+        """First key that carries a value, as text.
+
+        Emptiness is tested against None and "" rather than by truthiness,
+        because a floor of 0 is a stated fact -- grants.gov reports one
+        routinely -- and `or` reads it as absent. That dropped the *whole*
+        range, ceiling included, so a $3.5M opportunity archived as "not
+        stated" and the scout scored `award-size-fit` against a document that
+        had withheld the number the funder actually published.
+        """
+        for key in keys:
+            value = synopsis.get(key)
+            if value is not None and value != "":
+                return str(value)
+        return None
+
+    ceiling = amount("awardCeilingFormatted", "awardCeiling")
+    floor = amount("awardFloorFormatted", "awardFloor")
+    if floor and ceiling:
+        award_range = f"USD {floor} to USD {ceiling}"
+    elif ceiling:
+        award_range = f"up to USD {ceiling}"
+    elif floor:
+        award_range = f"from USD {floor}"
+    else:
+        award_range = "not stated"
+
+    # Rendered as words, never as the raw value. `costSharing` is absent on
+    # plenty of listings, and `{None}` formats to the literal "None" -- which
+    # reads as "no cost sharing required", an affirmative claim the funder
+    # never made, in the one file the gating eligibility criterion is scored
+    # from. Every neighbouring line already says "not stated"; this was the
+    # only one that did not.
+    sharing = synopsis.get("costSharing")
+    cost_sharing = "not stated" if sharing is None else ("yes" if sharing else "no")
 
     return "\n".join(
         [
@@ -319,7 +384,7 @@ def _format_opportunity(data: dict) -> str:
             f"- Close date: {synopsis.get('responseDate') or 'not stated'}",
             f"- Award range: {award_range}",
             f"- Expected awards: {synopsis.get('numberOfAwards') or 'not stated'}",
-            f"- Cost sharing required: {synopsis.get('costSharing')}",
+            f"- Cost sharing required: {cost_sharing}",
             f"- Eligible applicant types: {applicants or 'not stated'}",
             f"- Solicitation: {synopsis.get('fundingDescLinkUrl') or 'not stated'}",
             "",
@@ -405,7 +470,12 @@ def fetch_grants_gov_opportunity(
         failure.
     """
     identifier = str(opportunity_id).strip()
-    if not identifier.isdigit():
+    # `isdecimal`, not `isdigit`: the latter admits superscripts and other
+    # non-decimal Unicode digits ("²".isdigit() is True) that `int()` then
+    # rejects, so the guard passed and the conversion below raised -- handing
+    # the model a framework-level traceback instead of the message this branch
+    # exists to give it.
+    if not identifier.isdecimal():
         return (
             f"Error: opportunity_id must be the numeric id from a search result, "
             f"got {opportunity_id!r}. The public number (e.g. 'PD-24-1340') is a "
@@ -420,7 +490,7 @@ def fetch_grants_gov_opportunity(
 
     if out_path:
         try:
-            target = _resolve_output_path(out_path)
+            target = _resolve_output_path(out_path, _DISCOVERY_WRITE_DIRS)
         except ValueError as exc:
             return f"Error: {exc}"
         target.parent.mkdir(parents=True, exist_ok=True)

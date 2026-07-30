@@ -144,14 +144,23 @@ runs, and still produces plausible output.
    then escape when `..` collapses. A further such writer needs the same treatment, not its own
    variant.
 
-   **The allowed set is `config.CONTENT_DIRS`, named once.** `build_permissions` derives
-   `/<name>/**` globs from it and `_resolve_output_path` derives `root / <name>` paths *and its
-   refusal message* from it, so a new content directory reaches both enforcement points at once.
-   Before this, each site spelled the pair out itself. The two id boundaries are likewise one
-   function: `application_dir` and `opportunities_dir` both call `_resolve_content_id`, which takes
-   the noun only to shape the message. Fixing an ordering bug in one copy and not the other is
-   exactly the failure having one copy prevents; `tests/test_review_fixes.py` §⑨ parametrizes the
-   same escape list over both to pin that sharing it did not loosen either side.
+   **`config.CONTENT_DIRS` is the union the *permission rules* cover — it is not what a writer
+   gets.** `build_permissions` derives `/<name>/**` globs from it, so a new content directory
+   reaches the rules in one edit. But `_resolve_output_path` takes its allowed set **from the
+   caller**, and that distinction is the correction to a hole this feature opened: handed the
+   union, it could not know which graph was calling. The discovery orchestrator carries
+   `fetch_grants_gov_opportunity`, and `discovery_permissions` denies it `/applications/**` — but
+   those rules govern the *backend*, and a tool writing to real disk never consults them, so one
+   `out_path="/applications/x/final/proposal.md"` overwrote a submission-bound file with no
+   approval interrupt and no error. `tools._DRAFTING_WRITE_DIRS` and `_DISCOVERY_WRITE_DIRS` are
+   each narrower than the union and neither is a superset of the other. A permission rule and a
+   real-disk writer are two enforcement points, not one, and only the first knows about graphs.
+
+   The two id boundaries *are* one function: `application_dir` and `opportunities_dir` both call
+   `_resolve_content_id`, which takes the noun only to shape the message. Fixing an ordering bug in
+   one copy and not the other is exactly the failure having one copy prevents;
+   `tests/test_review_fixes.py` §⑨ parametrizes the same escape list over both to pin that sharing
+   it did not loosen either side.
    `config.application_ids` is the read side of the same boundary — it supplies the UI's picker,
    so an id it offers must be one `application_dir` accepts. It gets that by calling
    `application_dir` on each candidate rather than by re-testing `_SAFE_APP_ID`: sharing the regex

@@ -406,11 +406,14 @@ headings exactly.
   arithmetic is done from your verdicts by code that reads this file; any
   number you write outside a quoted citation is ignored, and any number you
   invent would be indistinguishable from a real one.
-- **When the profile does not say, write
-  `[NEEDS INPUT: <the specific question>]` as the citation** and score the
-  criterion on what you do know. Do not assume a capability the organization
-  has not claimed, and do not read an absence as a negative -- an unrecorded
-  prior award is a question, not a WEAK track record.
+- **When the profile does not say, put the marker inside the quotes**, exactly
+  like any other citation:
+  `Citation (org profile): "[NEEDS INPUT: <question>]"`.
+  The quotes are what the file is read by; a marker written bare is not seen as
+  a citation at all, and the criterion is then reported as having no evidence
+  behind it. Score the criterion on what you do know. Do not assume a
+  capability the organization has not claimed, and do not read an absence as a
+  negative -- an unrecorded prior award is a question, not a WEAK track record.
 - **An honest NONE beats a hopeful STRONG.** Every over-scored candidate costs
   a human the time they would have spent on a real one.
 - Return a short report: the verdict pattern, the single strongest reason to

@@ -231,6 +231,14 @@ scan. Sharing the drafting rules looked equivalent and was not — the discovery
 orchestrator has `write_file` like any other, so one write under `final/` would
 have parked a thread nothing was watching.
 
+Those rules govern writes **through the backend**. The two tools that write to
+real disk — `extract_pdf_text` and `fetch_grants_gov_opportunity` — bypass them
+entirely, so each carries its own allowed directories rather than the
+project-wide set: drafting archives beside the drafts, discovery only into a
+scan. Neither is a superset of the other. A tool handed the union can't tell
+which graph is calling it, and a `final/` write from the discovery tool would
+skip the approval gate the rules exist to enforce.
+
 ### Self-grading against review criteria
 
 `RubricMiddleware` is included unconditionally and stays dormant until a

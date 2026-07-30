@@ -107,7 +107,6 @@ PROJECT_ROOT = _resolve_root()
 SKILLS_DIR = "/skills/"
 MEMORY_FILE = "/memories/org/AGENTS.md"
 APPLICATIONS_DIR = "/applications/"
-OPPORTUNITIES_DIR = "/opportunities/"
 
 # The directories the agent may write into, named once.
 #
@@ -323,12 +322,9 @@ def application_ids(settings: Settings) -> list[str]:
     raises. The directory is *listed*, not trusted.
 
     Two names are dropped on grounds the boundary has no opinion about, because
-    acceptance is not the only question a listing has to answer. The second is
-    identity: `application_dir` strips before it validates, so `"nsf-26 "` is
-    accepted and resolves to `applications/nsf-26`, and an entry that reads one
-    application and opens another is worse than one that is simply absent.
+    acceptance is not the only question a listing has to answer.
 
-    Dot-leading names are dropped separately, because the regex admits them --
+    Dot-leading names are dropped because the regex admits them --
     only `.` and `..` are special-cased -- so `.ipynb_checkpoints` and `.git`
     would otherwise sit in the picker beside real applications. This is a
     listing, and hiding the dotfiles is what a listing does.
