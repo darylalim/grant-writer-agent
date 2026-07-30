@@ -1,45 +1,121 @@
-# shadcn/ui-inspired theme, copied verbatim from the theme templates bundled
-# inside the installed streamlit package, at
+# shadcn/ui-inspired theme (zinc), light and dark.
+#
+# Provenance: the theme templates' `shadcn.toml`, from inside the installed
+# streamlit package, at
 # `$(uv run python -c 'import streamlit,pathlib;print(pathlib.Path(streamlit.__file__).parent)')`
 # then `/.agents/skills/developing-with-streamlit/assets/templates/themes/
-# configs/shadcn.toml`. Kept whole rather than trimmed to the keys this app
-# happens to use, so it stays diffable against that template on a version bump.
+# configs/shadcn.toml`. Every value is the template's except
+# `chartCategoricalColors` (replaced deliberately -- see below); the rest is only
+# redistributed across sections, so it still diffs by key on a version bump.
+# `tests/test_theme_config.py` pins that, so the deviation cannot grow silently.
 #
-# Chosen for this app specifically: a light base because the file browser
-# renders long prose drafts that get read rather than scanned;
-# `showWidgetBorder` because the layout is built almost entirely from
-# `st.container(border=True)`; and the named `greenColor`/`orangeColor`/
-# `grayColor` tokens because `TODO_ICONS` in streamlit_app.py addresses them
-# through `:green[...]`/`:orange[...]`/`:gray[...]` markdown directives.
+# Chosen for this app: `showWidgetBorder`, because the layout is built almost
+# entirely from `st.container(border=True)`.
 #
 # This file is the whole styling story. Do not add CSS injection to the app --
 # theme tokens here are the supported way to restyle a Streamlit app.
+#
+# ## Why light and dark are separate sections
+#
+# A single [theme] block locks the app to one mode, so before the split a reader
+# on a dark desktop had no way off the light surface. With both defined the
+# settings menu offers System/Light/Dark and lands on **System**, so the mode
+# follows the desktop rather than this file.
+#
+# **Rolling this back is not "delete [theme.dark]".** Verified in 1.60: the
+# switch appears when *either* mode section exists, and with only [theme.light]
+# present the Dark entry is built from [theme] plus Streamlit's stock dark
+# palette -- a #0E1117 page with none of these zinc surfaces, which a dark
+# desktop then gets by default. That is worse than either the split or the
+# original. To actually go back, move [theme.light]'s keys into [theme] and
+# delete *both* dark sections.
+#
+# ## What must NOT move out of [theme]
+#
+# Ten options exist only in the top-level section: `base`, `baseFontSize`,
+# `baseFontWeight`, `chartCategoricalColors`, `chartSequentialColors`,
+# `chartDivergingColors`, `fontFaces`, `metricValueFontSize`,
+# `metricValueFontWeight`, and `showSidebarBorder`. A misplaced one is not
+# rejected -- Streamlit logs `"theme.light.baseFontSize" is not a valid config
+# option` to the *server* log, which nobody is watching, and drops the value. So
+# a tidy-up that moves this block into both modes silently loses the 14px base
+# size and the sidebar border. `tests/test_theme_config.py` is what actually
+# catches that; this comment only explains it.
+#
+# Everything else here is valid in all six theme sections (the five below plus
+# the unused [theme.sidebar]) and is kept up top because it is genuinely shared:
+# geometry, typography, and the semantic palette do not depend on the mode.
+#
+# The semantic colours stay shared for a measured reason: `:gray[...]` and
+# friends do NOT render these values. Streamlit derives a per-mode
+# `grayTextColor` from `grayColor` and renders that, so on the dark page
+# `grayColor = #71717A` reaches the screen as #9898A0 at 6.95:1 -- already past
+# AA, at 36% of body-text contrast, which is the de-emphasis `TOOL` rows and
+# `PENDING_TODO_ICON` want. Overriding these per mode to "fix contrast" measures
+# a token nothing displays and flattens that hierarchy (a lifted zinc-400 lands
+# at 12.07:1, 63% of body text -- barely muted at all).
+#
+# ## The chart ramp, the one value not from shadcn.toml
+#
+# The template ramp opens on a zinc scale tuned for a white page: #18181B scores
+# 1.12:1 on the dark surface, and four of its seven entries fall under 3:1 on at
+# least one of the two page backgrounds. Being top-level-only, there is no
+# per-mode override to correct it with -- one ramp serves both surfaces, so it
+# has to clear both.
+#
+# The replacement is seven Tailwind steps -- the scale the semantic tokens above
+# already use -- searched rather than picked, then checked with the dataviz
+# skill's validator against #FFFFFF and #09090B. Hand-picking failed first on the
+# slot that looked safest: slate-500, as a neutral, at chroma 0.041 against a 0.10
+# floor, where a hue stops reading as a series and reads as gray.
+#
+# Verified limits -- **order is load-bearing**, so re-run the validator if you
+# touch it:
+#   - Line, bar, area, stacked (adjacent pairs): all seven clean, worst CVD
+#     dE 8.1, normal-vision dE 24.3.
+#   - Scatter, bubble, choropleth (all pairs): **five is the cap.** Six warns
+#     (dE 6.9) and seven hard-FAILS (dE 6.6). Past five, fold to "Other" or facet.
+#   - Tritanopia is reported but not gated, and it is this ramp's weak axis:
+#     dE 6.4 by slot five and 1.8 across all seven, because teal-600 and cyan-600
+#     are near-identical under it. A tritan-safe all-pairs chart uses the first
+#     four (dE 11.3).
+#   - The >=3:1 result covers the two *page* backgrounds only. A chart drawn on
+#     another surface is not covered: on the dark sidebar/secondary #18181B,
+#     #A21CAF is 2.80:1 and #B91C1C 2.74:1; on the light code background #F4F4F5,
+#     #D97706 is 2.90:1. A sidebar chart needs its own colours.
+#
+# What one shared token costs: the series separate by hue alone. Clearing 3:1 on
+# a white *and* a near-black page confines every entry to relative luminance
+# [0.108, 0.300] -- 64% of the range a light-only ramp gets -- so lightness is
+# spent on background contrast and cannot also separate series. Hence a floor,
+# not the last word: a chart wanting lightness separation should pass `color=`
+# per mode, which every Vega command accepts. Note `st.context.theme.type` is
+# documented as unreliable on first load and immediately after a mode switch
+# (streamlit#11920) -- the two renders where a per-mode palette is observable --
+# and returns None outside a script run, so branch on it defensively. A
+# `st.metric` sparkline has no colour argument at all, which is why the shared
+# default had to be the safe one.
+#
+# The app currently draws no charts, so none of this renders yet. It is a floor
+# for the first one, not a description of anything on screen.
 
 [theme]
 base = "light"
-primaryColor = "#18181B"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#FAFAFA"
-codeBackgroundColor = "#F4F4F5"
-textColor = "#09090B"
-linkColor = "#18181B"
-borderColor = "#E4E4E7"
-showWidgetBorder = true
+baseFontSize = 14
+baseFontWeight = 400
 showSidebarBorder = true
+showWidgetBorder = true
 baseRadius = "6px"
 buttonRadius = "6px"
 font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
 codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
 codeFontSize = "0.875rem"
-codeTextColor = "#18181B"
-baseFontSize = 14
-baseFontWeight = 400
 headingFontSizes = ["36px", "30px", "24px", "20px", "16px", "14px"]
 headingFontWeights = [600, 600, 600, 600, 600, 600]
 linkUnderline = true
-chartCategoricalColors = ["#18181B", "#71717A", "#A1A1AA", "#D4D4D8", "#3B82F6", "#EF4444", "#22C55E"]
 
-# shadcn zinc palette
+# shadcn zinc palette. Shared, not per-mode -- Streamlit derives the rendered
+# `*TextColor` per mode from each of these; see the note above.
 grayColor = "#71717A"
 blueColor = "#3B82F6"
 greenColor = "#22C55E"
@@ -48,10 +124,33 @@ yellowColor = "#EAB308"
 orangeColor = "#F97316"
 violetColor = "#8B5CF6"
 
+# Validated on both page backgrounds; order matters and five is the all-pairs
+# cap. See the chart-ramp note above before changing either.
+chartCategoricalColors = [
+  "#A21CAF",  # fuchsia-700
+  "#D97706",  # amber-600
+  "#0D9488",  # teal-600
+  "#B91C1C",  # red-700
+  "#2563EB",  # blue-600
+  "#EC4899",  # pink-500
+  "#0891B2",  # cyan-600
+]
+
+# --- Light: shadcn.toml's surfaces, unchanged ---------------------------------
+
+[theme.light]
+primaryColor = "#18181B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#FAFAFA"
+codeBackgroundColor = "#F4F4F5"
+textColor = "#09090B"
+linkColor = "#18181B"
+borderColor = "#E4E4E7"
+codeTextColor = "#18181B"
 dataframeBorderColor = "#E4E4E7"
 dataframeHeaderBackgroundColor = "#FAFAFA"
 
-[theme.sidebar]
+[theme.light.sidebar]
 backgroundColor = "#FAFAFA"
 secondaryBackgroundColor = "#F4F4F5"
 codeBackgroundColor = "#E4E4E7"
@@ -60,3 +159,54 @@ borderColor = "#E4E4E7"
 primaryColor = "#18181B"
 dataframeHeaderBackgroundColor = "#F4F4F5"
 dataframeBorderColor = "#E4E4E7"
+
+# --- Dark: the same zinc scale, inverted --------------------------------------
+#
+# Surfaces mirror step for step -- white/zinc-50/zinc-100/zinc-200 above becomes
+# zinc-950/zinc-900/zinc-800/zinc-700 here -- so the layering that separates a
+# bordered container from the page, and a code block from its border, survives
+# the flip. Two values are deliberately not mirrors:
+#
+# `primaryColor` is zinc-500, a compromise rather than a choice, because
+# Streamlit puts this one token to two jobs that pull opposite ways:
+#   A. it fills primary buttons, whose label Streamlit hardcodes to white
+#      (verified: set this to #FAFAFA and you get white on #FAFAFA, 1.04:1 -- it
+#      does not restyle the label to suit a light fill), so A wants it DARK;
+#   B. it is the foreground of selected controls -- the Source/Rendered segmented
+#      control in `render_file` and `approval_panel` draws its lit segment in this
+#      colour over a 10%-alpha wash of itself -- so B wants it LIGHT.
+# On a zinc-950 page the two curves cross around 4.4:1, so no value clears AA on
+# both. zinc-500 gives A 4.83:1 and B 3.82:1 against the composited wash
+# (#131316) the label actually sits on -- AA on the button label, over the 3:1
+# large-text floor on the segment. That order is deliberate: a button label has
+# no other cue, while a lit segment also carries its wash and border. zinc-600,
+# the surface-mirror choice, drops B to 2.45:1, and the Source/Rendered control is
+# the one thing saying whether the pane shows the bytes that get written.
+#
+# `linkColor` is set explicitly to keep the light half's *relationship* -- a
+# shade off `textColor`, with `linkUnderline` doing the identifying. Left unset
+# Streamlit falls back to `blueTextColor`, not to `primaryColor`, so the default
+# here would be a light blue link rather than anything zinc: readable, but a
+# different design than the light half's.
+
+[theme.dark]
+primaryColor = "#71717A"
+backgroundColor = "#09090B"
+secondaryBackgroundColor = "#18181B"
+codeBackgroundColor = "#27272A"
+textColor = "#FAFAFA"
+linkColor = "#E4E4E7"
+borderColor = "#3F3F46"
+codeTextColor = "#E4E4E7"
+dataframeBorderColor = "#3F3F46"
+dataframeHeaderBackgroundColor = "#18181B"
+
+[theme.dark.sidebar]
+backgroundColor = "#18181B"
+secondaryBackgroundColor = "#27272A"
+codeBackgroundColor = "#3F3F46"
+textColor = "#FAFAFA"
+borderColor = "#3F3F46"
+primaryColor = "#71717A"
+dataframeHeaderBackgroundColor = "#27272A"
+dataframeBorderColor = "#3F3F46"

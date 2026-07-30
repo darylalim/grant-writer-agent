@@ -89,9 +89,18 @@ The application id is validated before it is joined onto a path
 into it, so an id like `../..` or an absolute path would otherwise read and
 write anywhere on disk — `Path("applications") / "/etc/x"` is just `/etc/x`.
 
-Appearance is entirely `.streamlit/config.toml` (a light, neutral theme). The
-app injects no CSS and should not start: theme tokens are the supported way to
-restyle Streamlit, and `st.markdown(..., unsafe_allow_html=True)` styling
+Appearance is entirely `.streamlit/config.toml` (a neutral zinc theme, light and
+dark). The mode follows your desktop and is overridable from the settings menu.
+A single `[theme]` block *locks* an app to one mode rather than merely defaulting
+to it, which is why both halves are spelled out. The switch appears as soon as
+*either* half exists, though, so deleting `[theme.dark]` does not undo the split
+— it leaves the switch in place backed by Streamlit's stock dark palette instead
+of these surfaces. Rolling back means folding `[theme.light]` into `[theme]` and
+dropping both dark sections. `tests/test_theme_config.py` pins this and the rest
+of the theme's silent failures.
+
+The app injects no CSS and should not start: theme tokens are the supported way
+to restyle Streamlit, and `st.markdown(..., unsafe_allow_html=True)` styling
 breaks silently across upgrades when the class names it targets change.
 
 ## Architecture
@@ -187,7 +196,7 @@ every number, and every citation.
 
 ```bash
 uv sync                     # installs the dev group, streamlit included
-uv run pytest tests/ -q     # 126 offline tests, no API calls
+uv run pytest tests/ -q     # 167 offline tests, no API calls
 uvx ruff check src/ tests/ streamlit_app.py
 ```
 
