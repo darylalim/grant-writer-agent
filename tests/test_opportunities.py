@@ -19,9 +19,11 @@ from grant_writer.opportunities import (
     MAX_TOTAL_POINTS,
     RUBRIC,
     VERDICTS,
+    ScoredOpportunity,
     parse_scored_markdown,
     rank_opportunities,
     rubric_brief,
+    untraceable_citations,
 )
 
 # The format SCOUT_PROMPT asks for, filled in. Every other case in this file is
@@ -382,6 +384,114 @@ def test_a_candidate_with_no_title_falls_back_to_its_key():
     assert (
         parse_scored_markdown(WELL_FORMED, key="nsf-21-595").display_title
         == "Tribal Colleges and Universities Program"
+    )
+
+
+# ---- citation traceability --------------------------------------------------
+#
+# A false positive here is the expensive direction. Flagging an honest citation
+# teaches the reader to skim past the flag, which costs more than the
+# unverifiable citation it was meant to catch -- so most of these pin quotes
+# that must NOT be reported.
+
+
+def _one_citation(source: str, text: str) -> ScoredOpportunity:
+    """A minimal scored file carrying exactly one citation."""
+    return parse_scored_markdown(
+        "# Opportunity: T\n\n"
+        f'## eligibility\n- Verdict: STRONG\n- Citation ({source}): "{text}"\n',
+        key="k",
+    )
+
+
+def test_a_quote_split_across_a_wrapped_line_is_still_traceable():
+    """The case that made a hand check report two false alarms.
+
+    An archived candidate file is hard-wrapped, so a quotation routinely spans
+    a line break -- `"...providing lab\\n  equipment for K-8 schools"`. Any
+    line-oriented comparison reads that as absent, which is how a scan whose
+    every citation was genuine got reported as having two it could not support.
+    """
+    source = (
+        "STEM programs, including providing lab\n  equipment for K-8 urban schools.\n"
+    )
+    opportunity = _one_citation(
+        "opportunity", "including providing lab equipment for K-8 urban schools"
+    )
+    assert (
+        untraceable_citations(opportunity, opportunity_text=source, profile_text="")
+        == ()
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "quoted"),
+    [
+        # Emphasis the scout added that the source does not carry.
+        ("eligible states include Ohio and Texas", "eligible states include **Ohio**"),
+        # Emphasis in the source that the quote drops.
+        ("eligible states include **Ohio**", "eligible states include Ohio"),
+        # Re-capitalised at a sentence start.
+        ("awards range from $25,000", "Awards range from $25,000"),
+        # Collapsed runs of whitespace.
+        ("awards   range     from $25,000", "awards range from $25,000"),
+    ],
+)
+def test_cosmetic_differences_do_not_make_a_citation_unverifiable(source, quoted):
+    opportunity = _one_citation("opportunity", quoted)
+    assert (
+        untraceable_citations(opportunity, opportunity_text=source, profile_text="")
+        == ()
+    )
+
+
+def test_a_quote_that_is_not_in_the_source_is_reported():
+    """The failure this exists for.
+
+    The scout has no tools, so a quote it could not have read came from the
+    orchestrator's delegation -- true, most likely, and unverifiable by anyone
+    reading the scan afterwards, because the source pane cannot show it.
+    """
+    opportunity = _one_citation("opportunity", "awards up to $5,000,000")
+    missing = untraceable_citations(
+        opportunity, opportunity_text="awards up to $100,000", profile_text=""
+    )
+    assert [c.text for c in missing] == ["awards up to $5,000,000"]
+
+
+def test_each_source_is_checked_against_its_own_document():
+    """An `org profile` citation found only in the opportunity is still wrong.
+
+    Checking against the concatenation of both would let a claim about the
+    organization be supported by the funder's own marketing.
+    """
+    opportunity = _one_citation("org profile", "we serve 240 students")
+    assert untraceable_citations(
+        opportunity, opportunity_text="we serve 240 students", profile_text=""
+    )
+    assert not untraceable_citations(
+        opportunity, opportunity_text="", profile_text="we serve 240 students"
+    )
+
+
+def test_a_gap_marker_is_never_reported_as_unverifiable():
+    """`[NEEDS INPUT: ...]` is the scout saying it had nothing to quote.
+
+    That is the opposite of an unsupported quote, and reporting it as one would
+    punish the exact behaviour the anti-fabrication rule asks for.
+    """
+    opportunity = _one_citation("org profile", "[NEEDS INPUT: prior federal awards?]")
+    assert (
+        untraceable_citations(opportunity, opportunity_text="", profile_text="") == ()
+    )
+
+
+def test_a_missing_candidate_file_makes_its_citations_unverifiable():
+    """An archive that is not there cannot support anything quoted from it."""
+    opportunity = _one_citation("opportunity", "awards up to $100,000")
+    assert (
+        len(untraceable_citations(opportunity, opportunity_text="", profile_text=""))
+        == 1
     )
 
 

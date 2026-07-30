@@ -311,7 +311,24 @@ runs, and still produces plausible output.
     screen. `rank_opportunities` sorts in three tiers — scored, disqualified, unscorable — because
     "not at the top" has two different meanings and one sort key would interleave them.
 
-16. **Neither discovery subagent gets `skills`, and that is deliberate.** Invariant 3 says custom
+16. **A citation is checked against the file it names, not trusted.** `opportunities.
+    untraceable_citations` is pure and `workspace.unverifiable_citations` supplies the disk half;
+    both frontends surface the result. The scout has no tools — it cannot search — so everything it
+    knows comes from the two files it reads or from the orchestrator's delegation message, and that
+    message can carry findings from the orchestrator's own web research. A scout handed those
+    quotes them in good faith: true, and unverifiable, because the pane offering to show the source
+    cannot show them. Asking the prompt not to is advisory; this is the part that holds.
+
+    **The matching rule must stay whitespace-insensitive, and that is not a nicety.** An archived
+    candidate is hard-wrapped, so a real quotation routinely spans a line break. A line-oriented
+    comparison reports those as missing — which is exactly how a hand check of the first real scan
+    concluded two of its twenty-four citations were unsupported when every one of them was
+    genuine. A false positive is the expensive direction here: flagging honest citations teaches
+    the reader to skim past the flag, which costs more than the unverifiable citation it exists to
+    catch. `tests/test_opportunities.py` pins the wrapped-line, emphasis, case, and
+    collapsed-whitespace cases as *not* reportable for that reason.
+
+17. **Neither discovery subagent gets `skills`, and that is deliberate.** Invariant 3 says custom
     subagents do not inherit them, so a missing key usually *is* the bug. Here it is not: all six
     guides under `/skills/` are about drafting a section, and none has anything to say about
     whether to apply at all. `test_the_scout_is_deliberately_given_no_skills` inverts invariant 3's

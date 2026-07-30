@@ -406,6 +406,70 @@ def parse_scored_markdown(text: str, *, key: str = "") -> ScoredOpportunity:
     )
 
 
+def _normalise_quote(text: str) -> str:
+    """Flatten a quotation for comparison against its source.
+
+    Every transform here answers a false positive seen in a real scan, and a
+    false positive is the expensive direction: flagging an honest citation
+    teaches the reader to ignore the flag, which costs more than the dishonest
+    citation it was meant to catch.
+
+    - Whitespace collapses because the archived file is hard-wrapped and a
+      quotation spanning two lines is still a quotation. This alone accounted
+      for half the mismatches in the first real scan.
+    - Markdown emphasis goes because the scout re-emphasises inside quotes
+      (`**Ohio**`), and the source may emphasise different words.
+    - Backslash-escaped quotes collapse to bare ones, since the scout escapes
+      an inner `"` that the source writes plainly.
+    - Case folds, because a quotation re-capitalised at a sentence start is
+      still traceable to the sentence it came from.
+    """
+    flattened = text.replace('\\"', '"').replace("**", "").replace("*", "")
+    return " ".join(flattened.split()).casefold()
+
+
+def untraceable_citations(
+    opportunity: ScoredOpportunity,
+    *,
+    opportunity_text: str,
+    profile_text: str,
+) -> tuple[Citation, ...]:
+    """Citations that cannot be found in the source they name.
+
+    Pure, so the whole rule is testable without a scan on disk.
+
+    This exists because a citation is the only thing separating a fit score
+    from an opinion, and the scout is not the only author in the room: the
+    orchestrator's delegation message can carry findings from its own web
+    research, and a scout handed those will quote them in good faith. They are
+    real -- but they are not in the archived file, so the "Read the source"
+    pane cannot show them and nobody can check them. Asking the prompt not to
+    is advisory; this is the part that holds.
+
+    Gap markers are exempt. `[NEEDS INPUT: ...]` is the scout saying it had
+    nothing to quote, which is the opposite of an unverifiable quote and must
+    not be reported as one.
+    """
+    haystacks = {
+        "opportunity": _normalise_quote(opportunity_text),
+        "org profile": _normalise_quote(profile_text),
+    }
+    missing = []
+    for criterion in opportunity.criteria:
+        for citation in criterion.citations:
+            if citation.is_gap:
+                continue
+            haystack = haystacks.get(citation.source)
+            if haystack is None:
+                # An unrecognised source is already flagged by the parser as a
+                # warning; there is no text to check it against, and reporting
+                # it twice under two different headings helps nobody.
+                continue
+            if _normalise_quote(citation.text) not in haystack:
+                missing.append(citation)
+    return tuple(missing)
+
+
 def rank_opportunities(
     opportunities: Sequence[ScoredOpportunity],
 ) -> list[ScoredOpportunity]:

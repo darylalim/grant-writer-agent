@@ -27,7 +27,12 @@ from grant_writer.config import (
 )
 from grant_writer.opportunities import rank_opportunities
 from grant_writer.prompts import discovery_request, draft_request
-from grant_writer.workspace import count_gaps, read_scored_opportunities, scan_files
+from grant_writer.workspace import (
+    count_gaps,
+    read_scored_opportunities,
+    scan_files,
+    unverifiable_citations,
+)
 
 
 def _settings_from_args(args: argparse.Namespace) -> Settings:
@@ -174,7 +179,7 @@ def _chat(args: argparse.Namespace) -> int:
         _run(agent, {"messages": [{"role": "user", "content": line}]}, config)
 
 
-def _print_shortlist(scan_dir: Path, scan_id: str) -> None:
+def _print_shortlist(scan_dir: Path, scan_id: str, settings: Settings) -> None:
     """Print the ranked shortlist a scan produced.
 
     Reads the files rather than the transcript, and computes the ranking here,
@@ -206,6 +211,21 @@ def _print_shortlist(scan_dir: Path, scan_id: str) -> None:
     # arrive at one number: it misses a marker written into a `- Note:` line,
     # and the two frontends then printed different totals for the same
     # directory under captions that claimed they meant the same thing.
+    # Every citation checked against the file it names. The scout has no tools,
+    # so anything it quotes that is not in the archive came from the
+    # orchestrator's delegation -- true, most likely, and unverifiable by
+    # anyone reading the scan afterwards.
+    unverifiable = unverifiable_citations(scan_dir, ranked, settings.memory_path)
+    if unverifiable:
+        count = sum(len(items) for items in unverifiable.values())
+        print(
+            f"\n{count} citation(s) could not be found in the source they cite:",
+            flush=True,
+        )
+        for key, items in unverifiable.items():
+            for citation in items:
+                print(f"  {key} [{citation.source}]: {citation.text[:70]}…", flush=True)
+
     gaps = count_gaps(scan_files(scan_dir))
     if gaps:
         print(
@@ -247,7 +267,7 @@ def _discover(args: argparse.Namespace) -> int:
     }
     _run(agent, {"messages": [{"role": "user", "content": instruction}]}, config)
 
-    _print_shortlist(scan_dir, args.scan_id)
+    _print_shortlist(scan_dir, args.scan_id, settings)
     print(
         f"\nDone. Candidates and scoring in ./opportunities/{args.scan_id}/. "
         f"Draft one with: grant-writer draft --app-id <id> --funder <funder>",

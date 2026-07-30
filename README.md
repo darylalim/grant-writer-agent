@@ -148,6 +148,16 @@ Eligibility is gating — a `NONE` there marks the candidate ineligible — but 
 does not zero the score, because a surprising ineligibility call is exactly the
 one worth checking, and the evidence for it should still be on screen.
 
+**Every citation is checked against the file it names**, and any that cannot be
+found there is flagged in both frontends. The scout has no tools — it cannot
+search — so everything it knows arrives from the two files it reads or from the
+orchestrator's delegation message, and that message can carry findings from the
+orchestrator's own web research. A scout handed those quotes them in good
+faith: true, and unverifiable, because the pane offering to show you the source
+cannot show them. The check is deliberately insensitive to line wrapping,
+emphasis, and case, since a real quotation routinely spans a wrapped line and a
+flag on an honest citation costs more than the one it was meant to catch.
+
 ## Architecture
 
 Two graphs over shared infrastructure. Discovery is separate rather than a mode

@@ -46,6 +46,7 @@ from grant_writer.config import (
 )
 from grant_writer.opportunities import (
     MAX_TOTAL_POINTS,
+    Citation,
     ScoredOpportunity,
     rank_opportunities,
 )
@@ -57,6 +58,7 @@ from grant_writer.workspace import (
     read_bytes,
     read_scored_opportunities,
     scan_files,
+    unverifiable_citations,
 )
 
 st.set_page_config(
@@ -427,7 +429,10 @@ def _verdict_markup(criterion: Any) -> str:
 
 @st.fragment
 def opportunity_browser(
-    scan_dir: Path, ranked: list[ScoredOpportunity], gaps: int
+    scan_dir: Path,
+    ranked: list[ScoredOpportunity],
+    gaps: int,
+    unverifiable: dict[str, tuple[Citation, ...]],
 ) -> None:
     """Draw the ranked shortlist for one scan.
 
@@ -510,6 +515,16 @@ def opportunity_browser(
                     st.caption(f"↳ {criterion.note}")
             for warning in opportunity.warnings:
                 st.warning(warning, icon=":material/report:")
+            # Checked, not assumed. The scout has no tools, so a quote it wrote
+            # that is not in the archive reached it through the orchestrator's
+            # delegation -- probably true, and unverifiable by whoever reads
+            # this afterwards, because the source pane below cannot show it.
+            for citation in unverifiable.get(opportunity.key, ()):
+                st.warning(
+                    f"Not found in the {citation.source} it cites: "
+                    f"“{citation.text[:120]}…”",
+                    icon=":material/unknown_document:",
+                )
             # The raw file, under the reading of it. The scoring is the
             # product, but a citation is only worth what its source says, and
             # this is where someone checks that.
@@ -1537,7 +1552,15 @@ with discovery_slot:
             if not files:
                 st.caption(f"Nothing in `opportunities/{browse_scan_id}/` yet.")
             else:
-                opportunity_browser(scan_dir, ranked, count_gaps(files))
+                # Read here, in the full app run, and handed to the
+                # fragment -- one candidate file per candidate, once,
+                # rather than on every expander click.
+                opportunity_browser(
+                    scan_dir,
+                    ranked,
+                    count_gaps(files),
+                    unverifiable_citations(scan_dir, ranked, settings.memory_path),
+                )
 
 
 # --- Application files -------------------------------------------------------

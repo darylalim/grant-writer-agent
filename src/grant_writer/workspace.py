@@ -17,7 +17,12 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
-from grant_writer.opportunities import ScoredOpportunity, parse_scored_markdown
+from grant_writer.opportunities import (
+    Citation,
+    ScoredOpportunity,
+    parse_scored_markdown,
+    untraceable_citations,
+)
 
 # The order WORKSPACE_CONVENTIONS lays out an application directory in, so a
 # listing reads the way the agent works rather than alphabetically.
@@ -93,6 +98,41 @@ def application_files(app_dir: Path) -> list[Path]:
 def scan_files(scan_dir: Path) -> list[Path]:
     """Every file under a discovery scan directory, in workspace order."""
     return _ordered_files(scan_dir, SCAN_DIRECTORY_ORDER)
+
+
+def unverifiable_citations(
+    scan_dir: Path,
+    opportunities: Sequence[ScoredOpportunity],
+    profile_path: Path,
+) -> dict[str, tuple[Citation, ...]]:
+    """Per candidate, the citations that are not in the source they name.
+
+    The disk half of `opportunities.untraceable_citations`, which owns the
+    matching rule and stays pure. Takes the already-parsed list rather than
+    re-reading `scored/`, so a frontend that has ranked them pays one read per
+    candidate file and nothing more.
+
+    Why check at all, when the scout is told to quote only what it read: the
+    scout is not the only author. It has no tools -- it cannot search -- so
+    everything it knows arrives from the two files it reads or from the
+    orchestrator's delegation message, and that message can carry findings from
+    the orchestrator's own web research. A scout handed those quotes them in
+    good faith. They are true, and they are unverifiable, because the pane
+    offering to show the source cannot show them.
+
+    A missing candidate file yields every non-gap citation, which is right: an
+    archive that is not there cannot support anything quoted from it.
+    """
+    profile_text = read_text(profile_path)
+    unverifiable = {}
+    for opportunity in opportunities:
+        source = read_text(scan_dir / "candidates" / f"{opportunity.key}.md")
+        missing = untraceable_citations(
+            opportunity, opportunity_text=source, profile_text=profile_text
+        )
+        if missing:
+            unverifiable[opportunity.key] = missing
+    return unverifiable
 
 
 def read_scored_opportunities(scan_dir: Path) -> list[ScoredOpportunity]:
