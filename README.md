@@ -307,3 +307,7 @@ prefix-stripped and namespaced, so `ls /skills/` cannot leak memory files.
 - `RubricMiddleware` is marked beta upstream; its API may change.
 - Adding `LANGSMITH_API_KEY` is strongly recommended. A run that fans out to
   three subagents is close to impossible to debug from stdout alone.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
