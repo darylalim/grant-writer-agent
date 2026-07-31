@@ -171,7 +171,10 @@ def test_chat_also_accepts_common_flags_after_subcommand():
 def test_seed_store_uses_prefix_stripped_keys_per_namespace():
     """CompositeBackend strips the route prefix before delegating, so keys must
     be stored prefix-stripped and in the route's own namespace -- otherwise
-    routed reads 404 and `ls /skills/` leaks memory files (the live bug)."""
+    routed reads 404 and `ls /skills/` leaks memory files (the live bug).
+
+    Pins invariant 6.
+    """
     from grant_writer.config import Settings
 
     store = InMemoryStore()
@@ -269,6 +272,11 @@ def test_application_dir_rejects_ids_that_leave_the_tree(app_id, tmp_path):
     `Path("/repo/applications") / "/etc/x"` is `/etc/x` -- the left operand is
     discarded -- so an unvalidated id is an arbitrary-write, and on the read
     side an id of ".." lists the repo root and offers `.env` for download.
+
+    Pins invariant 2.
+
+    The id half of it. The real-disk writers are the other half, over in
+    test_wiring; both resolve `..` before the prefix check, for the same reason.
     """
     with pytest.raises(ValueError, match=r"application id|outside applications"):
         application_dir(Settings(root=tmp_path), app_id)

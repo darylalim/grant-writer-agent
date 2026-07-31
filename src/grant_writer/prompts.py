@@ -389,6 +389,7 @@ angle-bracketed parts are yours to fill in.
 - Verdict: <one word>
 - Citation (opportunity): "<exact quote from the candidate file>"
 - Citation (org profile): "<exact quote from AGENTS.md>"
+- Citation (org profile): "<a second exact quote, on its own line, if needed>"
 - Note: <one line, only if something needs saying>
 
 ...then the same block for `mission-alignment`, `program-fit`,
@@ -401,6 +402,14 @@ headings exactly.
   verdict is an opinion, and this file exists to be something other than one.
   Quote the funder's words for a claim about the opportunity, and the profile's
   words for a claim about the organization.
+- **One quote per `Citation` line, and add lines rather than joining quotes.**
+  A line is read as a single citation running from its first quotation mark to
+  its last, so two quotes on one line become one quotation that includes the
+  join -- `"A." / "B."` is looked up verbatim, found in no document, and
+  reported as unsupported even though both halves are exact. The same is true
+  of two lines of a source run together into one quote: the text between them
+  is not yours to drop. Give every quote its own `Citation` line with its own
+  source in the brackets, as many as the verdict needs.
 - **Never state a score, a number of points, a percentage, or a total.** There
   is nowhere in this format to put one. The weights are not yours and the
   arithmetic is done from your verdicts by code that reads this file; any

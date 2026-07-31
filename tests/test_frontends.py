@@ -267,7 +267,10 @@ def test_is_parked_does_not_depend_on_reading_the_payload():
 def test_approval_decisions_returns_one_decision_per_request(n):
     """Both frontends build the resume payload here. A count that disagrees
     with the interrupted calls is rejected on resume, and zero requests still
-    needs one decision -- the floor the CLI has always applied."""
+    needs one decision -- the floor the CLI has always applied.
+
+    Pins invariant 5.
+    """
     requests = [{"name": "write_file"} for _ in range(n)]
     approved = approval_decisions(requests, approve=True)
     assert len(approved) == max(n, 1)
@@ -711,6 +714,11 @@ def test_a_new_run_cannot_be_started_while_an_approval_is_pending(monkeypatch):
     write was ever pending. Locking the id box does not cover this on its own:
     the brief is rebuilt from the id that box still holds, so the run restarts
     on exactly the application whose approval it just discarded.
+
+    Pins invariant 11.
+
+    The run-form half. The follow-up input is the other handler that can start
+    a turn, and needs its own guard for the same reason.
     """
     streamed: list[object] = []
     agent = _parked_agent(
@@ -823,6 +831,11 @@ def test_a_follow_up_cannot_start_a_turn_on_a_parked_thread(monkeypatch):
     a pass that stopped rather than from the graph: the toolbar's Stop can abort
     the streaming pass after the interrupt is already committed. The input is
     enabled there, and the STOPPED banner points the reader straight at it.
+
+    Pins invariant 11.
+
+    The follow-up half -- guarding only the form leaves the hole open in the
+    phase whose own banner points the reader at this box.
     """
     streamed: list[object] = []
     agent = _parked_agent(
@@ -1265,6 +1278,8 @@ def test_neither_id_input_is_inside_a_form():
     below pass either way. They did, against a browser where the pane stayed
     empty. So pin the structural fact the harness does model -- `form_id` is on
     the proto -- rather than the behaviour it fakes.
+
+    Pins invariant 10.
     """
     app = _app_test()
     app.run()

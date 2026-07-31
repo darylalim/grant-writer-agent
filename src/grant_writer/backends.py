@@ -17,7 +17,7 @@ places this agent runs:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from deepagents import FilesystemPermission
@@ -105,44 +105,60 @@ def seed_store_from_disk(store: BaseStore, settings: Settings) -> int:
     return count
 
 
-def build_permissions(settings: Settings) -> list[FilesystemPermission]:
-    """Confine the agent's writes to content directories.
+def _write_rules(
+    *,
+    allow: Sequence[str],
+    interrupt: Sequence[str] = (),
+) -> list[FilesystemPermission]:
+    """Build a write-rule list that cannot be put in the wrong order.
 
-    Rules are evaluated in order and the *first* match wins; anything that
-    matches no rule is allowed. So the specific allows must precede the
-    catch-all deny.
+    Rules are evaluated first-match-wins and anything matching no rule is
+    *allowed*, so the ordering is not a style question -- it is the policy.
+    Two things have to hold, and neither raises when it stops holding:
+
+    - the catch-all deny comes last, or it shadows every allow above it and the
+      agent can write nothing;
+    - an interrupt precedes the allow it carves out of, or the allow matches
+      first and the submission-bound write goes through with no approval.
+
+    Every caller below used to assemble that by hand and end with the same
+    literal deny rule. Passing globs by role instead, and letting this function
+    place them, is what makes both facts unlosable: there is no ordering left
+    at a call site to get wrong, and the deny is written in exactly one place.
+
+    `allow` is keyword-only and required so nobody can call this bare and get a
+    deny-everything list back.
     """
     rules: list[FilesystemPermission] = []
-
-    if settings.approve_final:
-        # Submission-bound files get a human in the loop. This is deliberately
-        # narrower than `interrupt_on={"write_file": True}`, which would stop
-        # on every scratch note and train you to rubber-stamp approvals.
+    if interrupt:
         rules.append(
             FilesystemPermission(
-                operations=["write"],
-                paths=["/applications/*/final/**"],
-                mode="interrupt",
+                operations=["write"], paths=list(interrupt), mode="interrupt"
             )
         )
-
-    rules.extend(
-        [
-            FilesystemPermission(
-                operations=["write"],
-                # Derived from `config.CONTENT_DIRS`, which `_resolve_output_path`
-                # also reads. The two enforce this boundary in different shapes --
-                # globs here, real paths there -- and spelling the directories out
-                # at each site is what let them drift apart; see invariant 2.
-                paths=[f"/{name}/**" for name in CONTENT_DIRS],
-                mode="allow",
-            ),
-            # Everything else is read-only: the agent can consult /skills/ but
-            # never edit its own instructions or the source tree.
-            FilesystemPermission(operations=["write"], paths=["/**"], mode="deny"),
-        ]
+    rules.append(
+        FilesystemPermission(operations=["write"], paths=list(allow), mode="allow")
     )
+    # The only catch-all deny in this module. Everything not allowed above is
+    # read-only: the agent can consult /skills/ but never edit its own
+    # instructions or the source tree.
+    rules.append(FilesystemPermission(operations=["write"], paths=["/**"], mode="deny"))
     return rules
+
+
+def build_permissions(settings: Settings) -> list[FilesystemPermission]:
+    """Confine the drafting agent's writes to content directories."""
+    return _write_rules(
+        # Derived from `config.CONTENT_DIRS`, which `_resolve_output_path` also
+        # reads. The two enforce this boundary in different shapes -- globs
+        # here, real paths there -- and spelling the directories out at each
+        # site is what let them drift apart; see invariant 2.
+        allow=[f"/{name}/**" for name in CONTENT_DIRS],
+        # Submission-bound files get a human in the loop. Deliberately narrower
+        # than `interrupt_on={"write_file": True}`, which would stop on every
+        # scratch note and train you to rubber-stamp approvals.
+        interrupt=["/applications/*/final/**"] if settings.approve_final else (),
+    )
 
 
 def discovery_permissions() -> list[FilesystemPermission]:
@@ -167,15 +183,12 @@ def discovery_permissions() -> list[FilesystemPermission]:
     agent to record durable facts about the organization there, and no rule
     interrupts a write to it -- so allowing it keeps the prompt honest without
     reopening the hole.
+
+    Note what is not passed: `_write_rules` takes `interrupt` and this omits
+    it. The guarantee in the first line is therefore visible on one line of
+    code rather than argued from the shape of a hand-built list.
     """
-    return [
-        FilesystemPermission(
-            operations=["write"],
-            paths=["/opportunities/**", "/memories/**"],
-            mode="allow",
-        ),
-        FilesystemPermission(operations=["write"], paths=["/**"], mode="deny"),
-    ]
+    return _write_rules(allow=["/opportunities/**", "/memories/**"])
 
 
 def scouting_permissions() -> list[FilesystemPermission]:
@@ -191,14 +204,7 @@ def scouting_permissions() -> list[FilesystemPermission]:
     one scored file per call has no reason to reach the rest of the tree, and
     the interrupt rule that protects `final/` does not exist here to catch it.
     """
-    return [
-        FilesystemPermission(
-            operations=["write"],
-            paths=["/opportunities/**"],
-            mode="allow",
-        ),
-        FilesystemPermission(operations=["write"], paths=["/**"], mode="deny"),
-    ]
+    return _write_rules(allow=["/opportunities/**"])
 
 
 def compliance_permissions() -> list[FilesystemPermission]:
@@ -207,11 +213,4 @@ def compliance_permissions() -> list[FilesystemPermission]:
     A reviewer that can edit the thing it reviews is not a reviewer, so it may
     only write its own report.
     """
-    return [
-        FilesystemPermission(
-            operations=["write"],
-            paths=["/applications/*/review/**"],
-            mode="allow",
-        ),
-        FilesystemPermission(operations=["write"], paths=["/**"], mode="deny"),
-    ]
+    return _write_rules(allow=["/applications/*/review/**"])

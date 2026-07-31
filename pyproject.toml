@@ -38,6 +38,18 @@ dev = [
     "streamlit[pdf]>=1.60.0",
 ]
 
+[tool.pytest.ini_options]
+# The repo root, so `tests/test_evals.py` can import `evals`. The build backend
+# is src-layout, so only `src/` is installed and the root is otherwise off the
+# path -- and `evals/` is deliberately not shipped in the wheel, being a
+# development instrument like `tests/` itself.
+#
+# This does NOT put the evals themselves in the suite: `evals/` contains no
+# `test_*.py`, and the one thing collected from it is the offline scorer test
+# in `tests/`. The eval runner needs a live API key and must stay uncollectable
+# -- see `evals/__init__.py`.
+pythonpath = ["."]
+
 [tool.ruff.lint]
 # The source already satisfied every rule below before this section existed, so
 # it is a ratchet on the standard the code was written to, not a cleanup to work

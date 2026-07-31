@@ -46,13 +46,13 @@
             "type": "command",
             "timeout": 60,
             "statusMessage": "Running wiring tests",
-            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in \"$CLAUDE_PROJECT_DIR\"/src/grant_writer/*.py|\"$CLAUDE_PROJECT_DIR\"/tests/*.py) ;; *) exit 0;; esac; out=$(cd \"$CLAUDE_PROJECT_DIR\" && uv run pytest tests/ -q --no-header -p no:warnings 2>&1) || { printf '%s\\n' \"$out\" | tail -25 >&2; exit 2; }"
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in \"$CLAUDE_PROJECT_DIR\"/src/grant_writer/*.py|\"$CLAUDE_PROJECT_DIR\"/tests/*.py|\"$CLAUDE_PROJECT_DIR\"/evals/*.py|\"$CLAUDE_PROJECT_DIR\"/streamlit_app.py|\"$CLAUDE_PROJECT_DIR\"/CLAUDE.md|\"$CLAUDE_PROJECT_DIR\"/.streamlit/config.toml) ;; *) exit 0;; esac; out=$(cd \"$CLAUDE_PROJECT_DIR\" && uv run pytest tests/ -q --no-header -p no:warnings 2>&1) || { printf '%s\\n' \"$out\" | tail -25 >&2; exit 2; }"
           },
           {
             "type": "command",
             "timeout": 30,
             "statusMessage": "Type-checking with ty",
-            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) ;; *) exit 0;; esac; n=$(cd \"$CLAUDE_PROJECT_DIR\" && uvx ty check src/ tests/ 2>&1 | grep -cE '^(error|warning)\\['); [ \"$n\" -gt 2 ] && { echo \"ty: $n diagnostics vs baseline 2 (both upstream in deepagents/langgraph, deliberately unsuppressed). You introduced $((n - 2)).\" >&2; exit 2; }; exit 0"
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) ;; *) exit 0;; esac; n=$(cd \"$CLAUDE_PROJECT_DIR\" && uvx ty check src/ tests/ evals/ streamlit_app.py 2>&1 | grep -cE '^(error|warning)\\['); [ \"$n\" -gt 2 ] && { echo \"ty: $n diagnostics vs baseline 2 (both upstream in deepagents/langgraph, deliberately unsuppressed). You introduced $((n - 2)).\" >&2; exit 2; }; exit 0"
           }
         ]
       }

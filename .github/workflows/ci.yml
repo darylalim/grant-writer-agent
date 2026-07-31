@@ -97,10 +97,10 @@ jobs:
       # turns CI red on code that did not change. Bump this deliberately, with
       # the fixes in the same commit.
       - name: Lint
-        run: uvx ruff@0.16.0 check src/ tests/ streamlit_app.py
+        run: uvx ruff@0.16.0 check src/ tests/ evals/ streamlit_app.py
 
       - name: Format
-        run: uvx ruff@0.16.0 format --check src/ tests/ streamlit_app.py
+        run: uvx ruff@0.16.0 format --check src/ tests/ evals/ streamlit_app.py
 
       # ty reports exactly two diagnostics today, both upstream signature
       # problems in deepagents/langgraph that CLAUDE.md deliberately leaves
@@ -121,7 +121,7 @@ jobs:
         env:
           TY_BASELINE: 2
         run: |
-          uvx ty@0.0.63 check src/ tests/ streamlit_app.py > ty.log 2>&1 || true
+          uvx ty@0.0.63 check src/ tests/ evals/ streamlit_app.py > ty.log 2>&1 || true
           cat ty.log
 
           count=$(sed -n 's/^Found \([0-9][0-9]*\) diagnostic.*/\1/p' ty.log | tail -1)

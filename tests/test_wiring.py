@@ -8,11 +8,15 @@ makes it work.
 
 from __future__ import annotations
 
+import inspect
 import re
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from deepagents import RubricMiddleware
 from deepagents.middleware.filesystem import _check_fs_permission, supports_execution
+from deepagents.middleware.rubric import GraderResponse
 
 from grant_writer.agent import build_agent, build_discovery_agent
 from grant_writer.backends import (
@@ -25,13 +29,18 @@ from grant_writer.backends import (
 from grant_writer.config import (
     CONTENT_DIRS,
     DEFAULT_MODELS,
+    GRADER_MODEL,
     MAX_OUTPUT_TOKENS,
     PROJECT_ROOT,
     Settings,
     build_model,
     discovery_thread_id,
 )
-from grant_writer.subagents import build_discovery_subagents, build_subagents
+from grant_writer.subagents import (
+    _subagent,
+    build_discovery_subagents,
+    build_subagents,
+)
 from grant_writer.tools import (
     _DISCOVERY_WRITE_DIRS,
     _DRAFTING_WRITE_DIRS,
@@ -80,6 +89,8 @@ def test_drafting_subagents_receive_skills_explicitly():
 
     Without this, the drafter still answers -- just generically, with none of
     the funder-specific guidance. That is the failure this test exists for.
+
+    Pins invariant 3.
     """
     for sub in build_subagents():
         if sub["name"] in {"section-drafter", "compliance-checker"}:
@@ -101,6 +112,13 @@ def test_drafting_subagents_receive_skills_explicitly():
     ],
 )
 def test_main_agent_permissions(operation, path, expected):
+    """Pins invariant 1.
+
+    Rules are first-match-wins and no match means allow, so the catch-all deny
+    has to come last and the specific allows before it. Reordering the list
+    raises nothing -- it silently opens or closes the whole tree, which is why
+    the denied cases below matter as much as the allowed ones.
+    """
     rules = build_permissions(Settings(approve_final=False))
     assert _check_fs_permission(rules, operation, path) == expected
 
@@ -119,9 +137,212 @@ def test_approve_final_interrupts_only_final_writes():
 
 
 def test_approve_final_wires_human_in_the_loop():
+    """Pins invariant 4.
+
+    An interrupt rule with no middleware to act on it is not an error, it is a
+    write that goes through unapproved. `_build_checkpointer` is the other half
+    -- interrupts are a no-op without one -- and is pinned by the two
+    checkpointer tests below.
+    """
     plain = set(build_agent(Settings(approve_final=False)).get_graph().nodes)
     gated = set(build_agent(Settings(approve_final=True)).get_graph().nodes)
     assert any("HumanInTheLoop" in node for node in gated - plain)
+
+
+# ---- the rubric grader (invariant 8) ----------------------------------------
+#
+# `--rubric` is a documented flag, and until these existed nothing in the suite
+# touched `RubricMiddleware` at all. Each of the four covers a different way
+# the feature goes quiet: never installed, installed where it does not belong,
+# woken on every turn, or never woken at all.
+
+
+def test_the_rubric_grader_is_installed_on_the_drafting_graph():
+    """Pins invariant 8.
+
+    Drop the middleware from `build_agent` and `--rubric` still reads its file,
+    still prints "Grading against rubric:", still puts the text on invocation
+    state -- and grades nothing. No other test notices, because no other test
+    passes a rubric.
+    """
+    nodes = build_agent(Settings()).get_graph().nodes
+    assert any("RubricMiddleware" in node for node in nodes), sorted(nodes)
+
+
+def test_the_discovery_graph_has_no_rubric_grader():
+    """Pins invariant 8.
+
+    A rubric grades a draft against a funder's review criteria, a question that
+    only exists once there is a draft. Installed here it would add a second
+    billed model call to the end of every scan, to grade a transcript against
+    criteria no caller ever supplies.
+    """
+    nodes = build_discovery_agent(Settings()).get_graph().nodes
+    assert not any("RubricMiddleware" in node for node in nodes), sorted(nodes)
+
+
+def test_the_rubric_grader_stays_dormant_without_a_rubric():
+    """Pins invariant 8. The half that makes unconditional inclusion safe.
+
+    `after_agent` fires at every natural stop of every run, rubric or not. It
+    has to return without grading when no `rubric` is on state, or including
+    the middleware unconditionally would put a billed grader call at the end of
+    every turn the agent ever takes -- and the only symptom would be the bill.
+
+    Asserting the grader client is *still unbuilt*, rather than only that the
+    hook returned `None`: the model is constructed lazily on first grade, so an
+    unbuilt grader is positive evidence that nothing reached the network, which
+    a `None` return on its own does not give.
+    """
+    middleware = RubricMiddleware(model=build_model(GRADER_MODEL))
+    # Cast because both hooks are typed against a `RubricState` and a live
+    # `Runtime`, and a bare dict with no runtime is precisely the input that
+    # proves the point: neither is consulted before the `rubric` check. Building
+    # real ones would test less, not more -- it would only show that the hooks
+    # decline to grade when handed something they were happy to accept.
+    state = cast(Any, {"messages": []})
+    runtime = cast(Any, None)
+
+    assert middleware.before_agent(state, runtime) is None
+    assert middleware.after_agent(state, runtime) is None
+    assert middleware._grader is None, "a dormant run must not build a grader"
+
+
+def test_the_rubric_grader_wakes_when_a_rubric_is_present():
+    """Pins invariant 8. Dormancy is only a feature if it ends.
+
+    Without this, the dormancy test above is equally satisfied by a middleware
+    that never runs at all -- which is what a renamed state key, upstream or
+    here, would produce. `--rubric` would be inert exactly as if it had never
+    been wired, and the dormancy test would go on passing either way.
+
+    The grader is stubbed rather than called: what is under test is the gate,
+    not the grading, and a real grade is a billed model call.
+    """
+    middleware = RubricMiddleware(model=build_model(GRADER_MODEL))
+    middleware._grade = cast(
+        Any,
+        lambda _state, _iteration: GraderResponse(
+            result="satisfied", explanation="stub", criteria=[]
+        ),
+    )
+
+    update = middleware.after_agent(
+        cast(Any, {"messages": [], "rubric": "Be concise."}), cast(Any, None)
+    )
+
+    assert update is not None, "a rubric on state must wake the grader"
+    assert update["_rubric_status"] == "satisfied"
+
+
+def test_the_rubric_iteration_cap_comes_from_settings():
+    """Pins invariant 8.
+
+    `Settings.max_rubric_iterations` and `RubricMiddleware.max_iterations` both
+    default to 3, so a test written against the default passes whether or not
+    `build_agent` threads the setting through at all. This uses a value neither
+    side defaults to, which is the only way the wiring is distinguishable from
+    the coincidence.
+    """
+    captured: dict = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch = pytest.MonkeyPatch()
+    with monkeypatch.context() as patch:
+        patch.setattr("grant_writer.agent.create_deep_agent", _capture)
+        build_agent(Settings(max_rubric_iterations=2))
+
+    graders = [m for m in captured["middleware"] if isinstance(m, RubricMiddleware)]
+    assert len(graders) == 1, captured["middleware"]
+    assert graders[0].max_iterations == 2
+
+
+# ---- the two promotions: guarantees moved out of prose and into code --------
+#
+# Both of these used to be facts a reader had to keep true by hand, pinned by a
+# test that would catch the breakage after the fact. Now the shape of the code
+# refuses the mistake, and these three tests exist to stop the shape being
+# quietly undone -- a default added to `skills`, a hand-built rule list.
+
+
+@pytest.mark.parametrize(
+    ("rules", "label"),
+    [
+        (build_permissions(Settings(approve_final=False)), "drafting"),
+        (build_permissions(Settings(approve_final=True)), "drafting --approve"),
+        (discovery_permissions(), "discovery"),
+        (scouting_permissions(), "scout"),
+        (compliance_permissions(), "compliance"),
+    ],
+)
+def test_every_permission_set_ends_in_the_catch_all_deny(rules, label):
+    """Pins invariant 1.
+
+    First-match-wins with allow-on-no-match, so a deny that is not last matches
+    before the allows above it and the agent can write nothing -- and a list
+    with no deny at all lets every unmatched path through. Neither raises.
+
+    Asserted over *every* producer in `backends.py` rather than the drafting
+    one alone, because the risk this covers is a sixth function added later
+    that assembles its list by hand instead of through `_write_rules`. It would
+    look like the five here and be graded by nothing.
+    """
+    assert rules[-1].mode == "deny", label
+    assert rules[-1].paths == ["/**"], label
+    assert [rule.mode for rule in rules[:-1]].count("deny") == 0, label
+
+
+def test_an_interrupt_rule_precedes_the_allow_it_carves_out_of():
+    """Pins invariant 1.
+
+    The ordering that is easiest to get backwards, because both rules are
+    "correct" in isolation. `/applications/*/final/**` is a subset of
+    `/applications/**`: put the allow first and it matches, the interrupt is
+    never reached, and `--approve` silently stops gating anything. The run
+    completes, the file is written, and no approval prompt was skipped as far
+    as any log is concerned -- there was simply never one to skip.
+    """
+    modes = [rule.mode for rule in build_permissions(Settings(approve_final=True))]
+
+    assert modes == ["interrupt", "allow", "deny"]
+
+
+def test_a_subagent_cannot_be_built_without_deciding_about_skills():
+    """Pins invariants 3 and 17.
+
+    These two are one decision wearing two faces. Custom subagents do not
+    inherit `skills`, so omitting the key on `section-drafter` is a bug whose
+    only symptom is a blander proposal -- while omitting it on
+    `opportunity-scout` is correct, because no drafting guide has anything to
+    say about whether to apply at all. As dict literals the two were the same
+    absence, which is why invariant 17 had to exist as prose asking the next
+    reader not to "fix" the right one.
+
+    A required keyword-only parameter collapses them: the drafter's omission
+    becomes a `TypeError` raised at import, before a model is ever built, and
+    the scout's refusal becomes `skills=None` written on purpose. Give this
+    parameter a default and both invariants quietly return to being prose.
+    """
+    parameter = inspect.signature(_subagent).parameters["skills"]
+
+    assert parameter.default is inspect.Parameter.empty, (
+        "`skills` has acquired a default -- invariants 3 and 17 are back to "
+        "being conventions that a dict literal can silently break"
+    )
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+    # And the omission really does fail loudly, rather than merely being
+    # annotated as required.
+    with pytest.raises(TypeError, match="skills"):
+        _subagent(  # ty: ignore[missing-argument]
+            name="x",
+            description="x",
+            system_prompt="x",
+            model_spec=DEFAULT_MODELS["drafting"],
+        )
 
 
 def test_reviewer_cannot_edit_what_it_reviews():
@@ -240,6 +461,11 @@ def test_output_paths_outside_content_dirs_are_refused(out_path):
     message invites a retry into a directory it will refuse again -- and a
     message built from the union would offer `/applications/` to a tool that,
     since the write-bypass fix, may not touch it.
+
+    Pins invariant 2.
+
+    The real-disk writer half of it. `_resolve_content_id` covers the id half,
+    over in test_review_fixes.
     """
     with pytest.raises(
         ValueError,
@@ -272,7 +498,10 @@ def test_page_spec_parsing(spec, total, expected):
 
 
 def test_skills_have_valid_frontmatter():
-    """Skills without frontmatter are ignored, silently."""
+    """Skills without frontmatter are ignored, silently.
+
+    Pins invariant 7.
+    """
     skills = sorted(Path(PROJECT_ROOT, "skills").glob("*/SKILL.md"))
     assert len(skills) >= 5
     for skill in skills:
@@ -296,6 +525,8 @@ def test_default_model_resolves_to_a_usable_output_ceiling(role, spec):
     Parametrized over `DEFAULT_MODELS` rather than the module-level constants,
     which `GRANT_WRITER_*_MODEL` can redirect -- otherwise a developer with an
     override set would never test what the project ships.
+
+    Pins invariant 9.
     """
     max_tokens = getattr(build_model(spec), "max_tokens", None)
     assert max_tokens is not None, f"{role}: {spec!r} exposes no max_tokens"
@@ -361,6 +592,8 @@ def test_the_scout_is_deliberately_given_no_skills():
     under /skills/ are about drafting a section, and none has anything to say
     about whether to apply at all. Pinned so the next reader, seeing what looks
     like invariant 3 being violated, finds this instead of "fixing" it.
+
+    Pins invariant 17.
     """
     for sub in build_discovery_subagents():
         assert sub.get("skills") is None, sub["name"]
@@ -460,6 +693,8 @@ def test_a_scan_thread_id_cannot_collide_with_an_application_id():
     same checkpoint row -- each resuming the other's conversation, with nothing
     raised. The separator is the guarantee: `_SAFE_ID` forbids it, so no
     application id can ever spell one of these.
+
+    Pins invariant 12.
     """
     from grant_writer.config import _SAFE_ID
 

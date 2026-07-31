@@ -9,8 +9,10 @@ uv sync                                       # install (Python >=3.13, uv_build
 uv run pytest tests/ -q                       # full suite: offline, no API calls
 uv run pytest tests/test_wiring.py::test_subagent_roster -q   # single test
 uv run pytest tests/ -q -k permission         # by keyword
-uvx ruff check src/ tests/ streamlit_app.py   # lint (select list in [tool.ruff.lint])
-uvx ruff format --check src/ tests/ streamlit_app.py   # ruff's default 88-col
+uvx ruff check src/ tests/ evals/ streamlit_app.py   # lint (select list in [tool.ruff.lint])
+uvx ruff format --check src/ tests/ evals/ streamlit_app.py   # ruff's default 88-col
+
+uv run python -m evals.run_scout              # prompt eval: LIVE model, costs money
 
 uv run grant-writer discover --scan-id X --focus "rural health"   # before drafting
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
@@ -355,6 +357,29 @@ Tests assert on wiring by reaching into deepagents internals — `_check_fs_perm
 `supports_execution`, `graph.nodes["tools"].bound.tools_by_name`, `get_graph().nodes`. That is
 intentional (it is the only way to catch these failures offline) but brittle: a `deepagents` upgrade
 may need these updated.
+
+**`evals/` is not part of the suite and must never become part of it.** The tests
+cover wiring; they cannot cover the prompts, and the prompts are the product — a
+prompt edit that weakens the anti-fabrication rules passes every test, every hook, and
+CI. `evals/` holds fixture cases and scorers for that, run by hand against a live model
+(`uv run python -m evals.run_scout`). It stays uncollectable because the suite is offline
+by contract and a test needing a real credential is a bug in the suite. `pythonpath = ["."]`
+in `pyproject.toml` is what lets `tests/test_evals.py` import it — those are offline tests
+*of the scorers*, and they exist because an eval whose scoring is wrong reports a prompt
+regression as green, with a number attached. They earned it on the first run, catching a
+`%\b` in `states_no_total` that could never match. See `evals/README.md`.
+
+**Every invariant above must be claimed by a test, and the claim is checked.** A pinning test says
+so on its own line in its own docstring — `Pins invariant 8.`, or `Pins invariants 3 and 17.` —
+and `test_invariants.py` parses the numbered list out of this file and matches it against those
+markers in both directions: an entry nothing claims fails, and a marker naming an entry that no
+longer exists fails too. The declaration lives on the test rather than in a registry so that
+deleting the test deletes the claim with it. The marker shape is strict (capital `P`, at the start
+of a line, a full stop straight after the numbers) precisely so prose that merely *mentions*
+"invariant 11" is not mistaken for a claim; put any commentary on the line after it. Adding an
+invariant here without a test now fails the suite rather than reading, indistinguishably, like the
+seventeen beside it that are real. The marker is a claim and not a proof — a test can pin the wrong
+thing — so read it as a pointer to where the argument lives.
 
 `test_wiring.py` covers structural invariants; `test_review_fixes.py` pins specific past code-review
 findings and should gain a case whenever a review turns one up; `test_opportunities.py` is pure —

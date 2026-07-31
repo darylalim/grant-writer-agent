@@ -26,6 +26,12 @@ from grant_writer.opportunities import (
     untraceable_citations,
 )
 
+# The one import here that is not the module under test. It stays inside this
+# file's "no disk, no network, no model" rule -- importing `prompts` only
+# builds strings -- and it belongs beside the parser rather than in
+# test_wiring, because what invariant 13 protects is the tie between the two.
+from grant_writer.prompts import SCOUT_PROMPT
+
 # The format SCOUT_PROMPT asks for, filled in. Every other case in this file is
 # a mutation of this one, so a change to the grammar shows up here first.
 WELL_FORMED = """\
@@ -132,6 +138,8 @@ def test_an_ineligible_candidate_is_flagged_without_losing_its_score():
     Zeroing the total on a gating NONE would hide the evidence a human needs to
     challenge a wrong eligibility call -- which is exactly the call most worth
     challenging, since it is the one that removes an opportunity entirely.
+
+    Pins invariant 15.
     """
     text = WELL_FORMED.replace(
         "## eligibility\n- Verdict: STRONG", "## eligibility\n- Verdict: NONE"
@@ -347,6 +355,8 @@ def test_the_prompt_s_rubric_names_every_criterion_the_parser_scores():
     These are two different files. If the prompt named a criterion the parser
     does not look for, the scout would answer it and score zero for it, and the
     only symptom would be a total that came out low.
+
+    Pins invariant 13.
     """
     brief = rubric_brief()
     for criterion in RUBRIC:
@@ -357,12 +367,42 @@ def test_the_prompt_s_rubric_names_every_criterion_the_parser_scores():
         assert str(criterion.weight) not in brief
 
 
+def test_the_whole_scout_prompt_states_no_weight_and_no_total():
+    """Pins invariant 13.
+
+    Its sibling above checks `rubric_brief()`, which is only the fragment of
+    the prompt rendered from `RUBRIC`. The invariant is about the whole prompt:
+    a hand-written "## Scoring" section, or a `Total:` line added to the format
+    block, puts an addable number in from outside the rendered fragment and the
+    sibling test cannot see it.
+
+    Weights are matched as standalone numbers, derived from `RUBRIC` rather
+    than hardcoded, so changing a weight re-aims the check instead of leaving
+    it guarding the old value. Whole-word, because a bare substring test
+    reports "20" inside "2026" and teaches the next reader to loosen the test
+    rather than trust it.
+
+    As it stands the prompt contains no digits at all, which is the property
+    doing the real work: the scout picks words, and there is nowhere in the
+    grammar to put a total even if it wanted one.
+    """
+    for criterion in RUBRIC:
+        assert not re.search(rf"\b{criterion.weight}\b", SCOUT_PROMPT), (
+            f"weight {criterion.weight} ({criterion.key}) has reached the "
+            f"prompt -- the scout can now do arithmetic nobody checks"
+        )
+    for label in ("Total:", "Score:", "Points:"):
+        assert label not in SCOUT_PROMPT, label
+
+
 def test_the_score_label_keeps_unscored_and_zero_distinct():
     """Both frontends print this string; neither decides it.
 
     Two copies of the `None` check is how "unscored" starts rendering as "0%"
     in one frontend and not the other, under captions claiming they mean the
     same thing.
+
+    Pins invariant 14.
     """
     assert parse_scored_markdown(WELL_FORMED, key="x").score_label == "76%"
     assert parse_scored_markdown("", key="x").score_label == "unscored"
@@ -464,6 +504,8 @@ def test_each_source_is_checked_against_its_own_document():
 
     Checking against the concatenation of both would let a claim about the
     organization be supported by the funder's own marketing.
+
+    Pins invariant 16.
     """
     opportunity = _one_citation("org profile", "we serve 240 students")
     assert untraceable_citations(
