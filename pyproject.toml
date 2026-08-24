@@ -1,6 +1,6 @@
 [project]
 name = "grant-writer"
-version = "0.1.0"
+version = "0.1.1"
 description = "A grant writing agent on Deep Agents: find funding opportunities, fit-score them, and draft the proposal"
 readme = "README.md"
 license = "MIT"
