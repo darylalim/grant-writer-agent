@@ -348,6 +348,13 @@ plus `ruff format --check` and `ty` held at its two-diagnostic baseline. ruff
 and ty are version-pinned there so a new release cannot turn CI red on unchanged
 code — bump them deliberately.
 
+Releases are cut from `version` in `pyproject.toml`. When a push to `main` is
+green and no `v<version>` tag exists yet, CI tags that commit and publishes a
+GitHub Release with generated notes and the built wheel and sdist attached — so
+bumping the version *is* the release, and nothing else needs doing. The tag is
+the trigger, which makes the job idempotent: re-running it, or pushing again
+without a bump, does nothing.
+
 ### Known quirks
 
 - An `execute` tool is advertised to the model but is inert on

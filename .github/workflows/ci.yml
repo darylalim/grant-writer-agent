@@ -6,19 +6,24 @@ on:
   pull_request:
   workflow_dispatch:
 
-# A newer push to the same ref makes the in-flight run irrelevant.
+# A newer push to the same ref makes the in-flight run irrelevant -- except on
+# main, where a run can cut a release. Cancelling one mid-`gh release create`
+# leaves a tag with no release behind it, which the idempotency check below then
+# reads as "already released" forever. PR churn is what this setting is for.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Nothing here needs to write to the repository.
+# The default for every job. `release` overrides it -- job-level permissions
+# replace this block rather than merging with it, so that job holds
+# contents:write and nothing else.
 permissions:
   contents: read
 
-# Belt and braces with tests/conftest.py, which already forces this off. No
-# secrets are configured for this workflow on purpose: conftest supplies a dummy
-# ANTHROPIC_API_KEY and pops TAVILY_API_KEY, so a test that needs a real
-# credential is a bug in the suite, and CI is exactly where that should surface.
+# tests/conftest.py already forces this off; this covers the non-pytest steps
+# too. No secrets are configured on purpose -- conftest supplies a dummy
+# ANTHROPIC_API_KEY and blanks TAVILY_API_KEY, so a test that needs a real
+# credential is a bug in the suite, and CI is where that should surface.
 env:
   LANGSMITH_TRACING: "false"
 
@@ -27,15 +32,13 @@ jobs:
     name: Tests (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
-      # Both legs always report. Whether a failure is 3.14-only or universal is
-      # most of the diagnosis, and cancelling the sibling job hides exactly that.
+      # Whether a failure is 3.14-only or universal is most of the diagnosis,
+      # and cancelling the sibling job hides exactly that.
       fail-fast: false
       matrix:
-        # requires-python is ">=3.13", so 3.14 is claimed and has to be tested or
-        # the claim is only an assertion. Verified before being added here: the
-        # lock resolves on 3.14.6 with a wheel for every dependency, the whole
-        # suite passes, and the console script runs. .python-version (3.13)
-        # remains what local development and a bare `uv run` use.
+        # requires-python is ">=3.13", so 3.14 is claimed and has to be tested
+        # or the claim is only an assertion. .python-version (3.13) remains what
+        # local development and a bare `uv run` use.
         python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,28 +48,23 @@ jobs:
         with:
           enable-cache: true
           # Sets UV_PYTHON, so the sync below builds on this interpreter rather
-          # than the one .python-version names. No setup-python step either way:
-          # uv fetches the interpreter itself.
+          # than the one .python-version names. uv fetches it itself, so there
+          # is no setup-python step.
           python-version: ${{ matrix.python-version }}
 
-      # --locked fails if uv.lock is stale rather than quietly re-resolving, which
-      # makes "someone edited pyproject.toml without re-locking" a CI failure. One
-      # lockfile serves both legs -- uv resolves universally across the whole
-      # requires-python range rather than per interpreter.
-      # streamlit is in the dev group, which uv installs by default, so the
-      # AppTest cases in test_frontends.py run here rather than importorskip-ing
-      # out. They are the only thing that exercises streamlit_app.py at all -- a
-      # Streamlit app fails at run time, not import time. Do not add --no-dev.
+      # --locked fails on a stale uv.lock rather than quietly re-resolving. One
+      # lockfile serves both legs; uv resolves universally across requires-python.
+      # Never add --no-dev: streamlit is a dev dependency and the AppTest cases
+      # in test_frontends.py are the only coverage streamlit_app.py has.
       - name: Install
         run: uv sync --locked
 
       - name: Test
         run: uv run pytest tests/ -q
 
-      # Exercises the shipped console script end to end: [project.scripts], the
-      # uv_build packaging, and _resolve_root(). Importing cli pulls in the whole
-      # dependency graph, so a broken entry point fails here even though the unit
-      # tests import modules directly and would not notice.
+      # Exercises [project.scripts], the uv_build packaging, and _resolve_root().
+      # The unit tests import modules directly and would not notice a broken
+      # entry point.
       - name: Smoke-test the entry point
         run: uv run grant-writer --help
 
@@ -82,45 +80,27 @@ jobs:
           enable-cache: true
 
       # One interpreter on purpose, .python-version's 3.13: lint and types are a
-      # property of the source, not the runtime, and the ty baseline below was
-      # measured there. ruff needs no project install, but ty does -- without the
-      # dependencies it cannot resolve deepagents/langgraph and every import
-      # becomes a diagnostic. The dev group matters here for the same reason:
-      # tests/test_frontends.py imports streamlit, and ty flags an unresolved
-      # import even inside a function body, which would push the count to 3 and
-      # fail the baseline below on every push.
+      # property of the source, not the runtime, and the ty baseline was measured
+      # there. ruff needs no project install but ty does -- including the dev
+      # group, since tests/ imports streamlit and ty resolves imports statically.
       - name: Install
         run: uv sync --locked
 
-      # Pinned on purpose. [tool.ruff.lint] selects whole families (E, W, F, I,
-      # UP, B, SIM, BLE, RUF), so a ruff release that adds a rule to any of them
-      # turns CI red on code that did not change. Bump this deliberately, with
-      # the fixes in the same commit.
+      # Pinned on purpose. [tool.ruff.lint] selects whole families, so a release
+      # that adds a rule to any of them turns CI red on code that did not change.
+      # Bump deliberately, with the fixes in the same commit.
       - name: Lint
         run: uvx ruff@0.16.4 check src/ tests/ evals/ streamlit_app.py
 
       - name: Format
         run: uvx ruff@0.16.4 format --check src/ tests/ evals/ streamlit_app.py
 
-      # ty reports exactly two diagnostics today, both upstream and neither
-      # worth suppressing: langchain types `TodoListMiddleware` with two type
-      # parameters where deepagents' `AgentMiddleware` alias takes three, and
-      # langgraph's `BaseStore.put` asks for `dict` where deepagents hands it a
-      # `TypedDict`. The count has been two across the 0.7 upgrade, but not the
-      # same two -- check what they are before assuming a steady number means a
-      # steady cause. Failing on any diagnostic would keep CI permanently red
-      # and teach everyone to ignore this job; ignoring ty entirely would let a
-      # real diagnostic of ours land unnoticed. So it ratchets: the baseline
-      # passes, a third diagnostic fails.
-      #
-      # The same baseline is enforced at edit time by the ty hook in
-      # .claude/settings.json -- keep the two in step. That hook counts
-      # `^(error|warning)\[` header lines while this reads ty's own summary line;
-      # either is fine, but a bump to the pin below should be re-checked against
-      # both, and both drop to 0 if upstream ever fixes theirs. The hook checks
-      # `src/ tests/` and this also checks streamlit_app.py; the count is the
-      # same either way, but both require the dev group to be installed,
-      # because tests/ imports streamlit and ty resolves imports statically.
+      # A ratchet, not a gate. ty reports two diagnostics today, both upstream
+      # and neither worth suppressing (CLAUDE.md says which). Failing on any
+      # would keep CI permanently red and teach everyone to ignore this job;
+      # skipping ty would let a real diagnostic of ours land unnoticed. The same
+      # baseline is enforced at edit time by the ty hook in .claude/settings.json
+      # -- keep the two in step, and re-check both when bumping the pin below.
       - name: Type check
         env:
           TY_BASELINE: 2
@@ -130,21 +110,12 @@ jobs:
 
           count=$(sed -n 's/^Found \([0-9][0-9]*\) diagnostic.*/\1/p' ty.log | tail -1)
           if [ -z "$count" ]; then
-            if grep -q 'All checks passed' ty.log; then
-              count=0
-            else
+            grep -q 'All checks passed' ty.log || {
               echo "::error::could not read a diagnostic count from ty -- did its output format change?"
               exit 1
-            fi
+            }
+            count=0
           fi
-
-          {
-            echo "### ty: ${count} diagnostic(s), baseline ${TY_BASELINE}"
-            echo
-            echo '```'
-            cat ty.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$count" -gt "$TY_BASELINE" ]; then
             echo "::error::ty reports ${count} diagnostics, above the baseline of ${TY_BASELINE}. The new one is ours -- fix it rather than raising the baseline."
@@ -153,3 +124,68 @@ jobs:
           if [ "$count" -lt "$TY_BASELINE" ]; then
             echo "::notice::ty reports only ${count}; lower TY_BASELINE to ${count} to keep the ratchet tight."
           fi
+
+  release:
+    name: Release
+    # `needs` is the whole point: a tag must never be cut from a red commit.
+    # pull_request events carry refs/pull/N/merge and workflow_dispatch carries
+    # whichever branch it was run on, so this one condition excludes both.
+    if: github.ref == 'refs/heads/main'
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      # The existence of the tag is the release trigger, not a diff of
+      # pyproject.toml against HEAD^. Diffing breaks on squash merges, on
+      # re-runs, and on any force-push; this is idempotent and does not care how
+      # the commit landed. It also self-heals: if a bump lands and the next push
+      # arrives before this job runs, the later run still sees the bumped version
+      # with no tag and releases it, just from a newer commit.
+      #
+      # ls-remote rather than a local `git tag -l`, so the answer does not depend
+      # on the checkout having fetched tags. No fetch-depth: 0 needed.
+      - name: Decide whether to release
+        id: check
+        run: |
+          version=$(uv version --short)
+          tag="v${version}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$(git ls-remote --tags origin "refs/tags/${tag}")" ]; then
+            echo "::notice::${tag} is already tagged -- no version bump to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::${tag} is not tagged yet -- releasing."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # No `uv sync`: the build backend needs the source and pyproject.toml, not
+      # an installed environment. This is also the only place the shipped
+      # artifact itself is built rather than an editable install.
+      - name: Build
+        if: steps.check.outputs.release == 'true'
+        run: uv build
+
+      # `gh release create` creates the tag itself, so this is one operation
+      # rather than tag-push-then-release with a window in between. The glob
+      # skips the .gitignore uv writes into dist/ -- named explicitly anyway,
+      # since a bare dist/* would attach whatever else ends up there.
+      - name: Tag and release
+        if: steps.check.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes \
+            dist/*.whl dist/*.tar.gz
