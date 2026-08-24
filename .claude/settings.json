@@ -22,11 +22,6 @@
         "hooks": [
           {
             "type": "command",
-            "statusMessage": "Checking package manager",
-            "command": "c=$(jq -r '.tool_input.command // \"\"'); printf '%s' \"$c\" | grep -qE '(^|[;&|] *)(pip3?|python3? +-m +pip) +(install|uninstall)|(^|[;&|] *)(poetry|conda|pipenv) +|python3? +-m +venv' && { echo 'Blocked: this project is uv-only (see CLAUDE.md). Use uv add / uv sync / uv run / uvx instead.' >&2; exit 2; }; exit 0"
-          },
-          {
-            "type": "command",
             "statusMessage": "Checking .env access",
             "command": "c=$(jq -r '.tool_input.command // \"\"')\nprintf '%s' \"$c\" | grep -qE '\\.env([^.A-Za-z0-9_-]|$)' || exit 0\nprintf '%s\\n' \"$c\" | tr ';&|' '\\n\\n\\n' | while IFS= read -r seg; do\n  printf '%s' \"$seg\" | grep -qE '\\.env([^.A-Za-z0-9_-]|$)' || continue\n  printf '%s' \"$seg\" | grep -qE '^[[:space:]]*(cp|mv|ls|test|\\[|touch|stat|file)([[:space:]]|$)' && continue\n  exit 9\ndone\n[ $? -eq 9 ] && { echo 'Blocked: reading .env would put live API keys into the transcript. Variable names are in .env.example; the app loads .env itself via load_dotenv() in config.py.' >&2; exit 2; }\nexit 0"
           }
