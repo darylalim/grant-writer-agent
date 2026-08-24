@@ -10,7 +10,15 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "deepagents>=0.6.12",
+    # >=0.7 is required, not merely preferred: `build_backend` returns a
+    # backend *instance* (0.7 removed factories and raises TypeError on the old
+    # shape) and `agent.py` passes `TodoListMiddleware` explicitly, which 0.6
+    # installed itself and would double-register. Upper-bounded because 0.6->0.7
+    # is what taught this project that a deepagents minor is a breaking lane: it
+    # removed the todo middleware, added a live `delete` tool to every graph,
+    # and dropped ~5.6k characters of system prompt -- only the first of which
+    # any test could see. Bump deliberately, with the audit in the same commit.
+    "deepagents>=0.7.8,<0.8",
     "httpx>=0.27",
     "langchain>=1.0,<2.0",
     # >=1.5.2 is the first release carrying the claude-opus-5 profile (context
@@ -31,7 +39,7 @@ dependencies = [
 grant-writer = "grant_writer.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.11.21,<0.12.0"]
+requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]

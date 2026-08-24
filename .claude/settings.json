@@ -52,7 +52,7 @@
             "type": "command",
             "timeout": 30,
             "statusMessage": "Type-checking with ty",
-            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) ;; *) exit 0;; esac; n=$(cd \"$CLAUDE_PROJECT_DIR\" && uvx ty check src/ tests/ evals/ streamlit_app.py 2>&1 | grep -cE '^(error|warning)\\['); [ \"$n\" -gt 2 ] && { echo \"ty: $n diagnostics vs baseline 2 (both upstream in deepagents/langgraph, deliberately unsuppressed). You introduced $((n - 2)).\" >&2; exit 2; }; exit 0"
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) ;; *) exit 0;; esac; n=$(cd \"$CLAUDE_PROJECT_DIR\" && uvx ty check src/ tests/ evals/ streamlit_app.py 2>&1 | grep -cE '^(error|warning)\\['); [ \"$n\" -gt 2 ] && { echo \"ty: $n diagnostics vs baseline 2 (both upstream in langchain/langgraph, deliberately unsuppressed). You introduced $((n - 2)).\" >&2; exit 2; }; exit 0"
           }
         ]
       }

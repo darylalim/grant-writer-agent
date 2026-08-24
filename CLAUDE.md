@@ -31,10 +31,15 @@ extra would have been installable by someone who then had no app to run.
 When working with Python, invoke the relevant `/astral:<skill>` — `/astral:uv`, `/astral:ruff`,
 `/astral:ty` — to ensure best practices are followed rather than guessed at. uv is the only
 supported package manager: never `pip`, never a hand-rolled venv. There is deliberately no
-`[tool.ty]` config; `uvx ty check src/ tests/` reports two diagnostics, both upstream signature
-problems in `deepagents`/`langgraph`, and neither is worth suppressing — leave them. That
-tolerance is encoded as a threshold in two places, the ty hook in `.claude/settings.json` and
-the type-check step in `.github/workflows/ci.yml`; lower both when upstream fixes theirs.
+`[tool.ty]` config; `uvx ty check src/ tests/` reports two diagnostics, both upstream and neither
+worth suppressing — leave them. That tolerance is encoded as a threshold in two places, the ty
+hook in `.claude/settings.json` and the type-check step in `.github/workflows/ci.yml`; lower both
+when upstream fixes theirs. **The count has held at two across the deepagents 0.7 upgrade while
+both causes changed underneath it**, so read what they currently are rather than trusting the
+number: `langchain` types `TodoListMiddleware` with two type parameters where `deepagents`'
+`AgentMiddleware` alias takes three, and `langgraph`'s `BaseStore.put` asks for a `dict` where
+`deepagents` hands it a `TypedDict`. A steady baseline is not evidence of a steady cause, and a
+new diagnostic of ours arriving as an old upstream one departs would net to zero.
 
 Common flags (`--profile`, `--approve`, `--no-search`, `--recursion-limit`) live on a shared
 parent parser and must be passed **after** the subcommand. `--app-id` is also the LangGraph
@@ -114,6 +119,21 @@ was duplicated logic waiting to happen:
 - **`prompts.py`** is product surface, not boilerplate — the anti-fabrication and delegation rules
   live in the prompt text. `WORKSPACE_CONVENTIONS` is shared across orchestrator, drafter, and
   reviewer; the directory layout it describes must match `backends.py` and `config.py`.
+
+  **Since deepagents 0.7 it is very nearly the *whole* prompt**, and that was a change to this
+  project made by an upgrade rather than by anyone here. 0.7 stopped shipping an authored base
+  prompt, dropped `SubAgentMiddleware`'s task-usage guidance, and stopped generating filesystem
+  tool-usage prose — about 5.6k characters that used to sit under `ORCHESTRATOR_PROMPT` and
+  `DISCOVERY_PROMPT`, plus a `task` tool description that shrank from roughly 90 lines to 8. The
+  models here match no harness profile (`DEFAULT_MODELS` names opus-5/sonnet-5; the registry knows
+  4.x ids), so nothing refills it. Upstream's reasoning is that the prose duplicated the tools' own
+  schema descriptions, and that is largely true — but the argument *for delegating rather than
+  doing the work inline* was the single largest thing removed, and this project depends on it: the
+  orchestrator is supposed to `task` out to `section-drafter` rather than draft in its own context.
+  No test can see any of this, and `evals/run_scout` cannot either — it calls the model directly and
+  never builds a graph. If tool discipline regresses, write the guidance into the prompts here,
+  where it is product surface; do not reach for `deepagents.graph.BASE_AGENT_PROMPT`, which is
+  deprecated and gone in 0.9.
 
 Roles are split where context isolation pays: research floods context with search results, drafting
 needs skills loaded, and compliance must judge drafts without the drafter's rationalizations in
@@ -336,6 +356,24 @@ runs, and still produces plausible output.
     whether to apply at all. `test_the_scout_is_deliberately_given_no_skills` inverts invariant 3's
     test so the next reader finds the reason rather than "fixing" it.
 
+18. **The write rules govern `delete`, which no line of this project asked for.** deepagents 0.7
+    added a `delete` tool to every graph and every subagent. It is model-visible (unlike
+    `execute`), it is the only tool here that destroys work, and the boundary held with no edit
+    because upstream classes it as a `write` — so `build_permissions` covers it by inheritance,
+    never by name. That is the whole risk: a rule written later with only `write_file` in mind
+    moves the deletion boundary as a side effect nobody looked at. Three facts are pinned rather
+    than assumed. **A file inside the allow-list may be deleted**, exactly as it may be
+    overwritten — deletion is not held to a stricter standard than replacement, since both lose
+    the old bytes. **A directory may not be deleted anywhere**, under any rule set, because a
+    recursive delete is refused whenever a deny pattern could match any descendant and the
+    catch-all `/**` always could — nothing states that intent, so if it were lost
+    `rm -rf /applications/x` would simply start working. And **`--approve` gates `delete` more
+    broadly than `write_file`**: upstream scopes writes `exact` and deletes `bulk`, so one
+    `/applications/*/final/**` interrupt rule parks a write only on `final/` but parks a delete
+    anywhere under `/applications/`, an ancestor delete being able to take `final/` with it.
+    Broader, so it fails safe — but it is what makes the UI's approval caption a claim it has to
+    earn, since a pending delete of `sections/` is not a "write to `final/`".
+
 ## Backend profiles
 
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files
@@ -414,6 +452,13 @@ at all — a typed value that is not already an option raises `ValueError`. That
 application id is a `st.text_input` with a picker beside it rather than one combined
 widget: the combined version is neater and would have made the path-escape cases, the most
 security-sensitive input in the app, impossible to test.
+
+Since Streamlit 1.62 a full-script rerun inside one `AppTest.run()` no longer leaves the
+superseded pass behind — the forward-message queue is cleared, so `app.button`, `app.caption` and
+the rest hold only the final pass's elements. Nothing here depended on the old accumulating
+behaviour, and it removes a way for a first-match lookup like `_button` to address a widget from a
+pass the browser would already have discarded. Worth knowing because it changes what "the elements
+on the page" means for any case that triggers a rerun mid-run.
 
 The `AppTest` cases run against the project's own `applications/`, because that is the only
 tree `application_dir` resolves an id into — and it is gitignored, so its contents differ per

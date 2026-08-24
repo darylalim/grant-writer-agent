@@ -33,8 +33,6 @@ from langgraph.store.base import BaseStore
 
 from grant_writer.config import CONTENT_DIRS, Settings
 
-BackendFactory = BackendProtocol | Callable[[Any], BackendProtocol]
-
 # Each routed prefix gets its OWN Store namespace. This matters: CompositeBackend
 # strips the route prefix before delegating (``/memories/org/x`` -> ``/org/x``),
 # so a single shared namespace would let ``ls /skills/`` also surface memory
@@ -50,8 +48,14 @@ def _namespace_factory(namespace: tuple[str, ...]) -> Callable[[Any], tuple[str,
     return lambda _ctx: namespace
 
 
-def build_backend(settings: Settings) -> BackendFactory:
-    """Return the backend for the configured profile."""
+def build_backend(settings: Settings) -> BackendProtocol:
+    """Return the backend for the configured profile.
+
+    An *instance*, never a factory. deepagents 0.7 removed backend factories:
+    ``FilesystemMiddleware`` raises ``TypeError`` on a callable that is not a
+    ``BackendProtocol``, so the deferred-construction closure this used to
+    return is now a build-time error rather than a supported shape.
+    """
     if settings.backend_profile == "local":
         settings.ensure_dirs()
         # virtual_mode confines the agent to `root`, rejecting `..` and `~`
@@ -62,18 +66,17 @@ def build_backend(settings: Settings) -> BackendFactory:
     # each routed to their own namespace in the Store, which `seed_store_from_disk`
     # fills at startup. Route prefixes must match exactly -- a bare "/memory/..."
     # path would silently fall through to StateBackend and vanish.
-    def factory(_runtime: Any) -> CompositeBackend:
-        # Newer deepagents resolves the store/context at call time, so the
-        # backends take no runtime argument (passing one is deprecated).
-        # Annotated because `dict` is invariant in its value type: the inferred
-        # `dict[str, StoreBackend]` is not a `dict[str, BackendProtocol]`.
-        routes: dict[str, BackendProtocol] = {
-            prefix: StoreBackend(namespace=_namespace_factory(namespace))
-            for prefix, namespace in _SEED_ROUTES.values()
-        }
-        return CompositeBackend(default=StateBackend(), routes=routes)
-
-    return factory
+    #
+    # Constructed eagerly, and nothing is lost by it: `StoreBackend` resolves
+    # its store from the graph execution context when a tool call arrives, not
+    # when it is built, so there was never anything for the closure to defer.
+    # Annotated because `dict` is invariant in its value type: the inferred
+    # `dict[str, StoreBackend]` is not a `dict[str, BackendProtocol]`.
+    routes: dict[str, BackendProtocol] = {
+        prefix: StoreBackend(namespace=_namespace_factory(namespace))
+        for prefix, namespace in _SEED_ROUTES.values()
+    }
+    return CompositeBackend(default=StateBackend(), routes=routes)
 
 
 def seed_store_from_disk(store: BaseStore, settings: Settings) -> int:

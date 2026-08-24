@@ -617,9 +617,20 @@ def approval_panel(requests: list[dict], unreadable: str = "") -> None:
         else:
             # `approval_decisions` owns the resume count, shared with the CLI
             # prompt: one decision per action request, not per interrupt.
+            #
+            # The caption names the tools rather than asserting "writes to
+            # `final/`", which stopped being true when deepagents 0.7 added
+            # `delete`: its interrupt is bulk-scoped, so it parks on any path
+            # under /applications/, and a pending delete of a scratch draft
+            # would otherwise be announced as a submission-bound write
+            # (invariant 18). This is the one screen where a human vets a
+            # destructive action, so the summary above it has to describe the
+            # action actually pending.
+            names = sorted({str(request.get("name") or "?") for request in requests})
             st.caption(
-                f"{len(requests)} write(s) to `final/`. These are the "
-                "submission-bound files — read each one before approving."
+                f"{len(requests)} pending action(s) — {', '.join(names)}. "
+                "Read each one before approving: a `final/` write is "
+                "submission-bound, and a delete cannot be undone."
             )
         for index, request in enumerate(requests):
             args = request.get("args") or {}

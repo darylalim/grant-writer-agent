@@ -224,13 +224,13 @@ def test_server_backend_routes_skills_and_memory_to_store():
 
     from grant_writer.config import Settings
 
-    factory = build_backend(Settings(backend_profile="server"))
-    # build_backend returns `BackendProtocol | Callable[..., BackendProtocol]`.
-    # The server profile is specifically the callable half -- local returns a
-    # ready-made FilesystemBackend instead -- and that split is part of what
-    # this test pins, so assert it rather than assuming it.
-    assert not isinstance(factory, BackendProtocol)
-    backend = factory(SimpleNamespace())
+    backend = build_backend(Settings(backend_profile="server"))
+    # An instance, not a factory. deepagents 0.7 removed backend factories, and
+    # the removal is enforced downstream rather than here -- FilesystemMiddleware
+    # raises TypeError on a callable that is not a BackendProtocol -- so the
+    # shape is asserted at the seam that produces it, where the failure names
+    # the function at fault.
+    assert isinstance(backend, BackendProtocol)
     assert isinstance(backend, CompositeBackend)
     for prefix in ("/skills/", "/memories/"):
         assert isinstance(backend.routes[prefix], StoreBackend)

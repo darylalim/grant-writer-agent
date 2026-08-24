@@ -97,17 +97,21 @@ jobs:
       # turns CI red on code that did not change. Bump this deliberately, with
       # the fixes in the same commit.
       - name: Lint
-        run: uvx ruff@0.16.0 check src/ tests/ evals/ streamlit_app.py
+        run: uvx ruff@0.16.4 check src/ tests/ evals/ streamlit_app.py
 
       - name: Format
-        run: uvx ruff@0.16.0 format --check src/ tests/ evals/ streamlit_app.py
+        run: uvx ruff@0.16.4 format --check src/ tests/ evals/ streamlit_app.py
 
-      # ty reports exactly two diagnostics today, both upstream signature
-      # problems in deepagents/langgraph that CLAUDE.md deliberately leaves
-      # alone. Failing on any diagnostic would keep CI permanently red and teach
-      # everyone to ignore this job; ignoring ty entirely would let a real
-      # diagnostic of ours land unnoticed. So it ratchets: the baseline passes, a
-      # third diagnostic fails.
+      # ty reports exactly two diagnostics today, both upstream and neither
+      # worth suppressing: langchain types `TodoListMiddleware` with two type
+      # parameters where deepagents' `AgentMiddleware` alias takes three, and
+      # langgraph's `BaseStore.put` asks for `dict` where deepagents hands it a
+      # `TypedDict`. The count has been two across the 0.7 upgrade, but not the
+      # same two -- check what they are before assuming a steady number means a
+      # steady cause. Failing on any diagnostic would keep CI permanently red
+      # and teach everyone to ignore this job; ignoring ty entirely would let a
+      # real diagnostic of ours land unnoticed. So it ratchets: the baseline
+      # passes, a third diagnostic fails.
       #
       # The same baseline is enforced at edit time by the ty hook in
       # .claude/settings.json -- keep the two in step. That hook counts
@@ -121,7 +125,7 @@ jobs:
         env:
           TY_BASELINE: 2
         run: |
-          uvx ty@0.0.63 check src/ tests/ evals/ streamlit_app.py > ty.log 2>&1 || true
+          uvx ty@0.0.74 check src/ tests/ evals/ streamlit_app.py > ty.log 2>&1 || true
           cat ty.log
 
           count=$(sed -n 's/^Found \([0-9][0-9]*\) diagnostic.*/\1/p' ty.log | tail -1)

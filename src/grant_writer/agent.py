@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from deepagents import RubricMiddleware, create_deep_agent
+from langchain.agents.middleware import TodoListMiddleware
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -83,14 +84,23 @@ def build_agent(settings: Settings | None = None):
         memory=[MEMORY_FILE],
         backend=build_backend(settings),
         permissions=build_permissions(settings),
-        # No-op unless a `rubric` is passed on invocation state, so it is safe
-        # to always include. When the funder's review criteria are supplied,
-        # this makes the agent grade its own work against them and iterate.
         middleware=[
+            # Passed explicitly since deepagents 0.7, which stopped installing
+            # it: `write_todos` is what step 3 of ORCHESTRATOR_PROMPT tells the
+            # model to plan with, and what the UI's Plan panel renders. Losing
+            # it raises nothing -- the orchestrator simply stops planning and
+            # the panel stays blank. `system_prompt=""` drops langchain's
+            # generic prose only; the tool's own schema description, which is
+            # where the usage guidance actually lives, is untouched.
+            TodoListMiddleware(system_prompt=""),
+            # No-op unless a `rubric` is passed on invocation state, so it is
+            # safe to always include. When the funder's review criteria are
+            # supplied, this makes the agent grade its own work against them
+            # and iterate.
             RubricMiddleware(
                 model=build_model(GRADER_MODEL),
                 max_iterations=settings.max_rubric_iterations,
-            )
+            ),
         ],
         checkpointer=checkpointer,
         store=store,
@@ -150,6 +160,13 @@ def build_discovery_agent(settings: Settings | None = None):
         # either -- it grades a draft against a funder's review criteria, which
         # is a question that only exists once there is a draft.
         memory=[MEMORY_FILE],
+        # `write_todos` is the one piece of the harness this graph does want.
+        # A scan is search, then triage, then one delegated scoring per
+        # candidate, and the shortlist is only as complete as that list of
+        # candidates -- a scan that quietly stops after four of eleven looks
+        # exactly like a scan that found four. See build_agent for why it is
+        # passed here at all and why the prompt is blanked.
+        middleware=[TodoListMiddleware(system_prompt="")],
         backend=build_backend(settings),
         permissions=discovery_permissions(),
         checkpointer=checkpointer,

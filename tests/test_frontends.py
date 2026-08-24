@@ -1037,13 +1037,64 @@ def test_the_approval_panel_renders_every_pending_write(monkeypatch):
     assert not app.exception
     assert "Approval required" in {sub.value for sub in app.subheader}
     # Both writes are offered, and the count is per request, not per interrupt.
-    assert any("2 write(s)" in caption.value for caption in app.caption)
+    assert any("2 pending action(s)" in caption.value for caption in app.caption)
     assert {"Approve", "Reject"} <= {button.label for button in app.button}
     # Shown as source, not rendered: what is approved has to be the bytes that
     # get written. A rendered view hides exactly the things worth checking on a
     # submission -- a citation whose link text and URL disagree, most of all.
     assert "# Narrative" in " ".join(block.value for block in app.code)
     assert "Drafted text." not in " ".join(block.value for block in app.markdown)
+
+
+def test_the_approval_caption_names_a_pending_delete(monkeypatch):
+    """Pins invariant 18.
+
+    `delete` reaches this panel on a bundle its caption used to describe as
+    "write(s) to `final/`" — and its interrupt is bulk-scoped, so the path can
+    be a scratch draft under `sections/` that is not submission-bound at all.
+    Both halves of that sentence were wrong for a delete, and a caption over an
+    approval prompt is not decoration: it is what a human reads before allowing
+    something irreversible.
+    """
+    requests = [
+        {
+            "name": "write_file",
+            "args": {
+                "file_path": "/applications/x/final/narrative.md",
+                "content": "# Narrative",
+            },
+        },
+        {
+            "name": "delete",
+            "args": {"file_path": "/applications/x/sections/need.md"},
+        },
+    ]
+    agent = SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[
+                SimpleNamespace(
+                    interrupts=[SimpleNamespace(value={"action_requests": requests})]
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-delete"
+    app.run()
+
+    assert not app.exception
+    caption = next(c.value for c in app.caption if "pending action(s)" in c.value)
+    assert "delete" in caption and "write_file" in caption
+    # And it must not still be calling the pair "writes to final/".
+    assert "write(s) to" not in caption
+    # The per-request expander carries the tool name too, so the path a delete
+    # would remove is on screen next to the decision.
+    labels = " ".join(exp.label for exp in app.expander)
+    assert "delete → /applications/x/sections/need.md" in labels
 
 
 def test_an_unreadable_interrupt_does_not_offer_a_plain_approve(monkeypatch):
@@ -1073,8 +1124,10 @@ def test_an_unreadable_interrupt_does_not_offer_a_plain_approve(monkeypatch):
     approve = next(button for button in app.button if button.label == "Approve")
     assert approve.disabled
     assert any("no pending write could be read" in e.value for e in app.error)
-    # The reassuring count is gone; nothing claims a file is on offer.
-    assert not any("write(s) to" in caption.value for caption in app.caption)
+    # The reassuring count is gone; nothing claims an action is on offer. Keyed
+    # on the caption's own wording, so a reworded caption fails here rather than
+    # making this assertion vacuously true.
+    assert not any("pending action(s)" in caption.value for caption in app.caption)
     # Rejecting stays available throughout -- it releases the graph without
     # writing, so it is the safe way out of this state.
     assert not next(b for b in app.button if b.label == "Reject").disabled

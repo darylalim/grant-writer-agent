@@ -32,15 +32,22 @@
 #
 # ## What must NOT move out of [theme]
 #
-# Ten options exist only in the top-level section: `base`, `baseFontSize`,
-# `baseFontWeight`, `chartCategoricalColors`, `chartSequentialColors`,
-# `chartDivergingColors`, `fontFaces`, `metricValueFontSize`,
-# `metricValueFontWeight`, and `showSidebarBorder`. A misplaced one is not
-# rejected -- Streamlit logs `"theme.light.baseFontSize" is not a valid config
-# option` to the *server* log, which nobody is watching, and drops the value. So
-# a tidy-up that moves this block into both modes silently loses the 14px base
-# size and the sidebar border. `tests/test_theme_config.py` is what actually
-# catches that; this comment only explains it.
+# Seven options exist only in the top-level section: `base`, `baseFontSize`,
+# `baseFontWeight`, `fontFaces`, `metricValueFontSize`, `metricValueFontWeight`,
+# and `showSidebarBorder`. A misplaced one is not rejected -- Streamlit logs
+# `"theme.light.baseFontSize" is not a valid config option` to the *server* log,
+# which nobody is watching, and drops the value. So a tidy-up that moves this
+# block into both modes silently loses the 14px base size and the sidebar
+# border. `tests/test_theme_config.py` is what actually catches that; this
+# comment only explains it -- and it derives the set from the installed
+# Streamlit rather than from this list, which is why the count moving did not
+# turn the suite red.
+#
+# It moved once already: 1.62 made `chartCategoricalColors`,
+# `chartSequentialColors` and `chartDivergingColors` settable per mode and per
+# sidebar, taking the count from ten to seven. The categorical ramp below stays
+# up top all the same -- it is tuned to read on both surfaces, so defining it
+# twice would be two places to drift rather than one place to fix.
 #
 # Everything else here is valid in all six theme sections (the five below plus
 # the unused [theme.sidebar]) and is kept up top because it is genuinely shared:

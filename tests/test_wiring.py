@@ -11,11 +11,19 @@ from __future__ import annotations
 import inspect
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from deepagents import RubricMiddleware
-from deepagents.middleware.filesystem import _check_fs_permission, supports_execution
+from deepagents.middleware._fs_interrupt import (
+    _build_interrupt_on_from_permissions,
+)
+from deepagents.middleware.filesystem import (
+    _check_fs_permission,
+    _find_delete_deny_patterns,
+    supports_execution,
+)
 from deepagents.middleware.rubric import GraderResponse
 
 from grant_writer.agent import build_agent, build_discovery_agent
@@ -66,6 +74,12 @@ def test_graph_builds(profile):
         "read_file",
         "write_file",
         "edit_file",
+        # Arrived with deepagents 0.7, unasked for. Listed here so the roster
+        # is what the graph actually offers the model rather than what this
+        # project once chose -- an unlisted tool is one nothing reasons about,
+        # and `delete` is the only one that destroys work. Its boundary is
+        # pinned by test_delete_is_governed_as_a_write below.
+        "delete",
         "ls",
         "glob",
         "grep",
@@ -134,6 +148,118 @@ def test_approve_final_interrupts_only_final_writes():
         _check_fs_permission(rules, "write", "/applications/x/sections/need.md")
         == "allow"
     )
+
+
+def _interrupt_fires(rules, tool: str, path: str) -> bool:
+    """Would `tool` on `path` park the graph, given `rules`?
+
+    Goes through deepagents' own predicate rather than re-deriving the answer
+    from the rule list, because the two do not agree: the interrupt scope of a
+    tool depends on how that tool is *classified* upstream, not only on which
+    rule its path matches. `delete` is the case in point below.
+    """
+    config = _build_interrupt_on_from_permissions(rules)
+    if tool not in config:
+        return False
+    # The predicate reads `.tool_call` and nothing else, so a stand-in is both
+    # sufficient and sturdier than the real `ToolCallRequest`, which also wants
+    # a tool, a state and a `ToolRuntime` -- three constructors that could
+    # change under this test without the thing it pins having moved. `cast`
+    # rather than a `ty: ignore`, so the deliberate substitution is stated in
+    # the code instead of a suppressed complaint about it.
+    request = SimpleNamespace(tool_call={"name": tool, "args": {"file_path": path}})
+    return bool(config[tool]["when"](cast(Any, request)))
+
+
+@pytest.mark.parametrize(
+    ("rules_name", "target", "denied"),
+    [
+        # A plain file inside the write allow-list: permitted, exactly as
+        # overwriting it with write_file is permitted. Deletion is not held to
+        # a stricter standard than replacement -- both lose the old bytes.
+        ("draft", "/applications/x/final/proposal.md", False),
+        ("draft", "/applications/x/sections/need.md", False),
+        ("draft", "/opportunities/s/scored/a.md", False),
+        # ...and outside it, refused by the same catch-all deny that stops a
+        # write. This is the half that would be silent if it broke: nothing
+        # re-checks that the source tree is unreachable.
+        ("draft", "/src/grant_writer/agent.py", True),
+        ("draft", "/skills/statement-of-need/SKILL.md", True),
+        # Cross-graph: a scan may delete inside its own scan directory and
+        # nothing under /applications/, mirroring discovery_permissions' writes.
+        ("discovery", "/opportunities/s/scored/a.md", False),
+        ("discovery", "/applications/x/final/proposal.md", True),
+        # The reviewer may clear its own report and nothing else -- the same
+        # boundary that stops it editing the drafts it reviews.
+        ("compliance", "/applications/x/review/report.md", False),
+        ("compliance", "/applications/x/sections/need.md", True),
+    ],
+)
+def test_delete_is_governed_as_a_write(rules_name, target, denied):
+    """Pins invariant 18.
+
+    deepagents 0.7 added `delete`, and it is governed by the same `write`
+    rules -- so the boundary held without an edit. That is worth pinning
+    precisely because it held by inheritance: nothing in `build_permissions`
+    names this tool, so a future rule written with only write_file in mind
+    would move the deletion boundary as a side effect nobody looked at.
+    """
+    rules = {
+        "draft": lambda: build_permissions(Settings(approve_final=False)),
+        "discovery": discovery_permissions,
+        "compliance": compliance_permissions,
+    }[rules_name]()
+    patterns = _find_delete_deny_patterns(rules, target, has_descendants=False)
+    assert bool(patterns) is denied
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["/applications", "/applications/x", "/applications/x/final", "/opportunities"],
+)
+def test_delete_refuses_a_directory_everywhere(target):
+    """Pins invariant 18.
+
+    A recursive delete takes the subtree with it, so upstream refuses the
+    operation whenever a deny rule *could* match any descendant -- and the
+    catch-all `/**` deny always could. The agent can therefore remove a file
+    it was allowed to write, and never a directory. Nothing states this
+    intent; it falls out of the catch-all, which is exactly why losing it
+    would be silent -- `rm -rf /applications/x` would simply start working.
+    """
+    for rules in (
+        build_permissions(Settings(approve_final=False)),
+        build_permissions(Settings(approve_final=True)),
+        discovery_permissions(),
+        compliance_permissions(),
+    ):
+        assert _find_delete_deny_patterns(rules, target, has_descendants=True)
+
+
+def test_approve_gates_every_delete_under_applications_not_only_final():
+    """Pins invariant 18.
+
+    `write_file` is scoped `exact` upstream and `delete` is scoped `bulk`, so
+    the same `/applications/*/final/**` interrupt rule produces two different
+    gates: a write parks only on `final/`, a delete parks on any path under
+    `/applications/` -- because deleting an ancestor would take `final/` with
+    it. Broader, not narrower, so it fails safe; but the UI's approval caption
+    describes what is pending, and describing a delete of `sections/` as a
+    "write to final/" is the one moment that has to be true.
+    """
+    rules = build_permissions(Settings(approve_final=True))
+    assert _interrupt_fires(rules, "write_file", "/applications/x/final/proposal.md")
+    assert not _interrupt_fires(rules, "write_file", "/applications/x/sections/need.md")
+
+    assert _interrupt_fires(rules, "delete", "/applications/x/final/proposal.md")
+    assert _interrupt_fires(rules, "delete", "/applications/x/sections/need.md")
+    assert _interrupt_fires(rules, "delete", "/applications")
+    # A scan directory is not submission-bound under either tool.
+    assert not _interrupt_fires(rules, "delete", "/opportunities/s/scored/a.md")
+
+    # And with approvals off there is no gate at all -- for either tool.
+    off = build_permissions(Settings(approve_final=False))
+    assert not _interrupt_fires(off, "delete", "/applications/x/final/proposal.md")
 
 
 def test_approve_final_wires_human_in_the_loop():
@@ -546,7 +672,7 @@ def test_discovery_graph_builds(profile):
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["task", "write_todos", "read_file", "write_file", "ls"],
+    ["task", "write_todos", "read_file", "write_file", "delete", "ls"],
 )
 def test_discovery_graph_has_the_harness_tools(tool_name):
     registry = build_discovery_agent(Settings()).nodes["tools"].bound.tools_by_name

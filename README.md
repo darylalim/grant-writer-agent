@@ -259,6 +259,15 @@ deliberately narrower than interrupting every write: gate the submission-bound
 files and you read each prompt, gate every scratch note and you learn to
 rubber-stamp.
 
+Those rules cover deletion too, and it is worth saying out loud because nothing
+in this project asked for it: deepagents 0.7 gave every agent a `delete` tool.
+It is governed as a write, so the boundary is the one above — a file the agent
+may write, it may also remove, and a directory it may not remove anywhere, since
+a recursive delete is refused whenever any deny rule could match something in
+the subtree. `--approve` gates deletion *more* broadly than writing: any delete
+under `/applications/` prompts, not just one inside `final/`, because removing a
+parent would take `final/` with it.
+
 The discovery graph gets a narrower set of its own (`discovery_permissions`),
 which returns no interrupt rule at any setting and denies `/applications/`
 outright. That is what makes "a scan cannot pause for approval" structural, and
