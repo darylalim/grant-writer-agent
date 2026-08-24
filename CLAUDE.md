@@ -101,9 +101,9 @@ the discovery graph has no `section-drafter` to reach.
 Module dependencies flow one way:
 
 ```
-config.py  →  tools.py, prompts.py  →  backends.py, subagents.py  →  agent.py  →  cli.py
-opportunities.py ─→ prompts.py, workspace.py, cli.py ─────────────────────────↗
-              activity.py, workspace.py  ──────────────────────────────────────↗  streamlit_app.py
+config.py  →  tools.py, backends.py  →  subagents.py  →  agent.py  →  cli.py
+opportunities.py ─→ prompts.py, workspace.py, cli.py ─────────────────────↗
+              activity.py, workspace.py  ──────────────────────────────────↗  streamlit_app.py
 ```
 
 **`opportunities.py`** is a pure leaf — the fit rubric, the grammar a scout writes, the parser, and
@@ -120,7 +120,9 @@ was duplicated logic waiting to happen:
 
 - **`activity.py`** parses the `stream_mode="updates"` chunks and builds the approval decisions.
   A renamed `deepagents` key blanks a frontend's labels silently; a decision list whose length
-  disagrees with the interrupted calls leaves the graph stuck with no exception raised.
+  disagrees with the interrupted calls leaves the graph stuck with no exception raised. Like
+  `opportunities.py` it imports nothing from the package — the three leaves in the diagram above
+  are `config.py`, `opportunities.py`, and this.
 - **`workspace.py`** reads an application directory back — file listing, `[NEEDS INPUT]` count,
   compliance verdict. Not presentation logic, and putting it here is what makes it testable: a
   Streamlit script cannot be imported without executing it.
