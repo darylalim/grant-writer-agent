@@ -17,6 +17,14 @@ opportunities/
 # Persisted checkpoint (conversation/todo state) written by the CLI.
 .grant_writer/
 
+# Per-developer Claude Code context. `.claude/settings.json` is tracked on
+# purpose -- its hooks and ty baseline are project rules everyone gets. These
+# are the opposite: personal notes, and permissions approved on one machine.
+# Claude Code writes settings.local.json itself the first time a permission is
+# allowed for the project, so it turns up without being asked for.
+.claude.local.md
+.claude/settings.local.json
+
 # Python
 __pycache__/
 *.py[cod]

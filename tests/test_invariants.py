@@ -8,8 +8,8 @@ It can rot in two directions, and both are the same kind of quiet the list is
 about:
 
 - An entry is added to `CLAUDE.md` and the test is never written. The document
-  now promises a guarantee nothing checks, and reads exactly like the sixteen
-  beside it that are real.
+  now promises a guarantee nothing checks, and reads exactly like every entry
+  beside it that is real.
 - A test is renamed or deleted in a refactor while the numbered entry stays.
   Same end state, reached from the other side. Green suite either way.
 

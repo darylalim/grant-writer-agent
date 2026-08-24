@@ -28,6 +28,24 @@ skip, which is the only coverage `streamlit_app.py` has. It is a dev dependency 
 optional extra because `streamlit_app.py` sits at the repo root and is not in the wheel, so an
 extra would have been installable by someone who then had no app to run.
 
+Edits are gated by hooks in `.claude/settings.json`, not only by CI. Every `.py` write is
+`ruff format`ed and `ruff check --fix`ed, then the **whole suite runs and a failure blocks the
+edit** — so a coherent multi-file change has to land as one edit or not at all. The suite also
+runs on `CLAUDE.md`, which `test_invariants.py` parses, and on `.streamlit/config.toml`. None of
+it fires for a Bash-only edit, so run the suite by hand after one. Reading the secrets file is
+blocked through both `Read` and `Bash` — the variable names are in `.env.example`, and
+`config.py` loads it itself via `load_dotenv()`. `uv.lock` is write-blocked: change dependencies
+with `uv add` / `uv remove`. That Bash guard matches the filename anywhere in a command, so a
+command merely *mentioning* it in prose is refused too; edit through `Edit`/`Write` when that
+bites.
+
+CI adds what the local loop cannot. It runs the suite on **3.14** as well as `.python-version`'s
+3.13, and pins `ruff@0.16.4` / `ty@0.0.74` where the hooks run `uvx` unpinned, so a newer local
+ruff can reformat code that CI's `format --check` then rejects — bump the pins deliberately, and
+re-check the ty baseline when you do. Releases need no separate step: a green push to `main`
+whose `version` in `pyproject.toml` has no `v<version>` tag gets tagged and released with the
+wheel and sdist attached, so **bumping the version is the release**.
+
 When working with Python, invoke the relevant `/astral:<skill>` — `/astral:uv`, `/astral:ruff`,
 `/astral:ty` — to ensure best practices are followed rather than guessed at. uv is the only
 supported package manager: never `pip`, never a hand-rolled venv. There is deliberately no
@@ -185,7 +203,7 @@ runs, and still produces plausible output.
    it did not loosen either side.
    `config.application_ids` is the read side of the same boundary — it supplies the UI's picker,
    so an id it offers must be one `application_dir` accepts. It gets that by calling
-   `application_dir` on each candidate rather than by re-testing `_SAFE_APP_ID`: sharing the regex
+   `application_dir` on each candidate rather than by re-testing `_SAFE_ID`: sharing the regex
    is not sharing the boundary, and the difference is `applications/legacy -> /elsewhere`, which
    passes any name test and is then refused once the symlink resolves.
 3. **Custom subagents do not inherit `skills` from the parent.** `subagents.py` passes
@@ -415,15 +433,17 @@ longer exists fails too. The declaration lives on the test rather than in a regi
 deleting the test deletes the claim with it. The marker shape is strict (capital `P`, at the start
 of a line, a full stop straight after the numbers) precisely so prose that merely *mentions*
 "invariant 11" is not mistaken for a claim; put any commentary on the line after it. Adding an
-invariant here without a test now fails the suite rather than reading, indistinguishably, like the
-seventeen beside it that are real. The marker is a claim and not a proof — a test can pin the wrong
-thing — so read it as a pointer to where the argument lives.
+invariant here without a test now fails the suite rather than reading, indistinguishably, like
+every entry beside it that is real. The marker is a claim and not a proof — a test can pin the
+wrong thing — so read it as a pointer to where the argument lives.
 
 `test_wiring.py` covers structural invariants; `test_review_fixes.py` pins specific past code-review
 findings and should gain a case whenever a review turns one up; `test_opportunities.py` is pure —
 strings in, dataclasses out — and is where every fit-scoring case belongs, because none of it needs
-a model or a network; `test_frontends.py` pins what the CLI and the UI must agree on — the stream parser, the approval decisions, the shared brief, and the
-terminal output the refactor must not have moved. Its `AppTest` cases run the Streamlit script
+a model or a network; `test_theme_config.py` pins `.streamlit/config.toml`, the app's whole
+styling story; `test_frontends.py` pins what the CLI and the UI must agree on — the stream
+parser, the approval decisions, the shared brief, and the terminal output the refactor must
+not have moved. Its `AppTest` cases run the Streamlit script
 headlessly, because a Streamlit app fails at run time rather than import time and nothing else would
 catch a bad layout call. They `pytest.importorskip("streamlit")`, which only bites under `--no-dev`.
 Pass `monkeypatch` to `_app_test` when a case needs the app in its normal
@@ -466,6 +486,16 @@ machine. Assert *membership*, never equality, on anything derived from that list
 the empty case by patching `config.application_ids` rather than waiting for the directory to be
 empty. A case that assumes empty passes on a clean CI checkout and fails on any machine that has
 run the app once.
+
+`test_theme_config.py` is the one test file here with no agent in it, and its contract fails the
+same quiet way everything else in this section does. Streamlit does not reject an unknown theme
+key: it logs `"theme.light.baseFontSize" is not a valid config option` to the *server* log and
+drops the value, so the page renders one step smaller or one border short and nothing fails. Ten
+of the options are top-level-only, and moving one into a per-mode section is what a plausible
+tidy-up does while making the file look *more* consistent. The app injects no CSS and must not
+start — theme tokens are the supported way to restyle Streamlit, and `unsafe_allow_html` styling
+breaks silently when the class names it targets change. Contrast figures are recomputed in the
+test rather than quoted from the file's comments, because a comment cannot fail.
 
 ## Domain rules baked into the prompts
 
