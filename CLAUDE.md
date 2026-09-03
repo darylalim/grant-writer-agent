@@ -128,6 +128,18 @@ was duplicated logic waiting to happen:
   Streamlit script cannot be imported without executing it.
 - **`prompts.draft_request`** composes the opening brief, which steers the whole run.
 - **`config.persistent_settings`** decides that a frontend checkpoints to disk.
+- **`config.trace_config`** decides what a turn is *called* in LangSmith. Tracing is automatic for
+  a LangGraph app, so both frontends' runs always arrived there — as one of two graph names, with
+  no way to tell `draft` from `chat`, the UI from the CLI, or an `--approve` run from a plain one.
+  Free traces, unfilterable. `run_name`, `tags` and `metadata` are **top-level** `RunnableConfig`
+  keys while `thread_id` is a `configurable` one, so the two halves of that dict look alike and are
+  not: a label nested under `configurable` is accepted, carried as graph configuration, and dropped
+  by the tracer with nothing raised. `test_frontends.py` §⑥ pins the labels against `CONFIG_KEYS`
+  and a real `ensure_config` round-trip rather than against a literal of ours, and separately
+  refuses a turn config built inline in *either* frontend — one fixed and the other not is the
+  failure worth catching, since the helper then sits there looking like the change was made.
+  Checkpoint *reads* (`parked_state`, the approval panel) are deliberately not routed through it:
+  they pass only `thread_id` and create no run to label.
 - **`config.application_dir`** is the boundary for a user-supplied application id. The UI joins it
   onto a real path and writes an upload there, outside `FilesystemPermission` — and
   `Path("applications") / "/etc/x"` is `/etc/x`, so an unvalidated id is an arbitrary read/write.

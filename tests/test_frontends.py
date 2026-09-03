@@ -9,6 +9,7 @@ shows up as a crash, so they are pinned here.
 
 from __future__ import annotations
 
+import ast
 import shutil
 import sqlite3
 from pathlib import Path
@@ -27,7 +28,12 @@ from grant_writer.activity import (
     pending_action_requests,
 )
 from grant_writer.cli import _print_activity
-from grant_writer.config import Settings, persistent_settings
+from grant_writer.config import (
+    Settings,
+    discovery_thread_id,
+    persistent_settings,
+    trace_config,
+)
 from grant_writer.prompts import discovery_request, draft_request
 from grant_writer.workspace import application_files, count_gaps
 
@@ -2095,3 +2101,229 @@ def test_the_shortlist_counts_the_gaps_the_scout_refused_to_invent(
     needs_input = [m for m in app.metric if m.label == "Needs input"]
     assert needs_input, "the shortlist drew no gap count"
     assert int(needs_input[0].value) >= 2
+
+
+# ---- ⑥ the shared turn config ----------------------------------------------
+#
+# Tracing is automatic for a LangGraph app, so every run here already reached
+# LangSmith. What it did not carry was any way to tell one run from another:
+# `draft` and `chat` share a thread id by design, the UI and the CLI build the
+# same graph, and no flag a run was made under appeared anywhere in the trace.
+# `config.trace_config` is the one place that decides what a turn is labelled,
+# because two frontends labelling runs their own way is the same duplication
+# `activity.py` and `workspace.py` exist to prevent.
+
+
+def _draft_config(**overrides):
+    """A drafting turn's config, as `cli._draft` builds it."""
+    return trace_config(
+        overrides.pop("settings", Settings()),
+        command="draft",
+        frontend="cli",
+        ref="alpha",
+        thread_id="alpha",
+        recursion_limit=40,
+        **overrides,
+    )
+
+
+def test_trace_config_keys_are_ones_langchain_actually_reads():
+    """The load-bearing test, and the one whose failure is silent.
+
+    `run_name`, `tags`, and `metadata` are top-level `RunnableConfig` keys.
+    Nested under `configurable` -- where `thread_id` correctly lives, two lines
+    away -- they are accepted, carried as graph configuration, and dropped by
+    the tracer: the run keeps the compiled graph's name, every filter stays
+    empty, and nothing raises. A misspelling behaves identically. So this
+    asserts against `CONFIG_KEYS` and round-trips through the `ensure_config`
+    LangChain itself calls, rather than against a literal of our own.
+    """
+    from langchain_core.runnables.config import CONFIG_KEYS, ensure_config
+
+    config = _draft_config()
+    labels = ("run_name", "tags", "metadata")
+
+    assert all(key in CONFIG_KEYS for key in labels), (
+        "langchain-core no longer recognises one of these as a config key, so "
+        "it is being silently discarded before the tracer sees it."
+    )
+    kept = ensure_config(config)
+    for key in labels:
+        assert kept.get(key) == config[key], (
+            f"{key} did not survive ensure_config. A turn config carrying it "
+            "reaches LangSmith without it, and the trace is unlabelled."
+        )
+
+
+def test_thread_id_stays_where_the_checkpointer_reads_it():
+    """The other half of the same confusion, in the opposite direction.
+
+    `thread_id` is read from `configurable` and nowhere else. Promoting it to
+    the top level alongside the labels -- the tidy-up this function's shape
+    invites -- loses the checkpoint rather than the trace: a fresh thread every
+    turn, with the plan and history of the old one still on disk and nothing
+    said about it.
+    """
+    config = _draft_config()
+    assert config["configurable"]["thread_id"] == "alpha"
+    assert "thread_id" not in config, "promoted out of configurable"
+
+
+def test_draft_and_chat_are_told_apart_on_one_thread():
+    """The finding this function was written for.
+
+    `--app-id` is the thread id for both subcommands, so `draft` and every
+    later `chat` turn are one stream of root runs. Unnamed they were also one
+    stream of *identically* named runs, and separating the opening brief from
+    a follow-up meant opening each in turn.
+    """
+    drafting = _draft_config()
+    chatting = trace_config(
+        Settings(),
+        command="chat",
+        frontend="cli",
+        ref="alpha",
+        thread_id="alpha",
+        recursion_limit=40,
+    )
+
+    assert drafting["configurable"] == chatting["configurable"], (
+        "sanity: these are meant to be the same thread -- that is the point"
+    )
+    assert drafting["run_name"] != chatting["run_name"]
+    assert (drafting["run_name"], chatting["run_name"]) == ("draft:alpha", "chat:alpha")
+    assert "draft" in drafting["tags"] and "chat" in chatting["tags"]
+
+
+def test_tags_carry_the_settings_the_run_was_made_under():
+    """`--profile`, `--approve` and `--no-search` change what the graph *is*.
+
+    A run made with approval on has a middleware another does not, and one
+    made with `--no-search` has a tool missing from its roster. Reading a
+    trace without knowing which, the difference reads as the model behaving
+    inconsistently.
+    """
+    strict = _draft_config(
+        settings=Settings(
+            backend_profile="server", approve_final=True, enable_search=False
+        )
+    )
+    assert set(strict["tags"]) == {
+        "cli",
+        "draft",
+        "profile:server",
+        "approve:on",
+        "search:off",
+    }
+
+    relaxed = _draft_config()
+    assert {"profile:local", "approve:off", "search:on"} <= set(relaxed["tags"])
+
+
+def test_details_that_are_empty_are_dropped_rather_than_sent_as_null():
+    """An unused `--funder` should leave the facet off the run, not add one
+    whose value is None to every trace that did not pass the flag."""
+    config = _draft_config(
+        details={"app_id": "alpha", "funder": None, "rubric": "", "notes": "keep me"}
+    )
+    assert "funder" not in config["metadata"]
+    assert "rubric" not in config["metadata"]
+    assert config["metadata"]["notes"] == "keep me"
+    assert config["metadata"]["app_id"] == "alpha"
+
+
+def test_a_scan_run_is_named_by_the_id_the_human_typed():
+    """`ref` and `thread_id` differ, and the run name follows `ref`.
+
+    A scan's thread is namespaced so it cannot land on the checkpoint row an
+    identically-named application uses (invariant 12). Naming the run after
+    the thread instead would double the prefix. That the two strings come out
+    equal here is a coincidence of the prefix being spelled with the same verb
+    as the command, which is exactly why the name is not derived from it.
+    """
+    config = trace_config(
+        Settings(),
+        command="discover",
+        frontend="cli",
+        ref="rural-health",
+        thread_id=discovery_thread_id("rural-health"),
+        recursion_limit=40,
+        details={"scan_id": "rural-health"},
+    )
+    assert config["configurable"]["thread_id"] == "discover:rural-health"
+    assert config["run_name"] == "discover:rural-health"
+    assert config["metadata"]["scan_id"] == "rural-health"
+
+
+def _dicts_keyed_recursion_limit(path: Path) -> list[int]:
+    """Line numbers of dict literals in `path` carrying a recursion_limit key.
+
+    An inline turn config is what this looks like; a `trace_config(...)` call
+    passes it as a keyword instead, so the AST tells the two apart where a
+    grep for the word could not.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Dict)
+        for key in node.keys
+        if isinstance(key, ast.Constant) and key.value == "recursion_limit"
+    ]
+
+
+def test_neither_frontend_builds_a_turn_config_inline():
+    """One frontend fixed and the other not is the failure worth catching.
+
+    The gap was in both, and a helper reached for by only the file whose bug
+    was noticed leaves the other emitting unlabelled runs -- with the helper
+    sitting there looking like the change had been made. Checkpoint *reads*
+    (`parked_state`, the approval panel) are untouched by design: they pass
+    only `thread_id`, create no run, and so carry no `recursion_limit`.
+    """
+    for name in ("src/grant_writer/cli.py", "streamlit_app.py"):
+        path = PROJECT_ROOT / name
+        assert not _dicts_keyed_recursion_limit(path), (
+            f"{name} builds a turn config as a dict literal at line(s) "
+            f"{_dicts_keyed_recursion_limit(path)}. Route it through "
+            "config.trace_config so both frontends label runs the same way."
+        )
+
+
+def test_the_ui_labels_its_runs_as_the_ui(monkeypatch):
+    """End to end through the real script, because the UI has no other cover.
+
+    `AppTest` is the only thing here that runs `streamlit_app.py`, so a config
+    built correctly in `cli.py` and forgotten in the run block would otherwise
+    pass every test in this file. Asserts the frontend actually differs -- the
+    one fact no amount of testing `trace_config` in isolation can establish.
+    """
+    seen: list[dict] = []
+
+    class _RecordingAgent:
+        get_state = staticmethod(_unparked)
+
+        def stream(self, _payload, config, **_kwargs):
+            seen.append(config)
+            return iter(())
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _RecordingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-trace").run()
+    _button(app, "Draft proposal").click().run()
+
+    assert not app.exception
+    assert len(seen) == 1
+    config = seen[0]
+    assert config["run_name"] == "draft:zz-pytest-trace"
+    assert "ui" in config["tags"] and "cli" not in config["tags"]
+    assert config["metadata"]["frontend"] == "ui"
+    assert config["metadata"]["app_id"] == "zz-pytest-trace"
+    assert config["configurable"]["thread_id"] == "zz-pytest-trace"
+    # The same shape the CLI produces, not merely a shape with the right keys
+    # in it: a frontend that grew its own extra key would drift from the other
+    # without either being wrong on its own terms.
+    assert set(config) == set(_draft_config())

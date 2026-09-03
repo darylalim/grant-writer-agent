@@ -24,6 +24,7 @@ from grant_writer.config import (
     opportunities_dir,
     persistent_settings,
     require_api_keys,
+    trace_config,
 )
 from grant_writer.opportunities import rank_opportunities
 from grant_writer.prompts import discovery_request, draft_request
@@ -131,6 +132,7 @@ def _draft(args: argparse.Namespace) -> int:
     )
     payload: dict = {"messages": [{"role": "user", "content": instruction}]}
 
+    rubric_name: str | None = None
     if args.rubric:
         rubric_path = Path(args.rubric).expanduser()
         if not rubric_path.is_file():
@@ -139,12 +141,25 @@ def _draft(args: argparse.Namespace) -> int:
         # RubricMiddleware activates only when `rubric` is present in state.
         payload["rubric"] = rubric_path.read_text(encoding="utf-8")
         print(f"Grading against rubric: {rubric_path}", flush=True)
+        # The name, never the path: a trace is shared, and an absolute path
+        # under $HOME carries the operator's username with it. Which rubric
+        # was applied is the filterable fact; where it sat is not.
+        rubric_name = rubric_path.name
 
     agent = build_agent(settings)
-    config = {
-        "configurable": {"thread_id": args.app_id},
-        "recursion_limit": args.recursion_limit,
-    }
+    config = trace_config(
+        settings,
+        command="draft",
+        frontend="cli",
+        ref=args.app_id,
+        thread_id=args.app_id,
+        recursion_limit=args.recursion_limit,
+        details={
+            "app_id": args.app_id,
+            "funder": args.funder,
+            "rubric": rubric_name,
+        },
+    )
     _run(agent, payload, config)
     print(f"\nDone. Output in ./applications/{args.app_id}/", flush=True)
     return 0
@@ -161,10 +176,20 @@ def _chat(args: argparse.Namespace) -> int:
     # Reusing the app id as the thread id, backed by the SQLite checkpoint the
     # CLI persists, lets a later session pick up the same todos and conversation
     # instead of starting cold.
-    config = {
-        "configurable": {"thread_id": args.app_id},
-        "recursion_limit": args.recursion_limit,
-    }
+    #
+    # `command="chat"` is what separates these turns from the `draft` run that
+    # opened the same thread. They share `thread_id` by design, so before this
+    # the two were one undifferentiated stream of identically-named root runs
+    # and telling the opening brief from a follow-up meant opening each.
+    config = trace_config(
+        settings,
+        command="chat",
+        frontend="cli",
+        ref=args.app_id,
+        thread_id=args.app_id,
+        recursion_limit=args.recursion_limit,
+        details={"app_id": args.app_id},
+    )
     print(f"Session '{args.app_id}'. Ctrl-D or 'exit' to quit.\n", flush=True)
     while True:
         try:
@@ -259,12 +284,22 @@ def _discover(args: argparse.Namespace) -> int:
         notes=args.notes,
     )
     agent = build_discovery_agent(settings)
-    config = {
-        # Namespaced, so scanning and then drafting under the same name do not
-        # resume each other -- see `config.discovery_thread_id`.
-        "configurable": {"thread_id": discovery_thread_id(args.scan_id)},
-        "recursion_limit": args.recursion_limit,
-    }
+    config = trace_config(
+        settings,
+        command="discover",
+        frontend="cli",
+        # The scan id names the run; the namespaced form is the thread, so
+        # scanning and then drafting under the same name do not resume each
+        # other -- see `config.discovery_thread_id` and invariant 12.
+        ref=args.scan_id,
+        thread_id=discovery_thread_id(args.scan_id),
+        recursion_limit=args.recursion_limit,
+        details={
+            "scan_id": args.scan_id,
+            "focus": args.focus,
+            "agencies": args.agencies,
+        },
+    )
     _run(agent, {"messages": [{"role": "user", "content": instruction}]}, config)
 
     _print_shortlist(scan_dir, args.scan_id, settings)

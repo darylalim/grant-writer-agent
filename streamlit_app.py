@@ -43,6 +43,7 @@ from grant_writer.config import (
     opportunity_scan_ids,
     persistent_settings,
     require_api_keys,
+    trace_config,
 )
 from grant_writer.opportunities import (
     MAX_TOTAL_POINTS,
@@ -1437,10 +1438,26 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
                 else get_agent
             )
             agent = builder(profile, approve, search)
-            config = {
-                "configurable": {"thread_id": _active_thread_id()},
-                "recursion_limit": int(recursion_limit),
-            }
+            # Rebuilt from the same three flags `get_agent` is keyed on, so
+            # the tags describe the graph that actually ran rather than
+            # whatever the sidebar shows by the time anyone reads the trace.
+            # `active_discovering` and `active_ref` are this pass's own
+            # values, the same pair the banners below read -- a third copy
+            # of that expression is how the run and the page start
+            # disagreeing about which id is on screen.
+            config = trace_config(
+                persistent_settings(
+                    backend_profile=profile,
+                    approve_final=approve,
+                    enable_search=search,
+                ),
+                command="discover" if active_discovering else "draft",
+                frontend="ui",
+                ref=active_ref,
+                thread_id=_active_thread_id(),
+                recursion_limit=int(recursion_limit),
+                details={("scan_id" if active_discovering else "app_id"): active_ref},
+            )
             interrupted = stream_turn(agent, turn_payload, config)
         except Exception as exc:  # noqa: BLE001 - surface anything to the user
             st.session_state.error = f"{type(exc).__name__}: {exc}"

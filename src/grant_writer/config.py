@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
@@ -386,6 +386,85 @@ def persistent_settings(
         enable_search=enable_search,
     )
     return replace(base, checkpoint_db=base.default_checkpoint_db)
+
+
+TraceCommand = Literal["draft", "chat", "discover"]
+TraceFrontend = Literal["cli", "ui"]
+
+
+def trace_config(
+    settings: Settings,
+    *,
+    command: TraceCommand,
+    frontend: TraceFrontend,
+    ref: str,
+    thread_id: str,
+    recursion_limit: int,
+    details: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
+    """The `RunnableConfig` for one turn, including what LangSmith filters on.
+
+    Both frontends build their turn config here, because the alternative is
+    what was here before: four literal dicts carrying `thread_id` and
+    `recursion_limit` and nothing else. Tracing is automatic for a LangGraph
+    app, so those runs did reach LangSmith -- they simply arrived as one of two
+    graph names with no way to tell `draft` from `chat`, the UI from the CLI,
+    or an `--approve` run from a plain one. Free traces, unfilterable.
+
+    **`run_name`, `tags`, and `metadata` are top-level keys, not `configurable`
+    ones.** Nested under `configurable` they are accepted, carried as graph
+    configuration, and ignored by the tracer: the run keeps the compiled
+    graph's name, the filters stay empty, and nothing raises. `thread_id` sits
+    where it does for the opposite reason -- the checkpointer reads it from
+    `configurable` and nowhere else -- so the two halves of this dict look
+    alike and are not, which is exactly the mistake worth centralising.
+
+    The split is by shape. `tags` are flat strings, which is what the LangSmith
+    UI and `langsmith trace list --tags` filter on, so they carry the kind of
+    run and the flags it was made under. `metadata` carries identifiers, which
+    are values to read rather than facets to filter by: the ids, the funder,
+    the focus.
+
+    `ref` is what the human typed; `thread_id` is what the checkpoint uses.
+    They differ on purpose -- a scan runs under a namespaced id (invariant 12)
+    -- so naming the run after `thread_id` would read `discover:discover:x`.
+    That those two words are the same word is a coincidence of
+    `discovery_thread_id` spelling its prefix with the verb this function takes
+    as `command`; it makes `run_name` and `thread_id` identical strings for a
+    scan today, and would stop the moment either is renamed. Callers pass both
+    rather than have this re-derive one from the other, because re-deriving
+    means owning a second copy of the prefix rule.
+
+    A resumed segment and a follow-up turn reuse their thread's config, so both
+    land under the run name that opened the thread. `cli._chat` and the UI's
+    follow-up box behave alike there, which is the honest reading: those are
+    turns in one conversation, not separate runs.
+    """
+    return {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": recursion_limit,
+        "run_name": f"{command}:{ref}",
+        "tags": [
+            frontend,
+            command,
+            f"profile:{settings.backend_profile}",
+            f"approve:{'on' if settings.approve_final else 'off'}",
+            f"search:{'on' if settings.enable_search else 'off'}",
+        ],
+        "metadata": {
+            "frontend": frontend,
+            "command": command,
+            "thread_id": thread_id,
+            # Dropped when empty rather than sent as null: an absent `--funder`
+            # should leave the facet off the run, not add one whose value is
+            # None to every trace that did not use the flag.
+            **{
+                key: value
+                for key, value in (details or {}).items()
+                if value not in (None, "")
+            },
+        },
+    }
 
 
 def require_api_keys(*, needs_search: bool = True) -> list[str]:
