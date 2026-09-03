@@ -35,6 +35,7 @@ import argparse
 import json
 import os
 import sys
+import uuid
 from dataclasses import asdict
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -90,6 +91,26 @@ def call_config(role: str, case: ScoutCase, model_spec: str) -> RunnableConfig:
     }
 
 
+_SESSION_IDS: dict[str, uuid.UUID | None] = {}
+
+
+def session_id(client: Client, project_name: str | None) -> uuid.UUID | None:
+    """The project uuid `create_feedback` wants, which a `RunTree` lacks.
+
+    Posting feedback against a `run_id` alone is deprecated and warns on every
+    call that it "will stop working in a future release" -- but the run object
+    `trace()` yields carries only `session_name`, so the uuid has to be looked
+    up. Cached per name for the life of the process: a project does not get a
+    new id under a running eval, and four cases would otherwise be four extra
+    round trips to learn the same answer.
+    """
+    if not project_name:
+        return None
+    if project_name not in _SESSION_IDS:
+        _SESSION_IDS[project_name] = client.read_project(project_name=project_name).id
+    return _SESSION_IDS[project_name]
+
+
 def post_scores(run: RunTree | None, scores: list[Score]) -> None:
     """Attach each scorer's verdict to the case's run as LangSmith feedback.
 
@@ -114,6 +135,7 @@ def post_scores(run: RunTree | None, scores: list[Score]) -> None:
         return
     try:
         client = Client()
+        session = session_id(client, run.session_name)
         for score in scores:
             if score.skipped:
                 continue
@@ -122,6 +144,11 @@ def post_scores(run: RunTree | None, scores: list[Score]) -> None:
                 key=score.name,
                 score=float(score.passed),
                 comment=score.detail or None,
+                # Both supplied on purpose. `session_id` is what the run_id-only
+                # form was deprecated in favour of; `trace_id` lets the write be
+                # routed without a lookup on the far side.
+                trace_id=run.trace_id,
+                session_id=session,
             )
     except Exception as exc:  # noqa: BLE001 - a measurement, never a gate
         print(

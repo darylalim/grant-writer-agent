@@ -17,6 +17,8 @@ on something, and the cheapest way to be sure of that is to hand it the failure.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from langsmith.run_trees import RunTree
 
 from evals import run_scout
@@ -279,7 +281,7 @@ def _run_tree() -> RunTree:
     second attribute it never had -- and constructing the real thing costs
     nothing offline: no client, no credential, no network.
     """
-    return RunTree(name="scout:test", run_type="chain")
+    return RunTree(name="scout:test", run_type="chain", session_name="proj")
 
 
 def test_each_model_call_is_labelled_with_the_case_it_came_from():
@@ -360,7 +362,10 @@ def test_a_skipped_scorer_posts_nothing_rather_than_a_pass(monkeypatch):
     posted: list[tuple[str, float, str | None]] = []
 
     class _FakeClient:
-        def create_feedback(self, _run_id, *, key, score, comment=None):
+        def read_project(self, *, project_name):
+            return SimpleNamespace(id=f"id-of-{project_name}")
+
+        def create_feedback(self, _run_id, *, key, score, comment=None, **_kwargs):
             posted.append((key, score, comment))
 
     monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
@@ -390,6 +395,9 @@ def test_a_failure_to_post_feedback_does_not_fail_the_run(monkeypatch, capsys):
     """
 
     class _AngryClient:
+        def read_project(self, *, project_name):
+            return SimpleNamespace(id=f"id-of-{project_name}")
+
         def create_feedback(self, *_args, **_kwargs):
             raise ConnectionError("no route to host")
 
@@ -399,3 +407,58 @@ def test_a_failure_to_post_feedback_does_not_fail_the_run(monkeypatch, capsys):
     run_scout.post_scores(_run_tree(), [Score(name="parses", passed=True)])
 
     assert "feedback not recorded" in capsys.readouterr().err
+
+
+def test_feedback_names_the_project_rather_than_the_run_alone(monkeypatch):
+    """Posting against a `run_id` alone is deprecated and will stop working.
+
+    The live run warned on every one of its 26 feedback writes. A `RunTree`
+    carries only `session_name`, so the uuid has to be resolved -- and once
+    per process, not once per score: this pins the cache too, because four
+    cases times seven scorers is twenty-eight chances to turn one lookup into
+    twenty-eight.
+    """
+    lookups: list[str] = []
+    sent: list[dict] = []
+
+    class _CountingClient:
+        def read_project(self, *, project_name):
+            lookups.append(project_name)
+            return SimpleNamespace(id="proj-uuid")
+
+        def create_feedback(self, _run_id, **kwargs):
+            sent.append(kwargs)
+
+    monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
+    monkeypatch.setattr(run_scout, "Client", _CountingClient)
+    monkeypatch.setattr(run_scout, "_SESSION_IDS", {})
+
+    run = _run_tree()
+    for _ in range(3):
+        run_scout.post_scores(run, [Score(name="parses", passed=True)])
+
+    assert lookups == ["proj"], "the project uuid was looked up more than once"
+    assert [call["session_id"] for call in sent] == ["proj-uuid"] * 3
+    assert all(call["trace_id"] == run.trace_id for call in sent)
+
+
+def test_an_unresolvable_project_loses_the_feedback_not_the_run(monkeypatch):
+    """The lookup is a network call, and it happens before any score is sent.
+
+    A version that let it escape would turn a transient LangSmith outage into
+    a lost eval run -- the model output is the expensive part and is gone once
+    the process exits.
+    """
+
+    class _NoSuchProject:
+        def read_project(self, *, project_name):
+            raise ValueError(f"no project named {project_name!r}")
+
+        def create_feedback(self, *_args, **_kwargs):  # pragma: no cover
+            raise AssertionError("should not be reached")
+
+    monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
+    monkeypatch.setattr(run_scout, "Client", _NoSuchProject)
+    monkeypatch.setattr(run_scout, "_SESSION_IDS", {})
+
+    run_scout.post_scores(_run_tree(), [Score(name="parses", passed=True)])
