@@ -37,10 +37,10 @@ import os
 import sys
 import uuid
 from dataclasses import asdict
+from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langsmith import Client
 from langsmith.run_helpers import trace
 from langsmith.run_trees import RunTree
 from langsmith.utils import tracing_is_enabled
@@ -55,6 +55,9 @@ from evals.scorers import (
 from evals.scout_cases import CASES, ScoutCase
 from grant_writer.config import COMPLIANCE_MODEL, DISCOVERY_MODEL, build_model
 from grant_writer.prompts import SCOUT_PROMPT
+
+if TYPE_CHECKING:  # the client now arrives on the run; see `post_scores`
+    from langsmith import Client
 
 
 def _text(reply: object) -> str:
@@ -111,6 +114,20 @@ def session_id(client: Client, project_name: str | None) -> uuid.UUID | None:
     return _SESSION_IDS[project_name]
 
 
+def _unrecorded(run: RunTree, names: list[str], exc: Exception) -> None:
+    """Say on stderr which case's scores were lost, and which they were.
+
+    Named by `run.name`, which is already `scout:<case key>`, so the line is
+    attributable without `post_scores` having to take the case.
+    """
+    print(
+        f"  ({run.name}: feedback not recorded for "
+        f"{', '.join(repr(name) for name in names)}: "
+        f"{type(exc).__name__}: {exc})",
+        file=sys.stderr,
+    )
+
+
 def post_scores(run: RunTree | None, scores: list[Score]) -> None:
     """Attach each scorer's verdict to the case's run as LangSmith feedback.
 
@@ -133,12 +150,45 @@ def post_scores(run: RunTree | None, scores: list[Score]) -> None:
     """
     if run is None or not tracing_is_enabled():
         return
+
+    posting = [score for score in scores if not score.skipped]
+    if not posting:
+        return
+
     try:
-        client = Client()
+        # The run's own client, never a fresh one. `Client()` re-resolves
+        # endpoint and key from the environment at construction, so a per-case
+        # client can target a different workspace than the one that created the
+        # run it attaches to -- and the disagreement is silent, the feedback
+        # simply absent from the trace someone opens. A lazy property, so it is
+        # inside the try for the same reason everything else is.
+        client = run.client
+    except Exception as exc:  # noqa: BLE001 - a measurement, never a gate
+        _unrecorded(run, [score.name for score in posting], exc)
+        return
+
+    try:
         session = session_id(client, run.session_name)
-        for score in scores:
-            if score.skipped:
-                continue
+    except Exception as exc:  # noqa: BLE001 - a measurement, never a gate
+        # Outside the write loop and survivable on its own: omitting the label
+        # is deprecated, not broken, so a lookup that fails costs the label and
+        # not the scores. Deliberately not worded "feedback not recorded" --
+        # nothing was lost, and a reader grepping stderr for dropped scores
+        # must not land here.
+        session = None
+        print(
+            f"  ({run.name}: project id unresolved, posting without it: "
+            f"{type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
+
+    for score in posting:
+        # One try per score. Around the loop, a transient failure on score 2 of
+        # 7 dropped the remaining 5 -- and a run reporting four scores where
+        # seven were computed reads exactly like a run of four scorers, the
+        # collapse the skipped-scorer rule above exists to prevent, arriving by
+        # another route.
+        try:
             client.create_feedback(
                 run.id,
                 key=score.name,
@@ -150,11 +200,8 @@ def post_scores(run: RunTree | None, scores: list[Score]) -> None:
                 trace_id=run.trace_id,
                 session_id=session,
             )
-    except Exception as exc:  # noqa: BLE001 - a measurement, never a gate
-        print(
-            f"  (feedback not recorded: {type(exc).__name__}: {exc})",
-            file=sys.stderr,
-        )
+        except Exception as exc:  # noqa: BLE001 - a measurement, never a gate
+            _unrecorded(run, [score.name], exc)
 
 
 def run_case(case: ScoutCase, *, judge: bool) -> dict:

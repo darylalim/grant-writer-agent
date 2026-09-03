@@ -2438,3 +2438,189 @@ def test_a_recovered_thread_resumes_under_a_brief_s_name(monkeypatch):
         "a recovered thread would resume under the name of a follow-up it "
         "may never have sent"
     )
+
+
+def _text_input(app, label: str):
+    """Select a text input by its label, for the reason `_button` exists.
+
+    `app.text_input[0]` addresses whichever box the script emits first, which
+    is a fact about page layout. Not every input here carries a `key`, so the
+    label is the only stable handle for those.
+    """
+    return next(widget for widget in app.text_input if widget.label == label)
+
+
+def _cli_detail_keys(command: str) -> set[str]:
+    """The `details` keys `cli.py` passes for one command, read from its AST.
+
+    Read out of the source rather than restated, because a restatement drifts
+    from the thing it describes exactly as the two frontends did -- and the
+    finding here was that one of them sent a facet the other did not.
+    """
+    tree = ast.parse(
+        (PROJECT_ROOT / "src" / "grant_writer" / "cli.py").read_text(encoding="utf-8")
+    )
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "id", None) != "trace_config":
+            continue
+        named = {kw.arg: kw.value for kw in node.keywords}
+        spelled = named.get("command")
+        if not isinstance(spelled, ast.Constant) or spelled.value != command:
+            continue
+        details = named.get("details")
+        if not isinstance(details, ast.Dict):
+            return set()
+        # Narrowed to str: `ast.Constant.value` is a wide union, and narrowing
+        # the node does not narrow its value.
+        return {
+            key.value
+            for key in details.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+    return set()
+
+
+def test_the_ui_records_the_same_facets_the_cli_does(monkeypatch):
+    """A facet the CLI sends and the UI does not reads as absent, not missing.
+
+    `--metadata funder=NSF` returning no UI runs looks like "no UI run targeted
+    NSF" rather than "the UI never wrote it down". The UI collects a funder on
+    the same form, so the gap was in the passing, not in the input.
+
+    Asserted against `cli.py`'s own AST so the two cannot drift apart again in
+    the direction that produced this: one frontend gaining a facet quietly.
+    """
+    seen: list[dict] = []
+
+    class _RecordingAgent:
+        get_state = staticmethod(_unparked)
+
+        def stream(self, _payload, config, **_kwargs):
+            seen.append(config)
+            return iter(())
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _RecordingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-facets").run()
+    _text_input(app, "Funder").set_value("NSF").run()
+    _button(app, "Draft proposal").click().run()
+
+    assert not app.exception
+    assert seen[0]["metadata"]["funder"] == "NSF"
+    assert seen[0]["metadata"]["app_id"] == "zz-pytest-facets"
+    # `rubric` is absent rather than null: no file was uploaded, and
+    # `trace_config` drops an empty detail instead of adding a blank facet.
+    assert "rubric" not in seen[0]["metadata"]
+    # Everything the CLI would have sent for a draft is either here or
+    # deliberately empty -- the point being that none of it is unreachable.
+    assert _cli_detail_keys("draft") == {"app_id", "funder", "rubric"}
+    assert {"app_id", "funder"} <= set(seen[0]["metadata"])
+
+
+def test_a_recovered_draft_is_not_labelled_with_the_last_scans_facets(monkeypatch):
+    """The stash describes the run this session last *started*.
+
+    A recovery resumes a thread this session may never have started, and a scan
+    overwrites the stash without touching `active_app_id` -- so guarding the
+    clear on the id alone lets a scan's focus and agencies ride onto a resumed
+    draft, labelling it with the facets of the other graph. Cleared
+    unconditionally on that path for exactly this reason.
+    """
+    parked = {"yes": False}
+
+    class _Switchable:
+        """Unparked for the opening draft, parked for the recovery submit."""
+
+        def get_state(self, _config):
+            if not parked["yes"]:
+                return SimpleNamespace(tasks=[])
+            requests = [
+                {
+                    "name": "write_file",
+                    "args": {"file_path": "/applications/zz-pytest-leak/final/p.md"},
+                }
+            ]
+            return SimpleNamespace(
+                tasks=[
+                    SimpleNamespace(
+                        interrupts=[
+                            SimpleNamespace(value={"action_requests": requests})
+                        ]
+                    )
+                ]
+            )
+
+        def stream(self, *_args, **_kwargs):
+            return iter(())
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _Switchable()
+    )
+    monkeypatch.setattr(
+        "grant_writer.agent.build_discovery_agent",
+        lambda *_a, **_k: SimpleNamespace(
+            get_state=_unparked, stream=lambda *_a, **_k: iter(())
+        ),
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+
+    # The draft has to run FIRST and on the same id, or the id guard above the
+    # clear fires anyway and the case passes without exercising anything.
+    app.text_input(key="app_id_input").set_value("zz-pytest-leak").run()
+    _text_input(app, "Funder").set_value("NSF").run()
+    _button(app, "Draft proposal").click().run()
+    assert app.session_state["active_details"] == {"funder": "NSF", "rubric": ""}
+
+    app.text_input(key="scan_id_input").set_value("zz-pytest-leak-scan")
+    _button(app, "Find opportunities").click().run()
+    assert "focus" in app.session_state["active_details"], "sanity: the scan stashed"
+
+    # Same application id as the draft, so `app_id != active_app_id` is false
+    # and only an unconditional clear saves the resume from the scan's facets.
+    parked["yes"] = True
+    app.text_input(key="app_id_input").set_value("zz-pytest-leak").run()
+    _button(app, "Draft proposal").click().run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "awaiting"
+    assert app.session_state["active_details"] == {}, (
+        "the resume would carry the previous scan's focus and agencies"
+    )
+
+
+def test_ui_trace_tags_follow_the_sidebar_and_not_the_defaults(monkeypatch):
+    """The tags must say what the operator selected.
+
+    `test_the_ui_labels_its_runs_as_the_ui` runs at the sidebar's defaults, so
+    it passes just as readily against a hardcoded `Settings()` as against the
+    settings the graph was built with. Flipping search off makes the two
+    differ, which is what gives the shared `settings` object something to be
+    right about.
+    """
+    seen: list[dict] = []
+
+    class _RecordingAgent:
+        get_state = staticmethod(_unparked)
+
+        def stream(self, _payload, config, **_kwargs):
+            seen.append(config)
+            return iter(())
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _RecordingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.toggle(key="search_toggle").set_value(False).run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-sidebar").run()
+    _button(app, "Draft proposal").click().run()
+
+    assert not app.exception
+    assert "search:off" in seen[0]["tags"]
+    assert "search:on" not in seen[0]["tags"]

@@ -359,15 +359,22 @@ def _empty_session_id_cache():
     run_scout._SESSION_IDS.clear()
 
 
-def _run_tree() -> RunTree:
+def _run_tree(client=None) -> RunTree:
     """A real `RunTree`, which is what `trace()` hands `post_scores`.
 
     A `SimpleNamespace` with an `id` would satisfy the code and read as a
     lighter fixture, but it also satisfies a `post_scores` that later grows a
     second attribute it never had -- and constructing the real thing costs
     nothing offline: no client, no credential, no network.
+
+    `client` rides on the run rather than being monkeypatched onto the module,
+    because that is now how `post_scores` gets one: it uses `run.client`, so a
+    stand-in belongs on the run for the same reason the real one does.
     """
-    return RunTree(name="scout:test", run_type="chain", session_name="proj")
+    run = RunTree(name="scout:test", run_type="chain", session_name="proj")
+    if client is not None:
+        run.ls_client = client
+    return run
 
 
 def test_each_model_call_is_labelled_with_the_case_it_came_from():
@@ -417,16 +424,13 @@ def test_feedback_is_gated_on_the_switch_the_suite_forces_off(monkeypatch):
 
     assert not tracing_is_enabled(), "conftest should have forced this off"
 
-    posted: list[str] = []
+    del monkeypatch  # the gate must hold with nothing patched out
+    client = _client()
 
-    class _ShouldNotBeUsed:
-        def create_feedback(self, *_args, **kwargs):
-            posted.append(kwargs["key"])
+    run_scout.post_scores(_run_tree(client), [Score(name="parses", passed=True)])
 
-    monkeypatch.setattr(run_scout, "Client", _ShouldNotBeUsed)
-    run_scout.post_scores(_run_tree(), [Score(name="parses", passed=True)])
-
-    assert posted == [], "posted feedback from a suite that must stay offline"
+    assert client.calls == [], "posted feedback from a suite that must stay offline"
+    assert client.seen == [], "resolved a project id from a suite that is offline"
 
 
 def test_posting_scores_without_a_run_is_a_no_op():
@@ -436,6 +440,53 @@ def test_posting_scores_without_a_run_is_a_no_op():
     )
 
 
+def _client(**behaviour):
+    """A stand-in LangSmith client that records what it was asked to write.
+
+    Built here rather than per case because the shape is the thing these pin:
+    `post_scores` calls `read_project` once and `create_feedback` per score, and
+    a fake that quietly accepts a different shape is how a rewrite passes while
+    posting nothing.
+    """
+    posted: list[dict] = []
+    lookups: list[str] = []
+
+    class _Client:
+        calls = posted
+        seen = lookups
+
+        def read_project(self, *, project_name):
+            lookups.append(project_name)
+            if "read_project" in behaviour:
+                raise behaviour["read_project"]
+            return SimpleNamespace(id="proj-uuid")
+
+        def create_feedback(self, _run_id, **kwargs):
+            if kwargs["key"] in behaviour.get("fail_keys", ()):
+                raise ConnectionError("no route to host")
+            posted.append(kwargs)
+
+    return _Client()
+
+
+def test_feedback_goes_through_the_runs_own_client(monkeypatch):
+    """`Client()` re-resolves endpoint and key from the environment.
+
+    So a client built per case can address a different workspace than the one
+    that created the run it is attaching to, and the disagreement is silent:
+    the feedback is simply absent from the trace someone opens. `run.client` is
+    the client the run was made with. Pinned by handing the run a stand-in and
+    asserting the write went there -- a `post_scores` that built its own would
+    post nothing here and fail loudly.
+    """
+    monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
+    client = _client()
+
+    run_scout.post_scores(_run_tree(client), [Score(name="parses", passed=True)])
+
+    assert [call["key"] for call in client.calls] == ["parses"]
+
+
 def test_a_skipped_scorer_posts_nothing_rather_than_a_pass(monkeypatch):
     """ "Not checked" and "checked and fine" are opposite readings of a number.
 
@@ -443,22 +494,13 @@ def test_a_skipped_scorer_posts_nothing_rather_than_a_pass(monkeypatch):
     dimension -- the same distinction `fit_percent` keeps for `None` under
     invariant 14. Posted as `1.0`, a run that asserted almost nothing averages
     out looking like one that asserted everything and was right, and the
-    quietest failure of an eval is one that reports health it never measured.
+    quietest failure of an eval is one reporting health it never measured.
     """
-    posted: list[tuple[str, float, str | None]] = []
-
-    class _FakeClient:
-        def read_project(self, *, project_name):
-            return SimpleNamespace(id=f"id-of-{project_name}")
-
-        def create_feedback(self, _run_id, *, key, score, comment=None, **_kwargs):
-            posted.append((key, score, comment))
-
     monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
-    monkeypatch.setattr(run_scout, "Client", _FakeClient)
+    client = _client()
 
     run_scout.post_scores(
-        _run_tree(),
+        _run_tree(client),
         [
             Score(name="parses", passed=True, detail="fit 72%"),
             Score(
@@ -468,85 +510,75 @@ def test_a_skipped_scorer_posts_nothing_rather_than_a_pass(monkeypatch):
         ],
     )
 
-    assert [key for key, _score, _comment in posted] == ["parses", "total"]
-    assert [score for _key, score, _comment in posted] == [1.0, 0.0]
+    assert [call["key"] for call in client.calls] == ["parses", "total"]
+    assert [call["score"] for call in client.calls] == [1.0, 0.0]
 
 
-def test_a_failure_to_post_feedback_does_not_fail_the_run(monkeypatch, capsys):
-    """The eval is a measurement, not a gate.
+def test_a_failure_on_one_score_does_not_drop_the_rest(monkeypatch, capsys):
+    """One `try` around the loop lost every score after the first failure.
 
-    A dropped network call while posting must not lose the scores already
-    computed, nor the model output they were computed from -- both cost real
-    money, and the second is unrecoverable once the process exits.
+    A transient 502 on score two of seven left LangSmith holding a case run
+    with one feedback key -- which reads as "one dimension was checked", the
+    same collapse the skipped rule above exists to prevent, reached by another
+    route. The stderr line has to name the case and the key, because it is
+    printed before `_render` emits any case heading.
     """
-
-    lookups: list[str] = []
-
-    class _AngryClient:
-        def read_project(self, *, project_name):
-            lookups.append(project_name)
-            return SimpleNamespace(id=f"id-of-{project_name}")
-
-        def create_feedback(self, *_args, **_kwargs):
-            raise ConnectionError("no route to host")
-
     monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
-    monkeypatch.setattr(run_scout, "Client", _AngryClient)
+    client = _client(fail_keys=("citations",))
 
-    run_scout.post_scores(_run_tree(), [Score(name="parses", passed=True)])
+    run_scout.post_scores(
+        _run_tree(client),
+        [
+            Score(name="parses", passed=True),
+            Score(name="citations", passed=True),
+            Score(name="grounded", passed=False),
+        ],
+    )
 
-    assert "feedback not recorded" in capsys.readouterr().err
-    assert lookups == ["proj"], "a cached project id leaked in from another case"
+    assert [call["key"] for call in client.calls] == ["parses", "grounded"]
+    err = capsys.readouterr().err
+    assert "scout:test" in err and "'citations'" in err
+    assert "feedback not recorded" in err
+
+
+def test_an_unresolvable_project_costs_the_label_not_the_scores(monkeypatch, capsys):
+    """Omitting `session_id` is deprecated, not broken.
+
+    The lookup ran inside the same `try` as the writes, so a LANGSMITH_PROJECT
+    typo or a key without project-read scope cost the case every score it had
+    computed -- to avoid a deprecation. The scores are the expensive half and
+    are gone once the process exits, so the label is what gives way.
+
+    The stderr line deliberately does not say "feedback not recorded": nothing
+    was lost, and a reader grepping a run's stderr for dropped scores must not
+    land on it.
+    """
+    monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
+    client = _client(read_project=ValueError("no project named 'proj'"))
+
+    run_scout.post_scores(_run_tree(client), [Score(name="parses", passed=True)])
+
+    assert [call["key"] for call in client.calls] == ["parses"]
+    assert client.calls[0]["session_id"] is None
+    err = capsys.readouterr().err
+    assert "project id unresolved" in err
+    assert "feedback not recorded" not in err
 
 
 def test_feedback_names_the_project_rather_than_the_run_alone(monkeypatch):
     """Posting against a `run_id` alone is deprecated and will stop working.
 
-    The live run warned on every one of its 26 feedback writes. A `RunTree`
-    carries only `session_name`, so the uuid has to be resolved -- and once
-    per process, not once per score: this pins the cache too, because four
-    cases times seven scorers is twenty-eight chances to turn one lookup into
-    twenty-eight.
+    A `RunTree` carries only `session_name`, so the uuid has to be resolved --
+    and once per process, not once per score: four cases times seven scorers is
+    twenty-eight chances to turn one lookup into twenty-eight.
     """
-    lookups: list[str] = []
-    sent: list[dict] = []
-
-    class _CountingClient:
-        def read_project(self, *, project_name):
-            lookups.append(project_name)
-            return SimpleNamespace(id="proj-uuid")
-
-        def create_feedback(self, _run_id, **kwargs):
-            sent.append(kwargs)
-
     monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
-    monkeypatch.setattr(run_scout, "Client", _CountingClient)
+    client = _client()
 
-    run = _run_tree()
+    run = _run_tree(client)
     for _ in range(3):
         run_scout.post_scores(run, [Score(name="parses", passed=True)])
 
-    assert lookups == ["proj"], "the project uuid was looked up more than once"
-    assert [call["session_id"] for call in sent] == ["proj-uuid"] * 3
-    assert all(call["trace_id"] == run.trace_id for call in sent)
-
-
-def test_an_unresolvable_project_loses_the_feedback_not_the_run(monkeypatch):
-    """The lookup is a network call, and it happens before any score is sent.
-
-    A version that let it escape would turn a transient LangSmith outage into
-    a lost eval run -- the model output is the expensive part and is gone once
-    the process exits.
-    """
-
-    class _NoSuchProject:
-        def read_project(self, *, project_name):
-            raise ValueError(f"no project named {project_name!r}")
-
-        def create_feedback(self, *_args, **_kwargs):  # pragma: no cover
-            raise AssertionError("should not be reached")
-
-    monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
-    monkeypatch.setattr(run_scout, "Client", _NoSuchProject)
-
-    run_scout.post_scores(_run_tree(), [Score(name="parses", passed=True)])
+    assert client.seen == ["proj"], "the project uuid was looked up more than once"
+    assert [call["session_id"] for call in client.calls] == ["proj-uuid"] * 3
+    assert all(call["trace_id"] == run.trace_id for call in client.calls)

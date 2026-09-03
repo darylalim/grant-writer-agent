@@ -170,6 +170,28 @@ st.session_state.setdefault("active_kind", DRAFT)
 # that brief. Set beside every payload this app queues, except a resume --
 # see `resume_with`.
 st.session_state.setdefault("active_command", "draft")
+# The metadata facets describing the run on that thread: funder and rubric
+# for a draft, focus and agencies for a scan. An `active_*` key, assigned
+# only by the submit handlers, for the reason `active_app_id` is one
+# (invariants 10 and 11) -- the run block builds its trace config while the
+# form widgets are live, so reading them there would label a turn with
+# values nobody submitted, and a follow-up or a post-reload Reject starts a
+# turn with no submit behind it at all. Defaulted here because those paths
+# reach the run block regardless: without it they raise AttributeError
+# inside the run block's `except Exception`, landing on FAILED with the
+# interrupt still committed -- invariant 11's own failure.
+st.session_state.setdefault("active_details", {})
+# The metadata facets describing the run on that thread: funder and rubric
+# for a draft, focus and agencies for a scan. An `active_*` key, assigned
+# only by the submit handlers, for the reason `active_app_id` is one
+# (invariants 10 and 11) -- the run block builds its trace config while the
+# form widgets are live, so reading them there would label a turn with
+# values nobody submitted, and a follow-up or a post-reload Reject starts a
+# turn with no submit behind it at all. Defaulted here because those paths
+# reach the run block regardless: without it they raise AttributeError
+# inside the run block's `except Exception`, landing on FAILED with the
+# interrupt still committed -- invariant 11's own failure.
+st.session_state.setdefault("active_details", {})
 st.session_state.setdefault("error", "")
 # Bumped on every resume, and mixed into the approval widgets' keys so each
 # interrupt gets its own. See `resume_with`.
@@ -1158,6 +1180,14 @@ if discover_submitted:
         st.session_state.active_scan_id = scan_id
         st.session_state.active_kind = DISCOVER
         st.session_state.active_command = "discover"
+        st.session_state.active_details = {
+            "focus": focus.strip(),
+            "agencies": agencies.strip(),
+        }
+        st.session_state.active_details = {
+            "focus": focus.strip(),
+            "agencies": agencies.strip(),
+        }
         st.session_state.payload = {
             "messages": [
                 {
@@ -1233,6 +1263,14 @@ if submitted:
             # silent because `browse_id` and `active_app_id` now agree.
             if app_id != st.session_state.active_app_id:
                 st.session_state.activity = []
+            # Unconditional, where the feed above is not: the stash describes
+            # the run this session last *started*, and a recovery resumes one
+            # it may never have started at all. A scan overwrites the stash
+            # without touching `active_app_id`, so the ids can match while the
+            # stash holds another graph's facets -- a resumed draft labelled
+            # with a scan's focus and agencies. No form was read on this path,
+            # so there is nothing to carry.
+            st.session_state.active_details = {}
             st.session_state.active_app_id = app_id
             # The interrupt being recovered belongs to a drafting thread -- it
             # is a `final/` write -- so the panel must read that thread and not
@@ -1290,6 +1328,15 @@ if submitted:
         st.session_state.active_app_id = app_id
         st.session_state.active_kind = DRAFT
         st.session_state.active_command = "draft"
+        # The rubric's name, never a path: a trace is shared and a path under
+        # $HOME carries the operator's username (see `cli._draft`). The upload
+        # name is client-supplied, so take its last component only. Empty
+        # values are dropped by `trace_config`, so a field left blank leaves
+        # the facet off the run rather than adding a null one.
+        st.session_state.active_details = {
+            "funder": funder.strip(),
+            "rubric": Path(rubric.name).name if rubric is not None else "",
+        }
         st.session_state.payload = payload
         st.session_state.phase = RUNNING
         # Rerun before streaming rather than falling through to the run block.
@@ -1469,25 +1516,31 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
                 else get_agent
             )
             agent = builder(profile, approve, search)
-            # Rebuilt from the same three flags `get_agent` is keyed on, so
-            # the tags describe the graph that actually ran rather than
-            # whatever the sidebar shows by the time anyone reads the trace.
+            # The module-level `settings`, not a second call: built from the
+            # same three flags `get_agent` is keyed on, in this same pass --
+            # the sidebar assigns those three exactly once, above it, and
+            # nothing rebinds them -- so the tags still describe the graph
+            # that actually ran rather than whatever the sidebar shows by the
+            # time anyone reads the trace. Rebuilding it here was a second
+            # copy of that derivation, and a fourth flag reaching one call
+            # site and not the other would label the run under settings no
+            # graph was ever built with.
             # `active_discovering` and `active_ref` are this pass's own
             # values, the same pair the banners below read -- a third copy
             # of that expression is how the run and the page start
             # disagreeing about which id is on screen.
             config = trace_config(
-                persistent_settings(
-                    backend_profile=profile,
-                    approve_final=approve,
-                    enable_search=search,
-                ),
+                settings,
                 command=st.session_state.active_command,
                 frontend="ui",
                 ref=active_ref,
                 thread_id=_active_thread_id(),
                 recursion_limit=int(recursion_limit),
-                details={("scan_id" if active_discovering else "app_id"): active_ref},
+                details={
+                    ("scan_id" if active_discovering else "app_id"): active_ref,
+                    # The id first, so a stale stash cannot shadow it.
+                    **st.session_state.active_details,
+                },
             )
             interrupted = stream_turn(agent, turn_payload, config)
         except Exception as exc:  # noqa: BLE001 - surface anything to the user
