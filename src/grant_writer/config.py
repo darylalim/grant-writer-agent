@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sized
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -496,11 +496,20 @@ def trace_config(
             "thread_id": thread_id,
             # Dropped when empty rather than sent as null: an absent `--funder`
             # should leave the facet off the run, not add one whose value is
-            # None to every trace that did not use the flag.
+            # None to every trace that did not use the flag. `""`, `[]`, `{}`
+            # and `()` are that same absence, and the earlier
+            # `value not in (None, "")` could not see the containers --
+            # equality against two scalars misses an empty list, which then
+            # arrives as an empty facet on exactly the runs this exists to
+            # keep clean. Emptiness is asked of `Sized` rather than of the
+            # value itself, because `if value` would drop `0` and `False`
+            # with it -- a falsy number or flag is an answer about the run,
+            # not a missing one.
             **{
                 key: value
                 for key, value in (details or {}).items()
-                if value not in (None, "")
+                if value is not None
+                and (not isinstance(value, Sized) or len(value) > 0)
             },
         },
     }

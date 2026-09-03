@@ -2224,12 +2224,39 @@ def test_details_that_are_empty_are_dropped_rather_than_sent_as_null():
     """An unused `--funder` should leave the facet off the run, not add one
     whose value is None to every trace that did not pass the flag."""
     config = _draft_config(
-        details={"app_id": "alpha", "funder": None, "rubric": "", "notes": "keep me"}
+        details={
+            "app_id": "alpha",
+            "funder": None,
+            "rubric": "",
+            "agencies": [],
+            "extras": {},
+            "notes": "keep me",
+        }
     )
     assert "funder" not in config["metadata"]
     assert "rubric" not in config["metadata"]
+    # Containers too. The earlier `value not in (None, "")` compared against
+    # two scalars, so an empty list arrived as an empty facet on exactly the
+    # runs this exists to keep clean.
+    assert "agencies" not in config["metadata"]
+    assert "extras" not in config["metadata"]
     assert config["metadata"]["notes"] == "keep me"
     assert config["metadata"]["app_id"] == "alpha"
+
+
+def test_a_falsy_answer_is_still_an_answer():
+    """The fix must not become `if value`.
+
+    `0` and `False` are answers about the run, not missing ones -- a rubric
+    iteration count of zero or an explicit `False` says something, and
+    dropping them would put this filter back in the class of bug invariant 14
+    describes, where "we could not read this" and "this is the value" collapse
+    into each other.
+    """
+    config = _draft_config(details={"iterations": 0, "graded": False})
+
+    assert config["metadata"]["iterations"] == 0
+    assert config["metadata"]["graded"] is False
 
 
 def test_a_scan_run_is_named_by_the_id_the_human_typed():
@@ -2255,20 +2282,85 @@ def test_a_scan_run_is_named_by_the_id_the_human_typed():
     assert config["metadata"]["scan_id"] == "rural-health"
 
 
-def _dicts_keyed_recursion_limit(path: Path) -> list[int]:
-    """Line numbers of dict literals in `path` carrying a recursion_limit key.
+# Keys that mean a run rather than a checkpoint read. Deliberately not `tags`
+# or `metadata`: both are ordinary words a dict elsewhere in the tree could
+# carry innocently, and neither starts a turn on its own -- a config with no
+# `configurable.thread_id` never reaches a checkpointed graph at all.
+_RUN_CONFIG_KEYS = frozenset({"recursion_limit", "run_name"})
 
-    An inline turn config is what this looks like; a `trace_config(...)` call
-    passes it as a keyword instead, so the AST tells the two apart where a
-    grep for the word could not.
+
+def _string_keys(node: ast.Dict) -> set[str | None]:
+    """The literal string keys of a dict node; None for anything else.
+
+    `**spread` and computed keys both become None, which is what keeps the
+    exemption below honest: an unreadable key cannot be mistaken for the bare
+    checkpoint-read shape.
+    """
+    return {
+        key.value
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        else None
+        for key in node.keys
+    }
+
+
+def _inline_turn_configs(path: Path) -> dict[int, str]:
+    """Dict literals in `path` that look like a turn config built by hand.
+
+    Two rules, and the first is what the earlier version of this check was
+    missing. A dict carrying `configurable` is flagged unless it is *exactly*
+    `{"configurable": {"thread_id": ...}}` -- the checkpoint-read shape, which
+    starts no run and is used deliberately twice in `streamlit_app.py`
+    (`parked_state` and the approval panel). Anything richer is a turn config
+    however it is spelled, including one that omits `recursion_limit` and lets
+    LangGraph default it, which the old key-only rule waved through while its
+    message claimed otherwise. Separately, `recursion_limit` or `run_name`
+    anywhere in a dict literal is a run config even with no `configurable`
+    beside it.
+
+    What this cannot see: `dict(configurable=..., run_name=...)` is a call and
+    not an `ast.Dict`, and a config assembled key by key is caught only if a
+    run key survives as a literal. Those are evasions rather than accidents,
+    and the accident guarded against is copying a config into a second
+    frontend.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    return [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Dict)
-        for key in node.keys
-        if isinstance(key, ast.Constant) and key.value == "recursion_limit"
+    found: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = _string_keys(node)
+        named = sorted(key for key in keys if key in _RUN_CONFIG_KEYS)
+        if named:
+            found.setdefault(node.lineno, f"carries {', '.join(named)}")
+        elif "configurable" in keys:
+            inner = next(
+                (
+                    value
+                    for key, value in zip(node.keys, node.values, strict=True)
+                    if isinstance(key, ast.Constant) and key.value == "configurable"
+                ),
+                None,
+            )
+            if keys != {"configurable"} or not (
+                isinstance(inner, ast.Dict) and _string_keys(inner) == {"thread_id"}
+            ):
+                found.setdefault(
+                    node.lineno, "sets `configurable` alongside more than a thread_id"
+                )
+    return found
+
+
+def _turn_config_callers() -> list[Path]:
+    """Every module that could build a turn config, `config.py` excepted.
+
+    Globbed rather than listed, because a hard-coded pair of paths is exactly
+    how a third caller goes uncovered. `config.py` is excluded because
+    `trace_config` is the one place allowed to spell this dict out.
+    """
+    package = sorted((PROJECT_ROOT / "src" / "grant_writer").glob("*.py"))
+    return [path for path in package if path.name != "config.py"] + [
+        PROJECT_ROOT / "streamlit_app.py"
     ]
 
 
@@ -2277,16 +2369,27 @@ def test_neither_frontend_builds_a_turn_config_inline():
 
     The gap was in both, and a helper reached for by only the file whose bug
     was noticed leaves the other emitting unlabelled runs -- with the helper
-    sitting there looking like the change had been made. Checkpoint *reads*
-    (`parked_state`, the approval panel) are untouched by design: they pass
-    only `thread_id`, create no run, and so carry no `recursion_limit`.
+    sitting there looking like the change had been made.
+
+    Exactly what is checked, since an overclaiming message is its own bug: in
+    every module under `src/grant_writer/` except `config.py`, and in
+    `streamlit_app.py`, no dict literal carries `recursion_limit` or
+    `run_name`, and none carries `configurable` unless it is exactly
+    `{"configurable": {"thread_id": ...}}`. That last shape is the checkpoint
+    *read* `parked_state` and the approval panel do on purpose: it creates no
+    run, so it needs no label.
     """
-    for name in ("src/grant_writer/cli.py", "streamlit_app.py"):
-        path = PROJECT_ROOT / name
-        assert not _dicts_keyed_recursion_limit(path), (
-            f"{name} builds a turn config as a dict literal at line(s) "
-            f"{_dicts_keyed_recursion_limit(path)}. Route it through "
-            "config.trace_config so both frontends label runs the same way."
+    scanned = _turn_config_callers()
+    # A glob, so a moved or renamed module fails loudly rather than quietly
+    # shrinking the scan to nothing.
+    assert {"cli.py", "streamlit_app.py"} <= {path.name for path in scanned}
+    for path in scanned:
+        found = _inline_turn_configs(path)
+        assert not found, (
+            f"{path.name} builds a turn config by hand at "
+            + "; ".join(f"line {line} ({why})" for line, why in sorted(found.items()))
+            + ". Route it through config.trace_config so both frontends label "
+            "runs the same way."
         )
 
 

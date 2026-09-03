@@ -21,17 +21,36 @@ permissions:
   contents: read
 
 # tests/conftest.py already forces these off; this covers the non-pytest steps
-# too. All four spellings, because langsmith reads TRACING_V2 before TRACING
-# and searches the LANGSMITH_ then LANGCHAIN_ namespace for each -- setting
-# one leaves three live. See invariant 19. No secrets are configured on
-# purpose -- conftest supplies a dummy ANTHROPIC_API_KEY and blanks
-# TAVILY_API_KEY, so a test that needs a real credential is a bug in the
-# suite, and CI is where that should surface.
+# too -- `grant-writer --help`, `uv build`, and whatever gets added later. It
+# has to state the *whole* rule and not just the half about switches, because
+# "the guarantee does not depend on pytest" is only true while this block says
+# everything conftest says. See invariant 19.
+#
+# All four spellings of the switch, because langsmith reads TRACING_V2 before
+# TRACING and searches the LANGSMITH_ then LANGCHAIN_ namespace for each --
+# setting one leaves three live. The value must be "false" and never "":
+# `get_env_var` skips a value that strips to nothing and resumes the namespace
+# fallback, so an empty switch delegates the decision rather than settling it.
+#
+# The last three are empty for the opposite reason -- for them empty and
+# absent are the same thing to every consumer, and no value of a credential
+# can turn tracing on, so the fallback runs out of names instead of finding a
+# "true". That is the half which does not depend on the four names above
+# being complete. LANGCHAIN_HANDLER is emptied because forcing v2 off is what
+# arms the retired v1 tracer: `callbacks/manager.py` raises RuntimeError when
+# LANGCHAIN_TRACING or LANGCHAIN_HANDLER reads as set while v2 is not.
+#
+# No real secrets are configured on purpose -- conftest supplies a dummy
+# ANTHROPIC_API_KEY and blanks TAVILY_API_KEY, so a test that needs a real
+# credential is a bug in the suite, and CI is where that should surface.
 env:
   LANGSMITH_TRACING_V2: "false"
   LANGCHAIN_TRACING_V2: "false"
   LANGSMITH_TRACING: "false"
   LANGCHAIN_TRACING: "false"
+  LANGCHAIN_HANDLER: ""
+  LANGSMITH_API_KEY: ""
+  LANGCHAIN_API_KEY: ""
 
 jobs:
   test:
