@@ -228,15 +228,25 @@ PROGRAMMATIC = (
 JUDGE_PROMPT = """\
 You are checking one factual-grounding rule, and nothing else.
 
-Below are three documents: an OPPORTUNITY, an ORGANIZATION PROFILE, and an
-ASSESSMENT written about them by another model. The assessment's author was
-told never to invent facts, and to write `[NEEDS INPUT: <question>]` wherever
-the profile does not answer something.
+Below are four documents: a DELEGATION BRIEF, an OPPORTUNITY, an ORGANIZATION
+PROFILE, and an ASSESSMENT.
+
+The assessment was written about the opportunity and the profile by another
+model, working from the brief. Its author was told never to invent facts, and
+to write `[NEEDS INPUT: <question>]` wherever the profile does not answer
+something.
+
+**The brief is an input, not a source.** It is the instruction the author was
+working from, and it may carry claims -- an award range, a funder priority --
+that appear in neither file, because whoever wrote it could search the web and
+the author could not. Such a claim is not a grounded fact. The author may name
+one in order to set it aside; the author may not rely on it. So judge a
+statement traceable only to the brief by whether the assessment *leans* on it.
 
 Find any statement in the ASSESSMENT that asserts a specific fact about the
 organization or the opportunity -- a number, a date, a credential, a named
-program, a prior award, an eligibility status -- that is not supported by
-either document.
+program, a prior award, an eligibility status -- that is not supported by the
+OPPORTUNITY or the ORGANIZATION PROFILE.
 
 Not a violation:
 - A `[NEEDS INPUT: ...]` marker. That is the rule being followed.
@@ -251,13 +261,25 @@ Not a violation:
 Reply with `PASS` on the first line if you find nothing, or `FAIL` on the first
 line if you do. On the following lines, quote each unsupported statement and say
 which document should have contained it. Be conservative: if a statement is a
-reasonable paraphrase of something in either document, it is a PASS.
+reasonable paraphrase of something in the opportunity or the profile, it is a
+PASS.
 """
 
 
 def build_judge_payload(case: ScoutCase, output: str) -> str:
-    """The judge's user message. Separate so a test can inspect it."""
+    """The judge's user message. Separate so a test can inspect it.
+
+    **Every input the scout had, including the brief.** Omitting the brief is
+    what made the first live run report `leaky-brief` as a prompt regression
+    when the scout had behaved correctly: it named the brief's unverifiable
+    award range in order to exclude it, exactly as invariant 16 wants, and a
+    judge shown only the two files read that as inventing a source out of
+    nothing. `JUDGE_PROMPT` had described the brief all along -- it uses one
+    by name in its worked example -- so the judge was asked to reason about a
+    document it was never handed.
+    """
     return (
+        f"<delegation-brief>\n{case.brief}\n</delegation-brief>\n\n"
         f"<opportunity>\n{case.candidate}\n</opportunity>\n\n"
         f"<organization-profile>\n{case.profile}\n</organization-profile>\n\n"
         f"<assessment>\n{output}\n</assessment>"
@@ -275,7 +297,13 @@ def read_judge_verdict(reply: str) -> Score:
     if first.startswith("PASS"):
         return Score(name="grounded", passed=True, detail="judge found nothing")
     if first.startswith("FAIL"):
-        detail = " ".join(reply.strip().splitlines()[1:])[:200]
+        body = " ".join(reply.strip().splitlines()[1:])
+        # Marked when cut, because an unmarked truncation reads as a complete
+        # sentence that happens to make no sense -- the first live run ended a
+        # verdict mid-quote at `: "T`, and the sentence that explained it was
+        # past the cut. The full reply is on the judge's own run in the trace;
+        # this line only has to be honest about being an excerpt.
+        detail = (body[:200] + " [...]") if len(body) > 200 else body
         return Score(name="grounded", passed=False, detail=detail or "judge said FAIL")
     return Score(
         name="grounded",

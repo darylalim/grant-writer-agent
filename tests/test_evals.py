@@ -17,12 +17,14 @@ on something, and the cheapest way to be sure of that is to hand it the failure.
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 from langsmith.run_trees import RunTree
 
 from evals import run_scout
 from evals.scorers import (
+    JUDGE_PROMPT,
     Score,
     build_judge_payload,
     read_judge_verdict,
@@ -239,19 +241,81 @@ def test_the_judge_verdict_reader_handles_all_three_replies():
     assert confused.skipped is True
 
 
-def test_the_judge_sees_both_documents_and_the_assessment():
+def test_the_judge_sees_every_input_the_scout_had():
     """A judge shown only the assessment cannot check grounding at all.
 
     It would have nothing to check the claims *against*, so it would answer
     from plausibility -- and a fabricated figure in a grant assessment is
     plausible by construction.
+
+    The brief is here because leaving it out cost a false FAIL on the first
+    live run: a scout that correctly named the brief's unverifiable award
+    range in order to exclude it looked, to a judge holding only the two
+    files, like a scout inventing a source. Three of these four assertions
+    were already here; the missing one was never considered.
     """
-    case = _case("genuine-fit")
+    case = _case("leaky-brief")
     payload = build_judge_payload(case, GOOD)
 
+    assert case.brief in payload
     assert case.candidate in payload
     assert case.profile in payload
     assert GOOD in payload
+
+
+def test_the_judge_prompt_and_its_payload_name_the_same_documents():
+    """The drift that produced the false FAIL, pinned in both directions.
+
+    `JUDGE_PROMPT` used a delegation brief by name in its worked example while
+    `build_judge_payload` never sent one. Neither file was wrong on its own
+    terms, which is why it survived review and a passing suite -- the same
+    shape `rubric_brief()` exists to prevent one directory over, where a
+    criterion named in the prompt but absent from the parser is answered in
+    good faith and scored zero.
+    """
+    payload = build_judge_payload(_case("genuine-fit"), GOOD)
+
+    # Tags are on their own lines, so this cannot match `<question>` inside a
+    # `[NEEDS INPUT: ...]` marker in the assessment.
+    sent = {
+        tag.replace("-", " ").upper()
+        for tag in re.findall(r"^<([a-z-]+)>$", payload, re.MULTILINE)
+    }
+    listed = re.search(r"Below are \w+ documents:(.*?)\n\n", JUDGE_PROMPT, re.DOTALL)
+    assert listed, (
+        "JUDGE_PROMPT no longer opens with the document list this parses. "
+        "Without it the comparison below is vacuous."
+    )
+    # Collapsed before matching, because the prompt is hard-wrapped and
+    # "ORGANIZATION PROFILE" straddles a line break -- a line-oriented match
+    # reports it as two documents named ORGANIZATION and PROFILE. Invariant
+    # 16's rule about wrapped citations, met again one directory over.
+    block = " ".join(listed.group(1).split())
+    named = set(re.findall(r"[A-Z]{2,}(?: [A-Z]{2,})*", block))
+
+    assert sent, "no document tags found in the payload"
+    assert named == sent, (
+        f"JUDGE_PROMPT names {sorted(named)} but the payload sends "
+        f"{sorted(sent)}. A document named to the judge and not supplied is "
+        f"reasoned about from its absence; one supplied and not named is read "
+        f"as a source it was never meant to be."
+    )
+
+
+def test_a_truncated_verdict_says_that_it_is_truncated():
+    """An unmarked cut reads as a complete sentence that makes no sense.
+
+    The first live run ended a real verdict at `: "T`, and the reasoning that
+    identified it as a scorer bug rather than a prompt regression was past the
+    cut. Marking it is what tells the reader to open the trace.
+    """
+    short = read_judge_verdict("FAIL\nIt invented a figure.")
+    assert short.detail == "It invented a figure."
+    assert "[...]" not in short.detail
+
+    long = read_judge_verdict("FAIL\n" + "x" * 400)
+    assert long.detail.endswith(" [...]")
+    assert len(long.detail) == 206
 
 
 def test_every_case_declares_why_it_exists():

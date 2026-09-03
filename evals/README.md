@@ -63,6 +63,13 @@ the way an orchestrator's own web research reaches a scout that cannot search.
 `workspace.unverifiable_citations` catches that after the fact, on a real scan.
 The question here is whether the prompt stops it happening.
 
+The judge is shown that brief alongside the two files, and told it is an input
+rather than a source: the scout may name its claims in order to set them aside,
+and may not rely on them. Without the brief in the payload the judge cannot tell
+those apart — it reads a correctly-excluded award range as a figure conjured out
+of nothing, and the case fails for being right. That is not hypothetical; it is
+what the first live run reported.
+
 ## Known limitations
 
 **It evaluates the prompt, not the subagent.** The model is handed both
