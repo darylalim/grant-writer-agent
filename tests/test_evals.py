@@ -17,7 +17,11 @@ on something, and the cheapest way to be sure of that is to hand it the failure.
 
 from __future__ import annotations
 
+from langsmith.run_trees import RunTree
+
+from evals import run_scout
 from evals.scorers import (
+    Score,
     build_judge_payload,
     read_judge_verdict,
     score_programmatically,
@@ -257,3 +261,141 @@ def test_every_case_declares_why_it_exists():
     for case in CASES:
         assert case.why.strip(), case.key
         assert case.brief.strip(), case.key
+
+
+# ---- the labels a traced eval run carries -----------------------------------
+#
+# `run_scout` needs a live key, so nothing here can run it. What is checkable
+# offline is the part that decides what a run is *called* -- and that is the
+# part whose failure is silent, since an unlabelled trace is still a trace and
+# still costs the same money to produce.
+
+
+def _run_tree() -> RunTree:
+    """A real `RunTree`, which is what `trace()` hands `post_scores`.
+
+    A `SimpleNamespace` with an `id` would satisfy the code and read as a
+    lighter fixture, but it also satisfies a `post_scores` that later grows a
+    second attribute it never had -- and constructing the real thing costs
+    nothing offline: no client, no credential, no network.
+    """
+    return RunTree(name="scout:test", run_type="chain")
+
+
+def test_each_model_call_is_labelled_with_the_case_it_came_from():
+    """Two calls per case, and neither used to say which case."""
+    case = _case("genuine-fit")
+    config = run_scout.call_config("scout", case, "anthropic:claude-sonnet-5")
+
+    assert config["run_name"] == "scout"
+    assert f"case:{case.key}" in config["tags"]
+    assert config["metadata"] == {
+        "case": case.key,
+        "role": "scout",
+        "model": "anthropic:claude-sonnet-5",
+    }
+
+
+def test_the_scout_and_the_judge_are_told_apart():
+    """They are different prompts on different models scoring the same output.
+
+    Undistinguished, the judge's verdict reads as a second opinion from the
+    scout -- and the judge exists precisely because it is not one.
+    """
+    case = _case("genuine-fit")
+    scout = run_scout.call_config("scout", case, "anthropic:claude-sonnet-5")
+    judge = run_scout.call_config("judge", case, "anthropic:claude-opus-5")
+
+    assert scout["run_name"] != judge["run_name"]
+    assert scout["metadata"]["model"] != judge["metadata"]["model"]
+    assert set(scout["tags"]) & set(judge["tags"]) == {
+        "eval",
+        "scout-prompt",
+        f"case:{case.key}",
+    }
+
+
+def test_feedback_is_gated_on_the_switch_the_suite_forces_off(monkeypatch):
+    """`trace()` hands back a real RunTree even with tracing disabled.
+
+    So "we are inside a run" is not on its own permission to write to someone's
+    workspace -- and the suite runs inside no run at all, which would have
+    hidden this. The guard is `tracing_is_enabled()`, the same predicate
+    invariant 19 pins to false across all four of its env spellings, so the
+    eval's one write is disarmed by the guard that already keeps the suite
+    offline rather than by a second rule that could drift from it.
+    """
+    from langsmith.utils import tracing_is_enabled
+
+    assert not tracing_is_enabled(), "conftest should have forced this off"
+
+    posted: list[str] = []
+
+    class _ShouldNotBeUsed:
+        def create_feedback(self, *_args, **kwargs):
+            posted.append(kwargs["key"])
+
+    monkeypatch.setattr(run_scout, "Client", _ShouldNotBeUsed)
+    run_scout.post_scores(_run_tree(), [Score(name="parses", passed=True)])
+
+    assert posted == [], "posted feedback from a suite that must stay offline"
+
+
+def test_posting_scores_without_a_run_is_a_no_op():
+    """Nothing to attach feedback to, and no credential needed to find out."""
+    run_scout.post_scores(
+        None, [Score(name="parses", passed=True), Score(name="cited", passed=False)]
+    )
+
+
+def test_a_skipped_scorer_posts_nothing_rather_than_a_pass(monkeypatch):
+    """ "Not checked" and "checked and fine" are opposite readings of a number.
+
+    `Score.skipped` exists because a case may decline to assert on a
+    dimension -- the same distinction `fit_percent` keeps for `None` under
+    invariant 14. Posted as `1.0`, a run that asserted almost nothing averages
+    out looking like one that asserted everything and was right, and the
+    quietest failure of an eval is one that reports health it never measured.
+    """
+    posted: list[tuple[str, float, str | None]] = []
+
+    class _FakeClient:
+        def create_feedback(self, _run_id, *, key, score, comment=None):
+            posted.append((key, score, comment))
+
+    monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
+    monkeypatch.setattr(run_scout, "Client", _FakeClient)
+
+    run_scout.post_scores(
+        _run_tree(),
+        [
+            Score(name="parses", passed=True, detail="fit 72%"),
+            Score(
+                name="gaps", passed=True, detail="case asserts nothing", skipped=True
+            ),
+            Score(name="total", passed=False, detail="stated a total"),
+        ],
+    )
+
+    assert [key for key, _score, _comment in posted] == ["parses", "total"]
+    assert [score for _key, score, _comment in posted] == [1.0, 0.0]
+
+
+def test_a_failure_to_post_feedback_does_not_fail_the_run(monkeypatch, capsys):
+    """The eval is a measurement, not a gate.
+
+    A dropped network call while posting must not lose the scores already
+    computed, nor the model output they were computed from -- both cost real
+    money, and the second is unrecoverable once the process exits.
+    """
+
+    class _AngryClient:
+        def create_feedback(self, *_args, **_kwargs):
+            raise ConnectionError("no route to host")
+
+    monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
+    monkeypatch.setattr(run_scout, "Client", _AngryClient)
+
+    run_scout.post_scores(_run_tree(), [Score(name="parses", passed=True)])
+
+    assert "feedback not recorded" in capsys.readouterr().err

@@ -38,6 +38,11 @@ import sys
 from dataclasses import asdict
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
+from langsmith import Client
+from langsmith.run_helpers import trace
+from langsmith.run_trees import RunTree
+from langsmith.utils import tracing_is_enabled
 
 from evals.scorers import (
     JUDGE_PROMPT,
@@ -65,36 +70,131 @@ def _text(reply: object) -> str:
     return str(content)
 
 
+def call_config(role: str, case: ScoutCase, model_spec: str) -> RunnableConfig:
+    """The labels one model call carries into LangSmith.
+
+    A function rather than a literal at each call site so it can be checked
+    without a credential. `tests/test_evals.py` asserts this shape offline,
+    which is the only cover this module gets: running it needs a real key by
+    design, so nothing else here is reachable from the suite.
+
+    Typed `RunnableConfig` rather than `dict` because that is what
+    `BaseChatModel.invoke` accepts, and it is a `TypedDict` -- so a key it does
+    not know is rejected here rather than accepted and dropped in silence,
+    which is the same hazard `config.trace_config` centralises for the graphs.
+    """
+    return {
+        "run_name": role,
+        "tags": ["eval", "scout-prompt", role, f"case:{case.key}"],
+        "metadata": {"case": case.key, "role": role, "model": model_spec},
+    }
+
+
+def post_scores(run: RunTree | None, scores: list[Score]) -> None:
+    """Attach each scorer's verdict to the case's run as LangSmith feedback.
+
+    Gated on `tracing_is_enabled()`, which is the switch invariant 19 forces
+    off across all four of its spellings -- so the one write this directory
+    makes to a LangSmith workspace is disarmed by the same guard that keeps
+    the suite offline, rather than by a second rule that could disagree with
+    it. `trace()` hands back a real `RunTree` even with tracing off, so the
+    run being non-None is not on its own permission to post.
+
+    A failure to post is printed and swallowed: the eval is a measurement and
+    never a gate, and the model output already bought is not worth losing to
+    a dropped connection on the way to recording a score.
+
+    **A skipped scorer posts nothing, rather than posting a pass.** A case
+    that declines to assert on a dimension has not passed it, and a `1.0`
+    sitting where "not checked" belongs is the collapse invariant 14 forbids
+    for `fit_percent`: averaged back, a run that asserted almost nothing reads
+    like one that asserted everything and was right.
+    """
+    if run is None or not tracing_is_enabled():
+        return
+    try:
+        client = Client()
+        for score in scores:
+            if score.skipped:
+                continue
+            client.create_feedback(
+                run.id,
+                key=score.name,
+                score=float(score.passed),
+                comment=score.detail or None,
+            )
+    except Exception as exc:  # noqa: BLE001 - a measurement, never a gate
+        print(
+            f"  (feedback not recorded: {type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
+
+
 def run_case(case: ScoutCase, *, judge: bool) -> dict:
-    """Score one case. Returns a JSON-serialisable record."""
-    scout = build_model(DISCOVERY_MODEL)
-    payload = (
-        f"{case.brief}\n\n"
-        f"<opportunity-file>\n{case.candidate}\n</opportunity-file>\n\n"
-        f"<org-profile-file>\n{case.profile}\n</org-profile-file>"
-    )
-    output = _text(scout.invoke([SystemMessage(SCOUT_PROMPT), HumanMessage(payload)]))
+    """Score one case. Returns a JSON-serialisable record.
 
-    scores: list[Score] = score_programmatically(case, output)
+    The whole case is one traced run named after the fixture, with the scout
+    call and the judge call as its children. Before this a case was two
+    anonymous `ChatAnthropic` roots tied neither to each other nor to the
+    fixture they came from, so a project full of eval runs read as a pile --
+    which is most of why a traced run went unread.
 
-    if judge:
-        grader = build_model(COMPLIANCE_MODEL)
-        verdict = _text(
-            grader.invoke(
-                [
-                    SystemMessage(JUDGE_PROMPT),
-                    HumanMessage(build_judge_payload(case, output)),
-                ]
+    An explicit `trace()` rather than a `@traceable` decorator, because the
+    run name has to carry `case.key` and a decorator's name is fixed at import.
+    The alternative is passing `langsmith_extra` at the call site, which works
+    but cannot be typed: the decorator's `ParamSpec` describes the wrapped
+    signature, so the extra keyword reads to a type checker as a wrong
+    argument. A context manager says the same thing with the name computed
+    where the case is in scope.
+    """
+    with trace(
+        name=f"scout:{case.key}",
+        run_type="chain",
+        tags=["eval", "scout-prompt", f"case:{case.key}"],
+        metadata={"case": case.key, "why": case.why},
+        inputs={"case": case.key, "why": case.why},
+    ) as run:
+        scout = build_model(DISCOVERY_MODEL)
+        payload = (
+            f"{case.brief}\n\n"
+            f"<opportunity-file>\n{case.candidate}\n</opportunity-file>\n\n"
+            f"<org-profile-file>\n{case.profile}\n</org-profile-file>"
+        )
+        output = _text(
+            scout.invoke(
+                [SystemMessage(SCOUT_PROMPT), HumanMessage(payload)],
+                config=call_config("scout", case, DISCOVERY_MODEL),
             )
         )
-        scores.append(read_judge_verdict(verdict))
 
-    return {
-        "case": case.key,
-        "why": case.why,
-        "output": output,
-        "scores": [asdict(score) for score in scores],
-    }
+        scores: list[Score] = score_programmatically(case, output)
+
+        if judge:
+            grader = build_model(COMPLIANCE_MODEL)
+            verdict = _text(
+                grader.invoke(
+                    [
+                        SystemMessage(JUDGE_PROMPT),
+                        HumanMessage(build_judge_payload(case, output)),
+                    ],
+                    config=call_config("judge", case, COMPLIANCE_MODEL),
+                )
+            )
+            scores.append(read_judge_verdict(verdict))
+
+        post_scores(run, scores)
+
+        record = {
+            "case": case.key,
+            "why": case.why,
+            "output": output,
+            "scores": [asdict(score) for score in scores],
+        }
+        # The scores, not the output: a trace already carries the scout's text
+        # as the child call's own output, and repeating it here doubles the
+        # payload of every case for nothing.
+        run.end(outputs={"scores": record["scores"]})
+        return record
 
 
 def _render(records: list[dict]) -> int:

@@ -91,8 +91,35 @@ the first failure on a defensible answer is the last time anyone reads it.
 ## Tracing
 
 If `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` are set — the `.env.example`
-default — every call here is traced into `LANGSMITH_PROJECT` automatically,
-because LangChain instruments itself. Nothing in this directory creates a
-LangSmith dataset or writes to a LangSmith workspace; promoting these cases to a
-managed dataset with `langsmith.evaluate` is a deliberate next step, not
-something a run does behind you.
+default — every call here is traced into `LANGSMITH_PROJECT`. LangChain
+instruments itself, so that much was always true. What this directory adds is
+the labelling, because unlabelled it was not worth opening.
+
+Each case is one run named `scout:<case key>`, with the scout call and the judge
+call as its children and the fixture's key on both. Before that a case was two
+anonymous `ChatAnthropic` roots tied neither to each other nor to the fixture
+they came from, which is most of why a traced eval run went unread.
+
+Each scorer's verdict is attached to the case run as **feedback**, keyed by the
+scorer's name, so what a prompt edit broke is a query rather than a reading
+exercise:
+
+```bash
+langsmith trace list --project grant-writer \
+  --filter 'and(eq(feedback_key, "citations"), eq(feedback_score, 0))'
+```
+
+A **skipped** scorer posts nothing at all rather than posting a pass. A case that
+declines to assert on a dimension has not passed it, and collapsing those two is
+the mistake invariant 14 forbids for `fit_percent` — averaged back, a run that
+asserted almost nothing would read like one that asserted everything and was
+right.
+
+That feedback is the only write this directory makes to a LangSmith workspace, it
+happens only when tracing is already on, and a failure to post is printed and
+ignored — a measurement, never a gate. Nothing here creates a LangSmith dataset;
+promoting these cases to a managed one with `langsmith.evaluate` is a deliberate
+next step, not something a run does behind you. If it ever happens,
+`scout_cases.py` stays the source of truth and the dataset is a push-only mirror
+of it — two editable copies of a fixture set is the drift this repo keeps writing
+tests against.
