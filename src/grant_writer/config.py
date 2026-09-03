@@ -402,7 +402,7 @@ def trace_config(
     recursion_limit: int,
     details: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
-    """The `RunnableConfig` for one turn, including what LangSmith filters on.
+    """The `RunnableConfig` for one turn -- its labels, and part of its row.
 
     Both frontends build their turn config here, because the alternative is
     what was here before: four literal dicts carrying `thread_id` and
@@ -425,6 +425,36 @@ def trace_config(
     are values to read rather than facets to filter by: the ids, the funder,
     the focus.
 
+    **`metadata` is not tracing-only; `tags` and `run_name` are.**
+    `langgraph.checkpoint.base.get_checkpoint_metadata` copies every str,
+    int, float or bool in `config["metadata"]` *and* `config["configurable"]`
+    into the `CheckpointMetadata` the saver writes on every step, skipping
+    only `EXCLUDED_METADATA_KEYS` -- which holds `thread_id` and langgraph's
+    own keys, and none of ours. So a drafting turn puts `frontend`,
+    `command`, `app_id`, `funder` and `rubric` into
+    `.grant_writer/checkpoints.sqlite` as well as into the trace. `tags` and
+    `run_name` reach no row at all.
+
+    Documented rather than worked around, because none of it is a new fact:
+    `app_id` *is* the thread id, `scan_id` is the thread id minus its
+    invariant-12 prefix, the rubric text is already checkpointed whole as
+    `state["rubric"]`, and the funder, focus and agencies are already in the
+    brief the same checkpoint stores verbatim. The copy runs from the shared
+    audience to the local one, so the caution that keeps a facet fit for a
+    trace -- `cli._draft` sending the rubric's name and never its `$HOME`
+    path -- keeps it fit for the row by construction.
+
+    What it costs is a rule in the other direction: **nothing may read these
+    back.** One thread accumulates rows whose `command` disagrees -- `draft`
+    from the opening run, `chat` from every later turn -- so a
+    `checkpointer.list(filter={"command": ...})` added later would cut one
+    conversation down to a subset of its own steps, selecting by a word
+    chosen to read well in a trace, and raise nothing. `details` may
+    therefore carry only values already recoverable from the thread.
+    `test_review_fixes.py` §⑫ pins the copying through the upstream function
+    rather than restating it, so a release that stops copying fails there
+    and this paragraph is relaxed rather than left quietly wrong.
+
     `ref` is what the human typed; `thread_id` is what the checkpoint uses.
     They differ on purpose -- a scan runs under a namespaced id (invariant 12)
     -- so naming the run after `thread_id` would read `discover:discover:x`.
@@ -435,10 +465,19 @@ def trace_config(
     rather than have this re-derive one from the other, because re-deriving
     means owning a second copy of the prefix rule.
 
-    A resumed segment and a follow-up turn reuse their thread's config, so both
-    land under the run name that opened the thread. `cli._chat` and the UI's
-    follow-up box behave alike there, which is the honest reading: those are
-    turns in one conversation, not separate runs.
+    A resumed segment carries the command of the turn it resumes, not one of
+    its own: an approval landing mid-run is that turn continuing, so it
+    belongs under the run name that turn was given. `cli._run` gets that by
+    construction -- it loops on the one config its caller built -- and the UI
+    by leaving `active_command` alone in `resume_with`.
+
+    A follow-up is the opposite case: a new turn on an existing thread, which
+    is what `chat` is for. `cli._chat` builds its own config and the UI's
+    follow-up box asks for the same one, so on a shared thread `thread_id`
+    says the two are one conversation while `run_name` says which of them was
+    the opening brief. A UI follow-up on a *scan* is `chat` too -- the command
+    names the shape of the turn, not the graph, and which graph ran stays
+    legible from the `scan_id` metadata key and the `discover:` thread id.
     """
     return {
         "configurable": {"thread_id": thread_id},

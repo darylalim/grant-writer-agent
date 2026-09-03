@@ -2327,3 +2327,114 @@ def test_the_ui_labels_its_runs_as_the_ui(monkeypatch):
     # in it: a frontend that grew its own extra key would drift from the other
     # without either being wrong on its own terms.
     assert set(config) == set(_draft_config())
+
+
+def test_a_ui_follow_up_is_labelled_chat_the_way_the_cli_one_is(monkeypatch):
+    """The finding: the UI could only ever say `draft`.
+
+    `command` was derived from `active_discovering`, which answers a different
+    question -- which graph ran, never whether this turn was the brief that
+    opened the thread. So every follow-up arrived in LangSmith under the run
+    name of that brief, on the same thread id, and the conflation `cli._chat`
+    was fixed to avoid survived in the frontend with no other cover.
+    """
+    seen: list[dict] = []
+
+    class _RecordingAgent:
+        get_state = staticmethod(_unparked)
+
+        def stream(self, _payload, config, **_kwargs):
+            seen.append(config)
+            return iter(())
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_agent", lambda *_a, **_k: _RecordingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="app_id_input").set_value("zz-pytest-chat-label").run()
+    _button(app, "Draft proposal").click().run()
+    app.chat_input(key="followup_input").set_value("Tighten the need section.").run()
+
+    assert not app.exception
+    assert len(seen) == 2
+    brief, followup = seen
+
+    assert brief["run_name"] == "draft:zz-pytest-chat-label"
+    assert followup["run_name"] == "chat:zz-pytest-chat-label"
+    assert "chat" in followup["tags"] and "draft" not in followup["tags"]
+    assert followup["metadata"]["command"] == "chat"
+    # Same thread, which is the point: `thread_id` says these are one
+    # conversation and `run_name` is the only thing saying which was the brief.
+    assert brief["configurable"] == followup["configurable"]
+    assert set(brief) == set(followup), "a follow-up grew or dropped a config key"
+
+
+def test_a_second_sweep_is_a_chat_turn_and_still_says_it_was_a_scan(monkeypatch):
+    """`command` names the shape of the turn; the graph is read elsewhere.
+
+    A follow-up on a scan is `chat` for the same reason it is on a draft --
+    labelling it `discover` would reproduce the finding one graph over, with
+    the opening sweep and every later one identically named on one thread.
+    Which graph ran stays legible from `scan_id` and the namespaced thread id,
+    and `active_kind` must not have moved: it picks the builder.
+    """
+    seen: list[dict] = []
+
+    class _RecordingAgent:
+        get_state = staticmethod(_unparked)
+
+        def stream(self, _payload, config, **_kwargs):
+            seen.append(config)
+            return iter(())
+
+    monkeypatch.setattr(
+        "grant_writer.agent.build_discovery_agent", lambda *_a, **_k: _RecordingAgent()
+    )
+    app = _app_test(monkeypatch)
+    app.run()
+    app.text_input(key="scan_id_input").set_value("zz-pytest-sweep")
+    _button(app, "Find opportunities").click().run()
+    app.chat_input(key="followup_input").set_value("Sweep again, wider.").run()
+
+    assert not app.exception
+    assert len(seen) == 2
+    sweep, again = seen
+
+    assert sweep["run_name"] == "discover:zz-pytest-sweep"
+    assert again["run_name"] == "chat:zz-pytest-sweep"
+    # Invariant 12 still holds through the relabelling.
+    assert again["configurable"]["thread_id"] == "discover:zz-pytest-sweep"
+    assert again["metadata"]["scan_id"] == "zz-pytest-sweep"
+    assert "app_id" not in again["metadata"]
+    assert app.session_state["active_kind"] == "discover", "the label moved the graph"
+
+
+def test_a_recovered_thread_resumes_under_a_brief_s_name(monkeypatch):
+    """A resume inherits the parked turn's command; recovery has to default.
+
+    `resume_with` deliberately leaves `active_command` alone, so an approval
+    continues the turn that parked rather than being renamed after whatever
+    opened the thread. The reload-recovery path is the one case with no answer
+    available -- the checkpoint does not record which turn parked -- so it
+    assigns `draft` explicitly. Left unassigned, a session that had just sent
+    a follow-up would resume under `chat` for an application it never chatted
+    to. This pins the default; the inheritance itself is `resume_with` not
+    touching the key, which the comment there records.
+    """
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["active_command"] = "chat"
+    app.session_state["active_app_id"] = "zz-pytest-recovered"
+    app.text_input(key="app_id_input").set_value("zz-pytest-recovered").run()
+
+    parked = _parked_agent("/applications/zz-pytest-recovered/final/proposal.md")
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: parked)
+    _button(app, "Draft proposal").click().run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "awaiting"
+    assert app.session_state["active_command"] == "draft", (
+        "a recovered thread would resume under the name of a follow-up it "
+        "may never have sent"
+    )

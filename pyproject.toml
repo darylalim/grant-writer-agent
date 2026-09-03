@@ -30,7 +30,20 @@ dependencies = [
     "langchain-core>=1.0,<2.0",
     "langchain-tavily>=0.2.18",
     "langgraph-checkpoint-sqlite>=3.1.0",
-    "langsmith>=0.3.0",
+    # >=0.6.7 is a correctness floor, not hygiene. `Client.create_feedback`
+    # ends in `**kwargs`, and `session_id` -- the argument the deprecated
+    # run_id-only form was replaced by -- is only a named parameter from
+    # 0.6.7 (bisected: absent in 0.6.6, present in 0.6.7). Below it,
+    # `evals/run_scout.py` still passes it, langsmith drops it into
+    # `**kwargs`, and the DeprecationWarning that says so is raised inside
+    # `langsmith.client` rather than `__main__`, where Python's default
+    # filter ignores it: every feedback write reverts to the deprecated
+    # path with no error and nothing on screen. Nothing resolves that low
+    # today because `deepagents` itself asks for a newer langsmith -- this
+    # says the floor is *ours*, so relaxing that pin cannot quietly drop
+    # it. Capped because the same `**kwargs` will swallow a *removed*
+    # keyword exactly as quietly as an unrecognised one.
+    "langsmith>=0.6.7,<1.0",
     "pypdf>=6.14.2",
     "python-dotenv>=1.2.2",
 ]

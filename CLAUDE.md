@@ -140,6 +140,19 @@ was duplicated logic waiting to happen:
   failure worth catching, since the helper then sits there looking like the change was made.
   Checkpoint *reads* (`parked_state`, the approval panel) are deliberately not routed through it:
   they pass only `thread_id` and create no run to label.
+  **`metadata` is also what the checkpointer writes**, and that is the one half of this helper
+  with two consumers: `langgraph.checkpoint.base.get_checkpoint_metadata` copies every scalar in
+  `config["metadata"]` and `config["configurable"]` into the `CheckpointMetadata` written on
+  every step, excluding only `thread_id` and langgraph's own keys — so `frontend`, `command`,
+  `app_id`, `funder` and `rubric` land in `.grant_writer/checkpoints.sqlite` as well as in
+  LangSmith, while `tags` and `run_name` land nowhere. Kept, because none of it is a new fact
+  (`app_id` *is* the thread id, the rubric text is already `state["rubric"]`, the funder is
+  already in the brief) and because the copy runs from the shared audience to the local one. The
+  price is a rule in the other direction: put nothing in `details` that is not already
+  recoverable from the thread, and never filter a `checkpointer.list` on it — one thread's rows
+  disagree about `command` (`draft` from the opening run, `chat` from every later turn), so such
+  a filter returns a subset of one conversation with nothing raised. `test_review_fixes.py` §⑫
+  pins the copying through the upstream function itself.
 - **`config.application_dir`** is the boundary for a user-supplied application id. The UI joins it
   onto a real path and writes an upload there, outside `FilesystemPermission` — and
   `Path("applications") / "/etc/x"` is `/etc/x`, so an unvalidated id is an arbitrary read/write.

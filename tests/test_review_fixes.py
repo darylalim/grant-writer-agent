@@ -10,9 +10,13 @@ import inspect
 import os
 import re
 import sqlite3
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
+from langgraph.checkpoint.base import get_checkpoint_metadata
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
@@ -24,6 +28,7 @@ from grant_writer.backends import (
 )
 from grant_writer.cli import _build_parser, _resolve_interrupt
 from grant_writer.config import (
+    PROJECT_ROOT,
     Settings,
     _resolve_root,
     application_dir,
@@ -31,6 +36,7 @@ from grant_writer.config import (
     discovery_thread_id,
     opportunities_dir,
     opportunity_scan_ids,
+    trace_config,
 )
 from grant_writer.tools import build_search_tool
 from grant_writer.workspace import (
@@ -718,3 +724,131 @@ def test_no_langsmith_credential_survives_conftest():
             f"{name} is set inside the suite. Blank it in tests/conftest.py -- "
             "popping it lets load_dotenv hand the real one back."
         )
+
+
+# ---- ⑫ a turn's trace metadata is also its checkpoint metadata -------------
+
+
+def _checkpoint_row(command, details=None):
+    """The metadata a saver would write for one turn's config.
+
+    Through the upstream function rather than a restatement of it, so a
+    langgraph release that stops copying fails here and the paragraph in
+    `config.trace_config` is relaxed deliberately rather than left wrong.
+    """
+    from langchain_core.runnables import RunnableConfig
+
+    config = trace_config(
+        Settings(),
+        command=command,
+        frontend="cli",
+        ref="alpha",
+        thread_id="alpha",
+        recursion_limit=40,
+        details=details,
+    )
+    # `trace_config` is annotated `dict[str, Any]`; the cast is what keeps the
+    # ty baseline at two rather than three.
+    return get_checkpoint_metadata(cast("RunnableConfig", config), {"source": "loop"})
+
+
+def test_trace_metadata_is_copied_into_the_checkpoint_row():
+    """`metadata` has two consumers, and the docstring used to name one.
+
+    `get_checkpoint_metadata` copies every scalar in `config["metadata"]` into
+    the row the saver writes on every step, so a facet chosen to read well in
+    a shared trace is also persisted to `.grant_writer/checkpoints.sqlite` --
+    the file `grant-writer chat` opens. Nothing here is a new fact on disk,
+    which is why it is documented rather than worked around; the point of
+    pinning it is that the next person adding a `details` key learns that it
+    has a second destination before choosing the value.
+    """
+    row = _checkpoint_row(
+        "draft", {"app_id": "alpha", "funder": "NSF", "rubric": "criteria.md"}
+    )
+
+    assert row["funder"] == "NSF"
+    assert row["rubric"] == "criteria.md"
+    assert row["command"] == "draft"
+    assert row["frontend"] == "cli"
+
+
+def test_tags_and_run_name_reach_no_checkpoint_row():
+    """The half of the config that genuinely is tracing-only.
+
+    Worth pinning beside the above, because "the config is dual-purpose" is
+    the wrong lesson: only `metadata` is. A future label put in `tags` costs
+    nothing on disk, and knowing which half is which is what makes the rule
+    usable rather than a blanket caution.
+    """
+    row = _checkpoint_row("draft")
+
+    assert "tags" not in row
+    assert "run_name" not in row
+
+
+def test_thread_id_is_excluded_though_trace_config_sets_it_twice():
+    """`EXCLUDED_METADATA_KEYS` holds `thread_id` and langgraph's own keys.
+
+    `trace_config` puts `thread_id` in `metadata` *and* in `configurable`, and
+    neither reaches the row -- which is the sharpest form of the point above:
+    the exclusion list is upstream's, covers exactly what upstream needs, and
+    covers none of ours.
+    """
+    row = _checkpoint_row("draft", {"app_id": "alpha"})
+
+    assert "thread_id" not in row
+    assert row["app_id"] == "alpha"
+
+
+def test_one_thread_writes_rows_whose_command_disagrees():
+    """Why nothing may filter `checkpointer.list` on these keys.
+
+    `--app-id` is the thread id for `draft` and every later `chat` turn, so
+    one conversation's rows carry both words. A filter on `command` added
+    later would return a subset of a single conversation, selected by a label
+    chosen to read well in a trace, and raise nothing.
+    """
+    assert _checkpoint_row("draft")["command"] == "draft"
+    assert _checkpoint_row("chat")["command"] == "chat"
+
+
+# ---- ⑬ the langsmith floor admits the argument the code passes -------------
+
+
+def test_the_declared_langsmith_floor_admits_session_id():
+    """`create_feedback` ends in `**kwargs`, so a missing keyword is silent.
+
+    `evals/run_scout.post_scores` passes `session_id=` to stop every feedback
+    write falling back to the deprecated run-id-only form. That argument is
+    only a named parameter from langsmith 0.6.7 -- bisected: absent in 0.6.6,
+    present in 0.6.7 -- and below it the value lands in `**kwargs`, is
+    dropped, and the `DeprecationWarning` saying so is raised inside
+    `langsmith.client` rather than `__main__`, where Python's default filter
+    hides it. So the symptom is nothing at all.
+
+    The eval's own tests cannot see this: both fakes in `test_evals.py`
+    accept `**_kwargs`, exactly as real langsmith does. The declaration is
+    what gets pinned instead.
+    """
+    from langsmith import Client
+
+    assert "session_id" in inspect.signature(Client.create_feedback).parameters, (
+        "the installed langsmith no longer names session_id, so every feedback "
+        "write in evals/run_scout.py is silently back on the deprecated path"
+    )
+
+    manifest = tomllib.loads(
+        Path(PROJECT_ROOT, "pyproject.toml").read_text(encoding="utf-8")
+    )
+    spec = next(
+        (d for d in manifest["project"]["dependencies"] if d.startswith("langsmith")),
+        "",
+    )
+    match = re.match(r"^langsmith>=(\d+)\.(\d+)\.(\d+)", spec)
+    assert match, f"unparseable langsmith requirement: {spec!r}"
+    assert tuple(int(part) for part in match.groups()) >= (0, 6, 7), (
+        f"{spec} admits a langsmith with no create_feedback(session_id=...), "
+        "where every eval feedback write reverts to the deprecated form in "
+        "silence. See the comment above the pin in pyproject.toml."
+    )

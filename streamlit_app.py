@@ -159,6 +159,17 @@ st.session_state.setdefault("active_scan_id", "")
 # machine drives both, so this is what tells the run block which agent to
 # build and which thread id to run it on. See `_active_thread_id`.
 st.session_state.setdefault("active_kind", DRAFT)
+# What `config.trace_config` should call this turn: "draft" or "discover"
+# for an opening brief, "chat" for a plain message continuing either
+# thread. Its own key rather than a third `active_kind` value -- that one
+# picks the graph and the thread id, so a third value there would have to
+# name a third graph, while a follow-up runs on whichever graph is already
+# going. Deriving it is what was wrong: `"discover" if active_discovering
+# else "draft"` can see which graph ran and never whether the turn was the
+# brief that opened it, so every follow-up arrived under the run name of
+# that brief. Set beside every payload this app queues, except a resume --
+# see `resume_with`.
+st.session_state.setdefault("active_command", "draft")
 st.session_state.setdefault("error", "")
 # Bumped on every resume, and mixed into the approval widgets' keys so each
 # interrupt gets its own. See `resume_with`.
@@ -356,6 +367,11 @@ def resume_with(decisions: list[dict]) -> None:
     """
     st.session_state.payload = Command(resume={"decisions": decisions})
     st.session_state.phase = RUNNING
+    # `active_command` is deliberately untouched: a resume is the parked turn
+    # continuing, not a new one, so it belongs under that turn's run name --
+    # `draft:<id>` for a brief that parked, `chat:<id>` for a follow-up that
+    # did. `cli._run` reaches the same answer by construction, looping on the
+    # one config its caller built.
     # Retires this round's approval widgets. Their keys carry the counter, so
     # bumping it hands the next interrupt a blank reason box and a fresh set of
     # view toggles rather than the previous file's leftovers. Safe here and not
@@ -1141,6 +1157,7 @@ if discover_submitted:
         st.session_state.error = ""
         st.session_state.active_scan_id = scan_id
         st.session_state.active_kind = DISCOVER
+        st.session_state.active_command = "discover"
         st.session_state.payload = {
             "messages": [
                 {
@@ -1221,6 +1238,13 @@ if submitted:
             # is a `final/` write -- so the panel must read that thread and not
             # whichever scan this session last ran. See `_active_thread_id`.
             st.session_state.active_kind = DRAFT
+            # And the label for the resume the panel will queue. Which turn
+            # parked this thread is not recoverable from the checkpoint, so it
+            # takes the name a brief opens one under -- assigned rather than
+            # left alone, because a session that had just sent a follow-up
+            # would otherwise resume under `chat` for an application it never
+            # chatted to.
+            st.session_state.active_command = "draft"
             st.session_state.error = ""
             st.session_state.phase = AWAITING
             st.rerun()
@@ -1265,6 +1289,7 @@ if submitted:
         st.session_state.error = ""
         st.session_state.active_app_id = app_id
         st.session_state.active_kind = DRAFT
+        st.session_state.active_command = "draft"
         st.session_state.payload = payload
         st.session_state.phase = RUNNING
         # Rerun before streaming rather than falling through to the run block.
@@ -1399,6 +1424,12 @@ if followup:
     # start the whole process over. `active_app_id` is left alone, so the run
     # block below keeps the same thread_id and the checkpoint carries the plan,
     # todos, and history that `grant-writer chat --app-id X` would have resumed.
+    # `chat`: the third `TraceCommand`, and the one the UI had no way to send.
+    # The same label `cli._chat` puts on exactly this payload. `active_kind` is
+    # left alone -- a follow-up continues whichever graph is already running,
+    # and a second sweep of a scan is as much a `chat` turn as a revision to a
+    # draft is.
+    st.session_state.active_command = "chat"
     st.session_state.payload = {"messages": [{"role": "user", "content": followup}]}
     st.session_state.error = ""
     st.session_state.phase = RUNNING
@@ -1451,7 +1482,7 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
                     approve_final=approve,
                     enable_search=search,
                 ),
-                command="discover" if active_discovering else "draft",
+                command=st.session_state.active_command,
                 frontend="ui",
                 ref=active_ref,
                 thread_id=_active_thread_id(),

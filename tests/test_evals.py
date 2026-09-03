@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 from types import SimpleNamespace
 
+import pytest
 from langsmith.run_trees import RunTree
 
 from evals import run_scout
@@ -337,6 +338,27 @@ def test_every_case_declares_why_it_exists():
 # still costs the same money to produce.
 
 
+@pytest.fixture(autouse=True)
+def _empty_session_id_cache():
+    """`run_scout._SESSION_IDS` caches a project uuid for the whole process.
+
+    The same hazard `_app_test` clears `st.cache_resource` for in
+    `test_frontends.py`: a cache outliving the case that filled it makes a
+    later case's branch depend on collection order. Here it costs coverage
+    rather than a flake -- once any case has resolved "proj", the next case's
+    fake client is never asked, and a test written to exercise the lookup
+    exercises the cached hit instead, passing either way.
+
+    Autouse rather than a line per case, because a line per case is what this
+    already was: two of the four cases reset it and two did not, and the
+    omission does not fail -- it makes some *other* case pass for the wrong
+    reason. `.clear()` on the live dict rather than rebinding it, so the object
+    `session_id` actually reads is the one that ends up empty, whatever a
+    previous case rebound and in whatever order teardowns ran.
+    """
+    run_scout._SESSION_IDS.clear()
+
+
 def _run_tree() -> RunTree:
     """A real `RunTree`, which is what `trace()` hands `post_scores`.
 
@@ -458,8 +480,11 @@ def test_a_failure_to_post_feedback_does_not_fail_the_run(monkeypatch, capsys):
     money, and the second is unrecoverable once the process exits.
     """
 
+    lookups: list[str] = []
+
     class _AngryClient:
         def read_project(self, *, project_name):
+            lookups.append(project_name)
             return SimpleNamespace(id=f"id-of-{project_name}")
 
         def create_feedback(self, *_args, **_kwargs):
@@ -471,6 +496,7 @@ def test_a_failure_to_post_feedback_does_not_fail_the_run(monkeypatch, capsys):
     run_scout.post_scores(_run_tree(), [Score(name="parses", passed=True)])
 
     assert "feedback not recorded" in capsys.readouterr().err
+    assert lookups == ["proj"], "a cached project id leaked in from another case"
 
 
 def test_feedback_names_the_project_rather_than_the_run_alone(monkeypatch):
@@ -495,7 +521,6 @@ def test_feedback_names_the_project_rather_than_the_run_alone(monkeypatch):
 
     monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
     monkeypatch.setattr(run_scout, "Client", _CountingClient)
-    monkeypatch.setattr(run_scout, "_SESSION_IDS", {})
 
     run = _run_tree()
     for _ in range(3):
@@ -523,6 +548,5 @@ def test_an_unresolvable_project_loses_the_feedback_not_the_run(monkeypatch):
 
     monkeypatch.setattr(run_scout, "tracing_is_enabled", lambda: True)
     monkeypatch.setattr(run_scout, "Client", _NoSuchProject)
-    monkeypatch.setattr(run_scout, "_SESSION_IDS", {})
 
     run_scout.post_scores(_run_tree(), [Score(name="parses", passed=True)])
