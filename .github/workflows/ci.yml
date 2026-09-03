@@ -20,12 +20,18 @@ concurrency:
 permissions:
   contents: read
 
-# tests/conftest.py already forces this off; this covers the non-pytest steps
-# too. No secrets are configured on purpose -- conftest supplies a dummy
-# ANTHROPIC_API_KEY and blanks TAVILY_API_KEY, so a test that needs a real
-# credential is a bug in the suite, and CI is where that should surface.
+# tests/conftest.py already forces these off; this covers the non-pytest steps
+# too. All four spellings, because langsmith reads TRACING_V2 before TRACING
+# and searches the LANGSMITH_ then LANGCHAIN_ namespace for each -- setting
+# one leaves three live. See invariant 19. No secrets are configured on
+# purpose -- conftest supplies a dummy ANTHROPIC_API_KEY and blanks
+# TAVILY_API_KEY, so a test that needs a real credential is a bug in the
+# suite, and CI is where that should surface.
 env:
+  LANGSMITH_TRACING_V2: "false"
+  LANGCHAIN_TRACING_V2: "false"
   LANGSMITH_TRACING: "false"
+  LANGCHAIN_TRACING: "false"
 
 jobs:
   test:

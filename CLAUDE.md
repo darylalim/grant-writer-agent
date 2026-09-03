@@ -394,6 +394,40 @@ runs, and still produces plausible output.
     Broader, so it fails safe — but it is what makes the UI's approval caption a claim it has to
     earn, since a pending delete of `sections/` is not a "write to `final/`".
 
+19. **The suite's tracing kill-switch has four spellings, and setting one leaves three live.**
+    `langsmith.utils.tracing_is_enabled` reads `get_env_var("TRACING_V2", default=get_env_var(
+    "TRACING", default=""))`, and `get_env_var` returns the first non-empty value across the
+    namespaces `("LANGSMITH", "LANGCHAIN")` — so the real precedence is `LANGSMITH_TRACING_V2` >
+    `LANGCHAIN_TRACING_V2` > `LANGSMITH_TRACING` > `LANGCHAIN_TRACING`, and `tests/conftest.py`
+    set only the third. `LANGCHAIN_TRACING_V2=true` — the spelling LangChain's own docs emitted
+    for years, still exported in plenty of shells — outranks it outright, and the suite this file
+    calls offline by contract POSTs its runs to the developer's real `grant-writer` project.
+    `measure_text`, `extract_pdf_text` and `fetch_grants_gov_opportunity` are `@tool`s, so every
+    `.invoke` in `test_wiring.py` opens a run. Measured against a dead endpoint: `4 passed`, and
+    4KB of runs left with it. Nothing raises — `LangChainTracer` logs its own failures and
+    swallows them — and the symptom arrives later, as a polluted project someone is reading to
+    debug a real drafting run.
+
+    **The value must be `"false"`, which is narrower than it looks.** `""` fails *open*:
+    `get_env_var` skips a value that strips to nothing and resumes the namespace fallback, so
+    blanking a name hands the decision to the next one rather than settling it. `"no"` fails
+    *loud*: `langchain_core.utils.env.env_var_is_set` excludes exactly `{"", "0", "false",
+    "False"}`, and `callbacks/manager.py` raises `RuntimeError` on the retired v1 tracer when
+    `LANGCHAIN_TRACING` reads as set while v2 is off. `LANGCHAIN_HANDLER` is emptied for that
+    second reason alone — forcing v2 off is what would newly arm it.
+
+    **Blanking `LANGSMITH_API_KEY` and `LANGCHAIN_API_KEY` is the half that does not depend on
+    the list being complete.** Same `load_dotenv()` argument as `TAVILY_API_KEY`: blanked rather
+    than popped, because present-but-empty is what stops `config.py`'s import-time `load_dotenv()`
+    handing the real one back. Four names are a list upstream can extend; a credential is not, so
+    removing it is what makes a fifth spelling cost nothing. `test_review_fixes.py` §⑪ derives the
+    name set from `langsmith` itself rather than restating it, so an upstream addition fails a
+    vacuity guard there before it can quietly widen what the suite emits — restating the list in
+    the test would reproduce the bug's own shape, two hard-coded copies agreeing and both wrong.
+    That section asserts the credential's *presence*, never its value: pytest prints both sides of
+    a failed comparison, so `== ""` puts a live key in the terminal and in the CI log of the very
+    run that caught the regression. Observed while mutation-testing this entry, not theorised.
+
 ## Backend profiles
 
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files
@@ -404,8 +438,9 @@ process — swap for `PostgresStore` before deploying.
 
 ## Testing conventions
 
-`tests/conftest.py` sets a dummy `ANTHROPIC_API_KEY`, forces `LANGSMITH_TRACING=false`, and
-**blanks** `TAVILY_API_KEY` rather than popping it, so nothing hits the network. The distinction is
+`tests/conftest.py` sets a dummy `ANTHROPIC_API_KEY`, forces tracing off under all four of the
+env spellings that enable it and blanks the LangSmith credential (invariant 19), and **blanks**
+`TAVILY_API_KEY` rather than popping it, so nothing hits the network. The distinction is
 load-bearing: `config.py` calls `load_dotenv()` at import, which only skips keys already present in
 `os.environ`, so popping handed a developer's real key straight back and the suite behaved one way
 locally and another on a clean checkout. Every consumer tests it with `if not os.getenv(...)`, so an

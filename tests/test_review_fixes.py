@@ -6,7 +6,9 @@ reintroduces it fails here rather than silently in production.
 
 from __future__ import annotations
 
+import inspect
 import os
+import re
 import sqlite3
 from types import SimpleNamespace
 
@@ -608,3 +610,111 @@ def test_message_text_is_read_without_calling_it():
         events = list(iter_activity(chunk))
 
     assert [(e.kind, e.detail) for e in events] == [(MESSAGE, "Draft complete.")]
+
+
+# ---- ⑪ the tracing kill-switch covers every spelling of the switch ---------
+
+
+def _tracing_switch_names() -> set[str]:
+    """The env vars `tracing_is_enabled` consults, derived from `langsmith`.
+
+    Read out of upstream rather than restated here, because restating it is the
+    shape the bug had: `conftest` pinned the one spelling its author knew about.
+    A hard-coded list in the test would agree with a hard-coded list in the
+    fixture, and both would be wrong together.
+    """
+    from langsmith import utils as ls_utils
+
+    namespaces = (
+        inspect.signature(ls_utils.get_env_var).parameters["namespaces"].default
+    )
+    suffixes = re.findall(
+        r'get_env_var\(\s*"([A-Z0-9_]+)"',
+        inspect.getsource(ls_utils.tracing_is_enabled),
+    )
+    return {f"{namespace}_{suffix}" for namespace in namespaces for suffix in suffixes}
+
+
+def test_the_tracing_switch_is_still_the_four_names_conftest_pins():
+    """Without this, the tests below can pass over an empty set.
+
+    They derive their names from `_tracing_switch_names`, so an upstream
+    refactor that made the regex match nothing would leave them asserting
+    nothing at all -- the guard on a silent failure, failing silently. A
+    `langsmith` upgrade that genuinely adds a spelling is meant to fail here
+    first and be answered in `conftest.py`, not by widening the regex.
+    """
+    assert _tracing_switch_names() == {
+        "LANGSMITH_TRACING_V2",
+        "LANGCHAIN_TRACING_V2",
+        "LANGSMITH_TRACING",
+        "LANGCHAIN_TRACING",
+    }, (
+        "langsmith no longer consults exactly the four names conftest sets. "
+        "Add the new one to the loop in tests/conftest.py and to invariant 19."
+    )
+
+
+def test_the_suite_cannot_trace_under_any_spelling_of_the_switch():
+    """Pins invariant 19.
+
+    `conftest` writes these unconditionally, so on a developer exporting
+    `LANGCHAIN_TRACING_V2=true` this passes only because conftest overwrote it.
+    It fails on any machine, clean or not, if conftest stops covering a name --
+    an unset name raises `KeyError` here rather than passing by absence.
+    """
+    from langsmith.utils import tracing_is_enabled
+
+    for name in sorted(_tracing_switch_names()):
+        assert os.environ[name] == "false", (
+            f"{name} is {os.environ[name]!r}. tests/conftest.py must set every "
+            "spelling of the switch to 'false' -- see invariant 19."
+        )
+    assert tracing_is_enabled() is False, (
+        "langsmith still considers tracing enabled inside the suite, which is "
+        "offline by contract. Something set a switch after conftest ran."
+    )
+
+
+def test_the_disabled_value_neither_fails_open_nor_arms_the_v1_tracer():
+    """Pins invariant 19.
+
+    "false" is narrower than it looks. An empty string fails open, because
+    `get_env_var` skips a value that strips to nothing and resumes the
+    namespace fallback. A truthy-looking word fails loud, because
+    `callbacks/manager.py` raises on the retired v1 tracer when
+    `LANGCHAIN_TRACING` or `LANGCHAIN_HANDLER` reads as set while v2 is off --
+    and forcing v2 off is exactly what conftest now does.
+    """
+    from langchain_core.utils.env import env_var_is_set
+
+    for name in sorted(_tracing_switch_names()):
+        assert os.environ[name].strip(), (
+            f"{name} strips to nothing, which get_env_var skips -- the next "
+            "namespace decides instead. Use 'false', not an empty string."
+        )
+    for name in [*sorted(_tracing_switch_names()), "LANGCHAIN_HANDLER"]:
+        assert not env_var_is_set(name), (
+            f"{name} reads as set to langchain_core, which raises RuntimeError "
+            "for the v1 tracer whenever v2 is off. Use 'false' or an empty one."
+        )
+
+
+def test_no_langsmith_credential_survives_conftest():
+    """Pins invariant 19.
+
+    The switch is a list upstream can extend; this is not. Blanked rather than
+    popped for the same reason as `TAVILY_API_KEY`: `config.py` calls
+    `load_dotenv()` at import, which fills any name not already present, so a
+    popped key comes straight back from the developer's own secrets file.
+    """
+    for name in ("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"):
+        # Asserted on presence, never on the value. pytest prints both sides of
+        # a failed comparison, so `== ""` puts a live credential in the terminal
+        # and in the CI log of the very run that caught the regression -- this
+        # test leaking the key it exists to remove. Observed, not theorised.
+        is_set = bool(os.environ[name])
+        assert not is_set, (
+            f"{name} is set inside the suite. Blank it in tests/conftest.py -- "
+            "popping it lets load_dotenv hand the real one back."
+        )
