@@ -162,8 +162,23 @@ otherwise look like success: a `tuple` that JSON returns as a `list` and so
 differs from itself on every push, and the server-maintained `dataset_split` key
 that would read as somebody's hand-edit forever.
 
+Splits are the one thing the mirror carries rather than owns. `dataset_split` is
+server-maintained, so it is excluded from the digest — counted, every row would
+read as drift the moment anyone assigned a split. But an update replaces the
+whole metadata document, so the plan copies the fetched row's server keys onto
+the row it is about to write. Excluding a key from the comparison and omitting
+it from the write are separate decisions, and letting the second follow from the
+first destroys the assignment where neither the plan nor the read-back can see
+it, since both strip the key on both sides.
+
 Known limits, all in the module docstring: the dataset's own description is
 write-once (this SDK has no `update_dataset`), a rename is undetectable and
-leaves a stale fork, and pruning destroys hand-added rows by design — soft
-delete, with the id and an excerpt printed before the call, and `--no-prune` to
-opt out.
+leaves a stale fork, restoring a previously pruned case key reuses a
+soft-deleted id and this SDK does not say what happens then, and pruning
+destroys hand-added rows by design — soft delete, with the id and an excerpt
+printed *before* the call rather than after it, and `--no-prune` to opt out.
+
+A dataset that already existed and holds no row of the mirror's is refused,
+including an empty one: adopting a colleague's freshly created dataset is the
+wrong-name accident arriving through the door the ownership check was built to
+hold. `--adopt` is the way to say you meant it.

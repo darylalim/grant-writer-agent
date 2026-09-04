@@ -818,24 +818,33 @@ def test_a_row_that_no_case_claims_is_planned_for_deletion():
     assert todo.counts() == (0, 0, len(CASES), 1)
 
 
-@pytest.mark.parametrize(
-    "remote",
-    [
-        {},
-        _remote(*_all_rows()),
-        _remote(*_all_rows()[:2]),
-        _remote(*_all_rows()) | {"8f14e45f-ceea-4670-94ab-8f0f1e2f3a4b": {}},
-    ],
-    ids=["empty", "full", "partial", "with-stray"],
-)
-def test_every_case_is_planned_exactly_once(remote):
+def _shape(name: str) -> dict[str, dict]:
+    """Built in the body, never in a `parametrize` argument list.
+
+    Those are evaluated at collection, and `_all_rows` raises `PushRefused` the
+    moment `ScoutCase` grows a field the mirror does not carry -- so the very
+    change two tests here exist to report clearly would instead abort
+    collection of the whole module, scorer tests included, with a traceback
+    from a decorator and neither of those tests ever running.
+    """
+    rows = _all_rows()
+    return {
+        "empty": {},
+        "full": _remote(*rows),
+        "partial": _remote(*rows[:2]),
+        "with-stray": _remote(*rows) | {"8f14e45f-ceea-4670-94ab-8f0f1e2f3a4b": {}},
+    }[name]
+
+
+@pytest.mark.parametrize("shape", ["empty", "full", "partial", "with-stray"])
+def test_every_case_is_planned_exactly_once(shape):
     """A plan can never both write and delete the same row.
 
     The partition is the invariant: every fixture lands in exactly one of
     create/update/unchanged, and `prune` touches none of them. Overlap here
     means a push that deletes what it just wrote, order-dependently.
     """
-    todo = push_dataset.plan(CASES, remote)
+    todo = push_dataset.plan(CASES, _shape(shape))
     groups = [
         {row["id"] for row in todo.create},
         {row["id"] for row in todo.update},
@@ -977,9 +986,12 @@ def test_a_missing_dataset_is_created_and_a_racing_push_is_not_an_error():
     """
     client = _fake_client(rows={}, missing=True, racing=True)
 
-    dataset = push_dataset.ensure_dataset(client, "grant-writer-scout-cases")
+    dataset, existed = push_dataset.ensure_dataset(
+        client, "grant-writer-scout-cases", create=True
+    )
 
     assert dataset is client.dataset_obj
+    assert existed, "the racing create means somebody else got there first"
     assert [call[0] for call in client.seen] == [
         "read_dataset",
         "create_dataset",
@@ -1129,17 +1141,27 @@ def test_the_module_reads_no_credential_and_builds_no_client_at_import(monkeypat
     monkeypatch.setattr("langsmith.Client", boom)
     monkeypatch.setenv("LANGSMITH_API_KEY", "")
 
-    reloaded = importlib.reload(push_dataset)
+    try:
+        reloaded = importlib.reload(push_dataset)
+        assert reloaded.plan(CASES, {}).counts() == (len(CASES), 0, 0, 0)
+    finally:
+        # `monkeypatch` has no hook for a module reload, and a re-executed
+        # module rebinds `PushRefused` to a new class object. Nothing captures
+        # one today, which is the only reason leaving it would stay green --
+        # the first case that does would fail `pytest.raises` with no
+        # explanation, at a distance, depending on collection order.
+        importlib.reload(push_dataset)
 
-    assert reloaded.plan(CASES, {}).counts() == (len(CASES), 0, 0, 0)
 
-
-def test_a_pruned_row_is_named_before_it_is_deleted(capsys):
+def test_a_pruned_row_is_named_before_it_is_actually_deleted(capsys):
     """The one place this destroys someone's work by design.
 
     Soft deletion and dataset versioning make it recoverable, but only for a
-    reader who knows it happened -- so the id and an excerpt of the row are
-    printed, and the plan block comes before the summary rather than after it.
+    reader who knows it happened. Asserted against the *call order* rather than
+    against the text alone: rendering the plan after `push` returned printed
+    the same characters and was a receipt rather than a warning, since the
+    delete had already gone out -- and if the run died mid-apply the id was
+    never printed at all.
     """
     stray = "8f14e45f-ceea-4670-94ab-8f0f1e2f3a4b"
     remote = _remote(*_all_rows()) | {
@@ -1150,10 +1172,117 @@ def test_a_pruned_row_is_named_before_it_is_deleted(capsys):
         }
     }
     client = _fake_client(rows=remote)
+    order: list[str] = []
 
-    push_dataset.render(push_dataset.push(client, dry_run=True))
+    def announce(result):
+        push_dataset.render_plan(result)
+        order.append("announced")
 
+    def delete_examples(example_ids, *, hard_delete=False):
+        order.append("deleted")
+
+    client.delete_examples = delete_examples
+    push_dataset.push(client, announce=announce)
+
+    assert order == ["announced", "deleted"]
     out = capsys.readouterr().out
     assert stray in out
     assert "a note somebody added by hand" in out
-    assert out.index(stray) < out.index("to prune")
+
+
+def test_a_row_the_server_owns_a_split_on_keeps_it_through_an_overwrite():
+    """Excluded from the digest is not the same as omitted from the write.
+
+    `dataset_split` is server-maintained, so counting it as drift would rewrite
+    every row on every push -- but an update replaces the whole metadata
+    document, and dropping the key destroys the split assignment. Neither the
+    plan nor the verification re-read can see that happen: both strip the key
+    on both sides, which is exactly what makes it worth a test rather than a
+    read-through.
+    """
+    remote = _remote(*_all_rows())
+    row_id = str(push_dataset.example_id("genuine-fit"))
+    remote[row_id]["metadata"]["dataset_split"] = ["base"]
+    remote[row_id]["outputs"]["expect_eligibility"] = "MODERATE"
+    client = _fake_client(rows=remote)
+
+    push_dataset.push(client)
+
+    written = client.rows[row_id]["metadata"]
+    assert written["dataset_split"] == ["base"]
+    assert written["mirror_source"] == "evals/scout_cases.py"
+    assert client.rows[row_id]["outputs"]["expect_eligibility"] == "STRONG"
+
+
+def test_an_empty_dataset_somebody_else_made_is_not_adopted_in_silence():
+    """An empty dataset carries no marker either.
+
+    Short-circuiting the ownership check on emptiness is the wrong-name
+    accident arriving through the one door it was built to hold: a colleague's
+    freshly created dataset takes the four fixtures, gets the marker written
+    into it, and passes the check forever after while every later push deletes
+    whatever they add.
+    """
+    client = _fake_client(rows={})
+
+    with pytest.raises(push_dataset.PushRefused, match="--adopt"):
+        push_dataset.push(client, name="team-regressions")
+
+    assert _writes(client) == []
+    assert push_dataset.push(client, name="team-regressions", adopt=True).live
+
+
+def test_a_delete_that_did_not_take_is_not_reported_as_a_failed_update():
+    """Which operation did not take is the whole diagnostic value.
+
+    Collapsed into one count, a residual that is entirely prunes printed "0
+    example(s) still differ" and then pointed the reader at `update_examples` --
+    a non-zero exit with a report that reads like success, naming the wrong
+    call.
+    """
+    stray = "8f14e45f-ceea-4670-94ab-8f0f1e2f3a4b"
+    remote = _remote(*_all_rows()) | {
+        stray: {"inputs": {"brief": "left behind"}, "outputs": {}, "metadata": {}}
+    }
+    client = _fake_client(rows=remote)
+    client.delete_examples = lambda example_ids, **kwargs: None
+
+    result = push_dataset.push(client)
+    push_dataset.render(result)
+
+    assert result.converged is False
+    assert result.residual is not None
+    assert result.residual.prune == (stray,)
+
+
+def test_the_report_names_the_dataset_that_was_actually_pushed_to(capsys):
+    """The name and the URL have to agree, or neither is a rename signal.
+
+    Printed from the module constant, `--dataset scratch` put
+    `grant-writer-scout-cases` above a URL pointing somewhere else -- and in a
+    dry run against a dataset that does not exist yet, above `(not created)`,
+    asserting that the real mirror is missing.
+    """
+    client = _fake_client(rows={})
+
+    push_dataset.render_plan(
+        push_dataset.push(client, name="scratch", adopt=True, dry_run=True)
+    )
+
+    assert "scratch" in capsys.readouterr().out
+
+
+def test_a_field_mirrored_into_two_groups_is_refused(monkeypatch):
+    """A union cannot see a duplicate.
+
+    Put `key` in `_OUTPUT_FIELDS` while it is still in `_METADATA_FIELDS` and
+    the set still matches the dataclass, so the lossy-mirror guard passes while
+    the field is written into two places and `case_from_example` resolves it by
+    later-wins.
+    """
+    monkeypatch.setattr(
+        push_dataset, "_OUTPUT_FIELDS", (*push_dataset._OUTPUT_FIELDS, "key")
+    )
+
+    with pytest.raises(push_dataset.PushRefused, match="more than once"):
+        push_dataset.mirror_row(_case("genuine-fit"))

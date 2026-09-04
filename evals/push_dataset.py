@@ -74,8 +74,25 @@ the dataset and let the next push recreate it if that matters.
 
 A rename is worse and is not detectable: the read raises not-found, `--create`
 makes a fresh empty dataset under the old name, and the renamed one becomes a
-stale fork that no longer receives pushes. The dataset URL is printed on every
-run for exactly this reason -- a person who renamed it sees the wrong link.
+stale fork that no longer receives pushes. The dataset name and URL are printed
+on every run for exactly this reason -- a person who renamed it sees the wrong
+link beside the name they expected.
+
+A case key that was pruned and is later restored reuses an id the server has
+already seen soft-deleted, and neither this SDK nor its docs say what happens
+then -- a conflict, a resurrection of the stale row, or a clean create. Ids are
+frozen by design, so there is no fallback here: if a restore fails, hard-delete
+the old row in the UI and push again. Named rather than handled because
+guessing at the branch would be writing a recovery path nobody has seen fire.
+
+Splits are the one thing this mirror carries rather than owns. `dataset_split`
+is server-maintained and excluded from the digest, or every row would read as
+drift the moment anyone assigned one -- but an update replaces the whole
+metadata document, so `plan` copies the fetched row's server keys onto the row
+it is about to write. Excluded from the comparison and omitted from the write
+are different decisions, and making the second follow from the first destroys a
+split assignment that neither the plan nor the read-back can see, because both
+strip the key on both sides.
 
 Unlike `run_scout.main`, this returns non-zero on failure. That eval is a
 measurement, and a non-zero exit there would invite blocking a pipeline on a
@@ -90,6 +107,7 @@ import json
 import os
 import sys
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any, TextIO
 
@@ -159,8 +177,16 @@ def mirror_row(case: ScoutCase) -> dict[str, Any]:
     A lossy copy ships a dataset that asserts less than the file does, and a
     dimension that is never checked scores exactly like one that passed.
     """
+    grouped = (*_INPUT_FIELDS, *_OUTPUT_FIELDS, *_METADATA_FIELDS)
+    mirrored = set(grouped)
+    if len(grouped) != len(mirrored):
+        # A union cannot see this: put `key` in two groups and drop nothing,
+        # and the set still matches while the field is written twice.
+        raise PushRefused(
+            f"ScoutCase fields mirrored more than once: "
+            f"{sorted({f for f in grouped if grouped.count(f) > 1})}"
+        )
     declared = {f.name for f in fields(ScoutCase)}
-    mirrored = {*_INPUT_FIELDS, *_OUTPUT_FIELDS, *_METADATA_FIELDS}
     if declared != mirrored:
         raise PushRefused(
             f"ScoutCase fields not mirrored: {sorted(declared ^ mirrored)}"
@@ -242,6 +268,29 @@ class Plan:
         )
 
 
+def _carry_server_metadata(
+    row: dict[str, Any], current: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep the keys the server owns on a row we are about to overwrite.
+
+    An update replaces the whole metadata document, so a row written from the
+    fixture alone drops `dataset_split` -- and the digest excludes that key on
+    both sides, so neither the plan nor the verification re-read can see the
+    assignment go missing. Excluding a key from the comparison and omitting it
+    from the write are separate decisions; this is the second one, said out
+    loud. Upstream does the same thing in `langsmith.testing._internal` before
+    its own updates.
+    """
+    carried = {
+        k: v
+        for k, v in (current.get("metadata") or {}).items()
+        if k in _SERVER_METADATA
+    }
+    if not carried:
+        return row
+    return {**row, "metadata": {**row["metadata"], **carried}}
+
+
 def plan(cases: tuple[ScoutCase, ...], remote: dict[str, dict[str, Any]]) -> Plan:
     """Pure. `remote` maps example id -> the row as fetched.
 
@@ -262,7 +311,7 @@ def plan(cases: tuple[ScoutCase, ...], remote: dict[str, dict[str, Any]]) -> Pla
         elif digest(current) == digest(row):
             unchanged.append(row)
         else:
-            update.append(row)
+            update.append(_carry_server_metadata(row, current))
     claimed = {row["id"] for row in rows}
     return Plan(
         create=tuple(create),
@@ -294,41 +343,69 @@ def fetch(client: Client, dataset_id: uuid.UUID) -> dict[str, dict[str, Any]]:
     }
 
 
-def assert_ours(name: str, remote: dict[str, dict[str, Any]]) -> None:
+def assert_ours(name: str, remote: dict[str, dict[str, Any]], *, existed: bool) -> None:
     """Refuse a dataset this mirror never wrote, before anything is written.
 
     Keyed on the examples rather than on the dataset, because there is no
     `update_dataset` in this SDK to repair a dataset whose own metadata marker
-    did not stick. This catches the wrong-name accident -- pointing at
-    somebody's real dataset and pruning it -- and not a determined editor, who
-    can copy a marked row's metadata.
+    did not stick.
+
+    `existed` is why this is not simply `if remote and ...`: an *empty*
+    dataset carries no marker either, so short-circuiting on emptiness adopts a
+    colleague's freshly created one -- four fixtures pushed into it, the marker
+    written, and every later push pruning whatever they add. A dataset this run
+    created is ours by construction; one that was already there and holds
+    nothing of ours has to be asked about.
+
+    It catches the wrong-name accident, not a determined editor, who can copy a
+    marked row's metadata.
     """
-    if remote and not any(
+    if not existed:
+        return
+    if any(
         (row.get("metadata") or {}).get("mirror_source") == MIRROR_SOURCE
         for row in remote.values()
     ):
-        raise PushRefused(
-            f"{name!r} holds {len(remote)} examples and none carries "
-            f"metadata.mirror_source == {MIRROR_SOURCE!r}. Pushing would "
-            f"overwrite rows in it and delete the rest. Name the mirror with "
-            f"--dataset."
-        )
+        return
+    held = (
+        f"holds {len(remote)} examples, none of which carries"
+        if remote
+        else "is empty, so nothing carries"
+    )
+    raise PushRefused(
+        f"{name!r} already existed and {held} metadata.mirror_source == "
+        f"{MIRROR_SOURCE!r}. Pushing would overwrite rows in it and delete "
+        f"the rest. Name the mirror with --dataset, or pass --adopt if this "
+        f"really is the mirror and its rows were removed by hand."
+    )
 
 
-def ensure_dataset(client: Client, name: str) -> Dataset:
-    """Read it, or create it. A racing push is not an error.
+def ensure_dataset(client: Client, name: str, *, create: bool) -> tuple[Dataset, bool]:
+    """Read it, or create it. Returns the dataset and whether it pre-existed.
+
+    One read rather than a `has_dataset` probe followed by a read: the pair
+    answers the same question twice and disagrees if the dataset is deleted
+    between them, which sends the code down a create path the `create` gate was
+    meant to guard.
 
     `create_dataset` 409s on a duplicate name -- names are unique per workspace
     -- which arrives as `LangSmithConflictError`. Read-create-read is the same
-    shape `langsmith.testing` uses upstream for the same reason.
+    shape `langsmith.testing` uses upstream, and a racing push is not an error:
+    two people pushing these fixtures at once are pushing the same bytes.
     """
     try:
-        return client.read_dataset(dataset_name=name)
+        return client.read_dataset(dataset_name=name), True
     except LangSmithNotFoundError:
-        try:
-            return client.create_dataset(name, description=NOTICE)
-        except LangSmithConflictError:
-            return client.read_dataset(dataset_name=name)
+        if not create:
+            raise PushRefused(
+                f"No dataset named {name!r}. Pass --create to make it, or "
+                f"check the name -- a typo here creates a second mirror "
+                f"rather than updating the one you meant."
+            ) from None
+    try:
+        return client.create_dataset(name, description=NOTICE), False
+    except LangSmithConflictError:
+        return client.read_dataset(dataset_name=name), True
 
 
 def apply(client: Client, dataset_id: uuid.UUID, todo: Plan, *, prune: bool) -> None:
@@ -341,7 +418,8 @@ def apply(client: Client, dataset_id: uuid.UUID, todo: Plan, *, prune: bool) -> 
 
     Deletion is soft (`hard_delete=False`, the default), which is what makes
     pruning defensible: a hand-added row stays recoverable through dataset
-    versioning, and its id was printed before this ran.
+    versioning, and `push` announces the plan before calling this, so the id
+    and an excerpt are on screen before the row goes.
     """
     if todo.create:
         client.create_examples(dataset_id=dataset_id, examples=list(todo.create))
@@ -355,6 +433,11 @@ def apply(client: Client, dataset_id: uuid.UUID, todo: Plan, *, prune: bool) -> 
 class PushResult:
     """What one run did, with nothing printed yet."""
 
+    #: The dataset actually targeted, which is not always `DATASET_NAME`.
+    #: Printing the constant instead put a header naming one dataset over a URL
+    #: pointing at another, on the line the docstring offers as the only signal
+    #: that somebody renamed the mirror.
+    name: str
     dataset_id: str | None
     #: `Dataset.url` is `Optional[str]`; the id is the fallback.
     url: str | None
@@ -381,33 +464,42 @@ def push(
     name: str = DATASET_NAME,
     prune: bool = True,
     dry_run: bool = False,
-    create: bool = True,
+    create: bool = False,
     verify: bool = True,
+    adopt: bool = False,
+    announce: Callable[[PushResult], None] | None = None,
 ) -> PushResult:
-    """Read, plan, write, read back, plan again. Prints nothing.
+    """Read, plan, announce, write, read back, plan again.
 
-    `create` is checked before the dataset is made rather than after, so a
-    mistyped `--dataset` is refused instead of quietly becoming a fresh empty
-    dataset that four rows are then pushed into successfully.
+    `create` defaults to False here and is turned on by `main` for the default
+    name, so the safety property lives where the docstring claims it does: a
+    programmatic `push(client, name="grant-writer-scout-cses")` is refused
+    rather than quietly creating a second mirror and reporting success.
+
+    `announce` is called with the planned result *before* `apply`, and is the
+    only place the plan block is printed. Rendering afterwards was a claim this
+    module made about itself and did not keep: a prune is destructive, and an
+    id printed after the delete is a receipt rather than a warning.
     """
-    exists = client.has_dataset(dataset_name=name)
-    if not exists and not create:
-        raise PushRefused(
-            f"No dataset named {name!r}. Pass --create to make it, or check "
-            f"the name -- a typo here creates a second mirror rather than "
-            f"updating the one you meant."
-        )
-
     dataset: Dataset | None = None
+    existed = False
     snapshot: dict[str, dict[str, Any]] = {}
-    if exists or not dry_run:
-        dataset = ensure_dataset(client, name)
+    try:
+        dataset, existed = ensure_dataset(client, name, create=create)
+    except PushRefused:
+        # A dry run against a name that does not exist is a fair question --
+        # "what would a first push do?" -- and answering it must not create.
+        if not dry_run:
+            raise
+    if dataset is not None:
         snapshot = fetch(client, dataset.id)
 
-    assert_ours(name, snapshot)
+    if not adopt:
+        assert_ours(name, snapshot, existed=existed)
     planned = plan(CASES, snapshot)
 
     result = PushResult(
+        name=name,
         dataset_id=str(dataset.id) if dataset else None,
         url=dataset.url if dataset else None,
         planned=planned,
@@ -416,6 +508,8 @@ def push(
         live=not dry_run,
         pruning=prune,
     )
+    if announce is not None:
+        announce(result)
     if dry_run:
         return result
     if planned.settled(prune=prune):
@@ -423,7 +517,7 @@ def push(
         # to learn the same answer, and no write means no new dataset version.
         return replace(result, residual=planned)
 
-    assert dataset is not None  # not dry_run, so ensure_dataset ran
+    assert dataset is not None  # not dry_run, so ensure_dataset returned one
     apply(client, dataset.id, planned, prune=prune)
     if not verify:
         return result
@@ -443,25 +537,35 @@ def build_client() -> Client:
 
 
 def _excerpt(row: dict[str, Any], width: int = 40) -> str:
-    """A pruned row named by something a human recognises, on one line."""
-    inputs = row.get("inputs") or {}
-    text = str(inputs.get("brief") or inputs)
-    flat = " ".join(text.split())
-    return flat if len(flat) <= width else f"{flat[: width - 1]}…"
+    """A pruned row named by something a human recognises, on one line.
 
-
-def render(result: PushResult, *, out: TextIO | None = None) -> None:
-    """The whole report. Separate from `main` so a test can read it.
-
-    `out=None` rather than `out=sys.stdout`: a default argument is evaluated
-    once, at import, so the parameter would hold whatever `sys.stdout` was then
-    and ignore every later redirect -- including the one `capsys` installs, so
-    the test asserting a prune is named would read an empty string while the
-    text went to the terminal.
+    `is None` rather than `or`: an empty brief is falsy, and falling through to
+    the whole inputs dict prints a slice of somebody's solicitation text on the
+    one line whose job is to say which row is about to be deleted.
     """
-    out = out if out is not None else sys.stdout
+    inputs = row.get("inputs") or {}
+    brief = inputs.get("brief")
+    text = str(inputs) if brief is None else str(brief)
+    flat = " ".join(text.split()) or "(empty)"
+    return flat if len(flat) <= width else f"{flat[: width - 1]}\u2026"
+
+
+def _out(out: TextIO | None) -> TextIO:
+    """`out=None` rather than `out=sys.stdout` in a signature.
+
+    A default argument is evaluated once, at import, so the parameter would
+    hold whatever `sys.stdout` was then and ignore every later redirect --
+    including the one `capsys` installs, which made a test asserting a prune is
+    named read an empty string while the text went to the terminal.
+    """
+    return out if out is not None else sys.stdout
+
+
+def render_plan(result: PushResult, *, out: TextIO | None = None) -> None:
+    """What the push is about to do. Printed before any write, never after."""
+    stream = _out(out)
     where = result.url or result.dataset_id or "(not created)"
-    print(f"\n{DATASET_NAME}  {where}\n", file=out)
+    print(f"\n{result.name}  {where}\n", file=stream)
 
     for verb, rows in (
         ("create", result.planned.create),
@@ -469,12 +573,16 @@ def render(result: PushResult, *, out: TextIO | None = None) -> None:
         ("unchanged", result.planned.unchanged),
     ):
         for row in rows:
-            print(f"  {verb:<9}  {row['metadata']['key']}", file=out)
+            print(f"  {verb:<9}  {row['metadata']['key']}", file=stream)
     stale_verb = "prune" if result.pruning else "stray"
     for stale in result.planned.prune:
         excerpt = _excerpt(result.snapshot.get(stale, {}))
-        print(f"  {stale_verb:<9}  {stale}  (no case; {excerpt!r})", file=out)
+        print(f"  {stale_verb:<9}  {stale}  (no case; {excerpt!r})", file=stream)
 
+
+def render(result: PushResult, *, out: TextIO | None = None) -> None:
+    """The summary and the verdict. `render_plan` has already run."""
+    stream = _out(out)
     created, updated, unchanged, pruned = result.planned.counts()
     if not result.pruning:
         pruned = 0
@@ -483,42 +591,56 @@ def render(result: PushResult, *, out: TextIO | None = None) -> None:
         print(
             f"\n{created} created, {updated} updated, {unchanged} unchanged, "
             f"{pruned} pruned.{tail}",
-            file=out,
+            file=stream,
         )
     else:
         print(
             f"\n{created} to create, {updated} to update, {unchanged} unchanged, "
             f"{pruned} to prune. Nothing was written.",
-            file=out,
+            file=stream,
         )
 
     if not result.pruning and result.planned.prune:
         print(
             f"{len(result.planned.prune)} example(s) no case claims were left "
             f"in place by --no-prune.",
-            file=out,
+            file=stream,
         )
 
     if result.residual is None:
         if result.live:
-            print("Not verified: --no-verify skipped the read-back.", file=out)
+            print("Not verified: --no-verify skipped the read-back.", file=stream)
         return
     if result.converged:
-        print("Re-read: no further writes planned.", file=out)
+        print("Re-read: no further writes planned.", file=stream)
         return
-    left = len(result.residual.create) + len(result.residual.update)
+
+    # Which operation did not take is the whole diagnostic value here, so the
+    # three are reported apart. Collapsed into one count they read as zero
+    # differences alongside a non-zero exit, blaming `update_examples` for a
+    # delete that did not land.
+    for verb, rows in (
+        ("create", result.residual.create),
+        ("update", result.residual.update),
+    ):
+        for row in rows:
+            print(f"  {verb:<9}  {row['metadata']['key']}", file=stream)
+    for stale in result.residual.prune if result.pruning else ():
+        print(f"  {'prune':<9}  {stale}", file=stream)
+
+    writes = len(result.residual.create) + len(result.residual.update)
+    deletes = len(result.residual.prune) if result.pruning else 0
     print(
-        f"Re-read: {left} example(s) still differ from {MIRROR_SOURCE} after "
-        f"the write.",
-        file=out,
+        f"Re-read: {writes} example(s) still differ from {MIRROR_SOURCE} and "
+        f"{deletes} still await deletion. The push did not take.",
+        file=stream,
     )
-    for row in (*result.residual.create, *result.residual.update):
-        print(f"  {'update':<9}  {row['metadata']['key']}", file=out)
-    print(
-        "The push did not take. See what `update_examples` does to a field it "
-        "was not given, in this module's docstring.",
-        file=out,
-    )
+    if writes:
+        print(
+            "See what `update_examples` does to a field it was not given, in "
+            "this module's docstring.",
+            file=stream,
+        )
 
 
 def main() -> int:
@@ -533,6 +655,11 @@ def main() -> int:
         "--create",
         action="store_true",
         help="make the dataset if it does not exist (implied for the default name)",
+    )
+    parser.add_argument(
+        "--adopt",
+        action="store_true",
+        help="push into a dataset that carries no row of this mirror's",
     )
     parser.add_argument(
         "--dry-run",
@@ -580,6 +707,8 @@ def main() -> int:
             dry_run=args.dry_run,
             create=args.create or args.dataset == DATASET_NAME,
             verify=not args.no_verify,
+            adopt=args.adopt,
+            announce=render_plan,
         )
     except PushRefused as exc:
         print(f"Refused: {exc}", file=sys.stderr)
