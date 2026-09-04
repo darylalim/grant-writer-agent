@@ -8,8 +8,14 @@ them.
 
 Not in `tests/` because the suite is offline by contract: `tests/conftest.py`
 blanks the credentials, CI configures no secrets, and CLAUDE.md is explicit that
-a test needing a real key is a bug in the suite. These need a real key and cost
-real money on every run, so they must not be collectable by `pytest tests/`.
+a test needing a real key is a bug in the suite. These need a real key, so they
+must not be collectable by `pytest tests/`.
+
+Which key depends on the runner, and they are not interchangeable: `run_scout`
+needs `ANTHROPIC_API_KEY` and spends money per run, while `push_dataset` needs
+`LANGSMITH_API_KEY` and spends none but writes to a workspace. Its `--out` path
+needs neither and reaches no network -- that is the one way to see what this
+directory would push without having an account to push it to.
 
 The one exception is `tests/test_evals.py`, which exercises the *scorers* in
 this package against canned model output. That stays offline, and it exists

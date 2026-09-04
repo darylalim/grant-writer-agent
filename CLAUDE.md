@@ -13,6 +13,7 @@ uvx ruff check src/ tests/ evals/ streamlit_app.py   # lint (select list in [too
 uvx ruff format --check src/ tests/ evals/ streamlit_app.py   # ruff's default 88-col
 
 uv run python -m evals.run_scout              # prompt eval: LIVE model, costs money
+uv run python -m evals.push_dataset --dry-run # dataset mirror: LIVE workspace, writes
 
 uv run grant-writer discover --scan-id X --focus "rural health"   # before drafting
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF

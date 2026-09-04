@@ -1,4 +1,4 @@
-"""Offline tests for the eval scorers.
+"""Offline tests for the eval scorers and the dataset mirror.
 
 An eval whose scoring is wrong is worse than no eval: it reports a prompt
 regression as green, and it does so with the authority of a number. So the
@@ -10,6 +10,12 @@ collected here, because these cost nothing and must run on every push. The
 distinction is the credential: `evals/run_scout.py` needs a real key, and
 CLAUDE.md is explicit that a test needing one is a bug in the suite.
 
+`evals/push_dataset.py` gets the same treatment for the same reason, at the end
+of this file: the network half of a mirror is two reads and three writes, and
+everything that *decides* what those are is a pure function of the fixture set
+and one fetch. A mirror that is quietly wrong overwrites the source of truth
+with a lossy copy of itself and reports success doing it.
+
 Each case below is a scout output that is *wrong in one specific way*, checked
 against the scorer that has to notice. A scorer is only worth having if it fails
 on something, and the cheapest way to be sure of that is to hand it the failure.
@@ -17,13 +23,18 @@ on something, and the cheapest way to be sure of that is to hand it the failure.
 
 from __future__ import annotations
 
+import importlib
+import json
 import re
+import uuid
+from dataclasses import fields, replace
 from types import SimpleNamespace
 
 import pytest
 from langsmith.run_trees import RunTree
+from langsmith.utils import LangSmithConflictError, LangSmithNotFoundError
 
-from evals import run_scout
+from evals import push_dataset, run_scout
 from evals.scorers import (
     JUDGE_PROMPT,
     Score,
@@ -32,6 +43,7 @@ from evals.scorers import (
     score_programmatically,
 )
 from evals.scout_cases import CASES, ScoutCase
+from grant_writer.prompts import SCOUT_PROMPT
 
 # A well-formed scoring file for the `genuine-fit` fixture, quoting only text
 # that is genuinely in the two documents. Every other constant here is a
@@ -582,3 +594,566 @@ def test_feedback_names_the_project_rather_than_the_run_alone(monkeypatch):
     assert client.seen == ["proj"], "the project uuid was looked up more than once"
     assert [call["session_id"] for call in client.calls] == ["proj-uuid"] * 3
     assert all(call["trace_id"] == run.trace_id for call in client.calls)
+
+
+# ---- the dataset mirror ------------------------------------------------------
+#
+# `push_dataset` needs a live workspace, so nothing here pushes. What is
+# checkable offline is every decision it makes: the id, the digest and the plan
+# are pure functions, and the network is two reads and three writes that carry
+# a plan out. The failure these exist for is not a traceback -- it is a mirror
+# that overwrites `scout_cases.py`'s four fixtures with a lossy or duplicated
+# copy of themselves and prints "4 unchanged" while doing it.
+
+
+def _case(key: str) -> ScoutCase:
+    return next(case for case in CASES if case.key == key)
+
+
+def _row(key: str) -> dict:
+    return push_dataset.mirror_row(_case(key))
+
+
+def _remote(*rows: dict) -> dict[str, dict]:
+    """Rows as `fetch` would hand them back: keyed by id, no `id` inside."""
+    return {
+        row["id"]: {k: json.loads(json.dumps(row[k])) for k in push_dataset._ROW_KEYS}
+        for row in rows
+    }
+
+
+def _all_rows() -> list[dict]:
+    return [push_dataset.mirror_row(case) for case in CASES]
+
+
+def _fake_client(*, rows=None, missing=False, racing=False, swallow_updates=False):
+    """A stand-in LangSmith client, with the real methods' real shapes.
+
+    The signatures are copied deliberately rather than loosened to `**kwargs`:
+    `create_examples` and `update_examples` are keyword-only in this SDK and
+    `delete_examples` takes its ids positionally, so a fake that accepts
+    anything is how a rewrite passes here while calling nothing that exists.
+    The same hazard `_client` above names for `create_feedback`.
+
+    `rows` is mutated by the writes, so a *working* fake converges on the
+    second read and a swallowing one does not -- which is the whole of what
+    `push`'s verification pass is for.
+    """
+    store: dict[str, dict] = dict(rows or {})
+    calls: list[tuple] = []
+    dataset = SimpleNamespace(
+        id=uuid.UUID("11111111-2222-3333-4444-555555555555"),
+        url="https://smith.langchain.com/o/t/datasets/1111",
+    )
+
+    class _Client:
+        seen = calls
+        rows = store
+        dataset_obj = dataset
+
+        def has_dataset(self, *, dataset_name=None, dataset_id=None):
+            calls.append(("has_dataset", dataset_name))
+            return not missing
+
+        def read_dataset(self, *, dataset_name=None, dataset_id=None):
+            calls.append(("read_dataset", dataset_name))
+            if missing and not any(c[0] == "create_dataset" for c in calls):
+                raise LangSmithNotFoundError("no such dataset")
+            return dataset
+
+        def create_dataset(self, dataset_name, *, description=None, **kwargs):
+            calls.append(("create_dataset", dataset_name))
+            if racing:
+                # Somebody else won: the name now exists, and the next read
+                # is what this client is supposed to fall back to.
+                raise LangSmithConflictError("already exists")
+            return dataset
+
+        def list_examples(self, dataset_id=None, dataset_name=None, **kwargs):
+            calls.append(("list_examples", dataset_id))
+            return [
+                SimpleNamespace(id=key, **value) for key, value in sorted(store.items())
+            ]
+
+        def create_examples(self, *, dataset_name=None, dataset_id=None, examples=None):
+            calls.append(("create_examples", tuple(e["id"] for e in examples or ())))
+            for row in examples or ():
+                store[row["id"]] = {k: row[k] for k in push_dataset._ROW_KEYS}
+
+        def update_examples(self, *, dataset_name=None, dataset_id=None, updates=None):
+            calls.append(("update_examples", tuple(u["id"] for u in updates or ())))
+            if swallow_updates:
+                return
+            for row in updates or ():
+                store[row["id"]] = {k: row[k] for k in push_dataset._ROW_KEYS}
+
+        def delete_examples(self, example_ids, *, hard_delete=False):
+            calls.append(("delete_examples", tuple(example_ids)))
+            for key in example_ids:
+                store.pop(key, None)
+
+    return _Client()
+
+
+def _writes(client) -> list[tuple]:
+    return [
+        call
+        for call in client.seen
+        if call[0] in {"create_examples", "update_examples", "delete_examples"}
+    ]
+
+
+def test_the_same_case_always_lands_on_the_same_example_id():
+    """The id is the row, so the namespace is frozen forever.
+
+    Change it and the next push does not rewrite four rows -- it orphans four
+    and creates four more, and prints "4 created" while doing it. Deriving the
+    id is what makes "overwrite" mean overwrite: minted fresh each run, the
+    only way to avoid duplicates is to empty the dataset first, which churns
+    every id an experiment referenced.
+    """
+    assert uuid.UUID("fabd0b39-bf93-57c2-874b-627d03a18a4a") == push_dataset._NAMESPACE
+    assert {case.key: str(push_dataset.example_id(case.key)) for case in CASES} == {
+        "plainly-ineligible": "910551de-5a5b-5caf-ab36-7d7147604d45",
+        "genuine-fit": "609c31b1-ee49-52fd-a185-ffefb29d4dc8",
+        "silent-profile": "1658cebc-10ec-5d82-932f-f46403f8b6ca",
+        "leaky-brief": "7ea87426-4447-593e-a22f-814002023f65",
+    }
+
+
+def test_a_renamed_case_key_becomes_a_new_row_and_the_old_one_is_pruned():
+    """Intended, and pinned so the next reader does not "fix" it.
+
+    A key is an identity, not a label. Renaming one is renaming the fixture,
+    and carrying the old row's experiment history onto it would attach results
+    to a case that no longer produced them.
+    """
+    assert push_dataset.example_id("genuine-fit") != push_dataset.example_id(
+        "genuine-fit-v2"
+    )
+    renamed = replace(_case("genuine-fit"), key="genuine-fit-v2")
+    todo = push_dataset.plan((renamed,), _remote(_row("genuine-fit")))
+
+    assert todo.prune == (str(push_dataset.example_id("genuine-fit")),)
+    assert [row["metadata"]["key"] for row in todo.create] == ["genuine-fit-v2"]
+
+
+def test_a_row_that_has_been_through_json_is_not_read_as_changed():
+    """`forbidden` is a tuple here and a list there.
+
+    Uncanonicalised, every row differs from itself: the mirror rewrites all
+    four on every push, forever, reporting "4 updated" each time and never
+    converging. The one bug in this module that would look like it was working.
+    """
+    for row in _all_rows():
+        assert push_dataset.digest(row) == push_dataset.digest(
+            json.loads(json.dumps(row))
+        )
+
+
+def test_an_unchanged_dataset_is_planned_for_no_writes_at_all():
+    """The idempotency claim, asserted rather than described."""
+    todo = push_dataset.plan(CASES, _remote(*_all_rows()))
+
+    assert todo.counts() == (0, 0, len(CASES), 0)
+    assert todo.settled(prune=True)
+
+
+def test_a_hand_edited_verdict_is_planned_for_overwrite():
+    """The README's own scenario, and the reason the digest is recomputed.
+
+    Stored as a `source_sha` in metadata, a hand-edit leaves the hash agreeing
+    with itself and the push skips the row -- the mirror preserving the drift
+    it exists to erase.
+    """
+    remote = _remote(*_all_rows())
+    remote[str(push_dataset.example_id("genuine-fit"))]["outputs"][
+        "expect_eligibility"
+    ] = "MODERATE"
+
+    todo = push_dataset.plan(CASES, remote)
+
+    assert [row["metadata"]["key"] for row in todo.update] == ["genuine-fit"]
+    assert todo.update[0]["outputs"]["expect_eligibility"] == "STRONG"
+
+
+def test_a_hand_added_metadata_key_is_drift_and_is_not_preserved():
+    """A mirror with two pens is not a mirror."""
+    remote = _remote(*_all_rows())
+    remote[str(push_dataset.example_id("leaky-brief"))]["metadata"]["reviewed_by"] = (
+        "someone"
+    )
+
+    todo = push_dataset.plan(CASES, remote)
+
+    assert [row["metadata"]["key"] for row in todo.update] == ["leaky-brief"]
+    assert set(todo.update[0]["metadata"]) == {"key", "why", "mirror_source"}
+
+
+def test_a_server_maintained_split_key_is_not_read_as_drift():
+    """`Example` carries no `split` field, so a split comes back in metadata.
+
+    Counted as drift, it rewrites every row on every push and the verification
+    re-read plans them again -- a push that can never converge, on a key nobody
+    here wrote.
+    """
+    remote = _remote(*_all_rows())
+    remote[str(push_dataset.example_id("genuine-fit"))]["metadata"]["dataset_split"] = [
+        "base"
+    ]
+
+    assert push_dataset.plan(CASES, remote).counts() == (0, 0, len(CASES), 0)
+
+
+def test_a_row_that_no_case_claims_is_planned_for_deletion():
+    """Pruning is what stops a renamed or deleted fixture living on."""
+    stray = "8f14e45f-ceea-4670-94ab-8f0f1e2f3a4b"
+    remote = _remote(*_all_rows()) | {
+        stray: {"inputs": {"brief": "added by hand"}, "outputs": {}, "metadata": {}}
+    }
+
+    todo = push_dataset.plan(CASES, remote)
+
+    assert todo.prune == (stray,)
+    assert todo.counts() == (0, 0, len(CASES), 1)
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        {},
+        _remote(*_all_rows()),
+        _remote(*_all_rows()[:2]),
+        _remote(*_all_rows()) | {"8f14e45f-ceea-4670-94ab-8f0f1e2f3a4b": {}},
+    ],
+    ids=["empty", "full", "partial", "with-stray"],
+)
+def test_every_case_is_planned_exactly_once(remote):
+    """A plan can never both write and delete the same row.
+
+    The partition is the invariant: every fixture lands in exactly one of
+    create/update/unchanged, and `prune` touches none of them. Overlap here
+    means a push that deletes what it just wrote, order-dependently.
+    """
+    todo = push_dataset.plan(CASES, remote)
+    groups = [
+        {row["id"] for row in todo.create},
+        {row["id"] for row in todo.update},
+        {row["id"] for row in todo.unchanged},
+    ]
+
+    assert set().union(*groups) == {
+        str(push_dataset.example_id(case.key)) for case in CASES
+    }
+    assert sum(len(group) for group in groups) == len(CASES)
+    assert set(todo.prune).isdisjoint(set().union(*groups))
+
+
+def test_every_scout_case_field_reaches_the_dataset():
+    """A field added to the fixture and not mirrored is scored as a pass.
+
+    The dataset would assert less than the file does, and the dimension it
+    stopped checking reads exactly like one that was checked and satisfied --
+    the collapse invariant 14 forbids for `fit_percent`, arriving in a new
+    medium.
+    """
+    assert {
+        *push_dataset._INPUT_FIELDS,
+        *push_dataset._OUTPUT_FIELDS,
+        *push_dataset._METADATA_FIELDS,
+    } == {field.name for field in fields(ScoutCase)}
+
+
+def test_a_field_the_mirror_does_not_carry_refuses_the_push(monkeypatch):
+    """The guard itself, not merely the partition it checks today."""
+    monkeypatch.setattr(
+        push_dataset,
+        "_OUTPUT_FIELDS",
+        ("expect_eligibility", "expect_disqualified", "expect_gap_markers"),
+    )
+
+    with pytest.raises(push_dataset.PushRefused, match="forbidden"):
+        push_dataset.mirror_row(_case("genuine-fit"))
+
+
+def test_an_example_round_trips_back_into_the_case_it_came_from():
+    """The offline proof that a dataset-driven run needs no second scorer.
+
+    `score_programmatically` takes a `ScoutCase`, and the scorers are what
+    `tests/` already covers. A translation layer built later on the other side
+    of the network is a second scoring path to keep right.
+    """
+    for case, row in zip(CASES, _all_rows(), strict=True):
+        rebuilt = push_dataset.case_from_example(
+            row["inputs"], row["outputs"], row["metadata"]
+        )
+        assert rebuilt == case
+        assert isinstance(rebuilt.forbidden, tuple)
+
+
+def test_an_unasserted_expectation_is_null_and_not_missing():
+    """ "The eval declines to assert here" is not "the field does not exist".
+
+    `silent-profile` asserts no eligibility verdict and `leaky-brief` asserts
+    no disqualification, both on purpose. Stripped rather than nulled, a case
+    that deliberately checks nothing on a dimension is indistinguishable from
+    one whose expectation was lost in transit.
+    """
+    rows = {row["metadata"]["key"]: row for row in _all_rows()}
+
+    assert rows["silent-profile"]["outputs"]["expect_eligibility"] is None
+    assert "expect_disqualified" in rows["leaky-brief"]["outputs"]
+    assert rows["leaky-brief"]["outputs"]["expect_disqualified"] is None
+
+
+def test_a_row_is_a_pure_function_of_its_case():
+    """No clock and no fresh uuid, or every push differs from every other."""
+    assert all(set(row) == {"id", *push_dataset._ROW_KEYS} for row in _all_rows())
+    assert _all_rows() == _all_rows()
+
+
+def test_the_prompt_under_test_is_not_baked_into_the_dataset():
+    """Frozen at push time, `SCOUT_PROMPT` becomes invisible to the eval.
+
+    The dataset would then grade last month's prompt against this month's
+    fixtures and report on neither -- the drift `prompts.rubric_brief()`
+    exists to prevent one directory over, in the other direction.
+    """
+    assert SCOUT_PROMPT not in json.dumps(_all_rows())
+
+
+def test_every_row_says_that_it_is_a_mirror():
+    """The only warning a UI editor gets is the one on the row in front of them."""
+    assert all(
+        row["metadata"]["mirror_source"] == "evals/scout_cases.py"
+        for row in _all_rows()
+    )
+    assert "scout_cases.py" in push_dataset.NOTICE
+    assert "overwritten" in push_dataset.NOTICE
+
+
+def test_pushing_into_a_dataset_this_mirror_never_wrote_is_refused():
+    """Refusal comes before the first write, not after it.
+
+    `--dataset` naming somebody's real dataset would otherwise overwrite four
+    rows in it and delete every other one, and the prune is not undone by
+    noticing afterwards.
+    """
+    foreign = {
+        "3f2504e0-4f89-41d3-9a0c-0305e82c3301": {
+            "inputs": {"question": "unrelated"},
+            "outputs": {},
+            "metadata": {"owner": "someone else"},
+        }
+    }
+    client = _fake_client(rows=foreign)
+
+    with pytest.raises(push_dataset.PushRefused, match="mirror_source"):
+        push_dataset.push(client, name="scout-regressions")
+
+    assert _writes(client) == []
+
+
+def test_a_dataset_that_does_not_exist_is_not_created_without_being_asked():
+    """A typo in `--dataset` creates a second mirror and reports success.
+
+    Gated on the existence check rather than on the create call, so the
+    refusal happens before anything is written -- which is what `PushRefused`
+    claims about itself.
+    """
+    client = _fake_client(missing=True)
+
+    with pytest.raises(push_dataset.PushRefused, match="--create"):
+        push_dataset.push(client, name="grant-writer-scout-cses", create=False)
+
+    assert ("create_dataset", "grant-writer-scout-cses") not in client.seen
+
+
+def test_a_missing_dataset_is_created_and_a_racing_push_is_not_an_error():
+    """Names are unique per workspace, so a concurrent create 409s.
+
+    Read-create-read rather than a lock: two people pushing the same fixtures
+    at once should both succeed, because they are pushing the same bytes.
+    """
+    client = _fake_client(rows={}, missing=True, racing=True)
+
+    dataset = push_dataset.ensure_dataset(client, "grant-writer-scout-cases")
+
+    assert dataset is client.dataset_obj
+    assert [call[0] for call in client.seen] == [
+        "read_dataset",
+        "create_dataset",
+        "read_dataset",
+    ]
+
+
+def test_a_push_with_nothing_to_do_writes_nothing_and_reads_twice():
+    """Two reads, zero writes, and no new dataset version.
+
+    The verification re-read is skipped when the first read already proved
+    there was nothing to verify -- a no-op push that cut a dataset version
+    every time would make the version history unreadable.
+    """
+    client = _fake_client(rows=_remote(*_all_rows()))
+
+    result = push_dataset.push(client)
+
+    assert _writes(client) == []
+    assert [call[0] for call in client.seen].count("list_examples") == 1
+    assert result.converged
+    assert result.planned.counts() == (0, 0, len(CASES), 0)
+
+
+def test_every_write_carries_every_mirrored_field():
+    """`update_examples` overwrites what it is given and leaves the rest.
+
+    So a diff-and-patch optimisation sending only the changed field would
+    silently preserve every hand-edit it did not happen to notice. Supplying
+    all three is what turns a partial API into a full overwrite.
+    """
+    remote = _remote(*_all_rows())
+    remote[str(push_dataset.example_id("genuine-fit"))]["outputs"] = {}
+    client = _fake_client(rows=remote)
+
+    push_dataset.push(client)
+
+    sent = [call for call in client.seen if call[0] == "update_examples"]
+    assert len(sent) == 1
+    updated = client.rows[str(push_dataset.example_id("genuine-fit"))]
+    assert set(updated) == set(push_dataset._ROW_KEYS)
+    assert updated["outputs"]["expect_eligibility"] == "STRONG"
+
+
+def test_a_write_that_did_not_take_is_reported_rather_than_assumed(monkeypatch):
+    """The read-back is what makes the idempotency claim checked, not written.
+
+    Whether `update_examples` replaces the `outputs` document or merges into
+    it is not settled by the SDK source. Rather than assert which, the push
+    re-plans against what came back and fails loudly when a write vanished --
+    the failure mode that would otherwise be a mirror reporting "1 updated"
+    forever while the row never changed.
+    """
+    monkeypatch.setenv("LANGSMITH_API_KEY", "dummy")
+    monkeypatch.setattr("sys.argv", ["evals.push_dataset"])
+    remote = _remote(*_all_rows())
+    remote[str(push_dataset.example_id("silent-profile"))]["outputs"] = {}
+    client = _fake_client(rows=remote, swallow_updates=True)
+    monkeypatch.setattr(push_dataset, "build_client", lambda: client)
+
+    assert push_dataset.main() == 1
+
+    assert [call[0] for call in client.seen].count("update_examples") == 1, (
+        "the push path was never reached, so the read-back was never exercised"
+    )
+    result = push_dataset.push(client)
+    assert result.converged is False
+    assert result.residual is not None
+    assert [row["metadata"]["key"] for row in result.residual.update] == [
+        "silent-profile"
+    ]
+
+
+def test_a_dry_run_plans_and_writes_nothing(monkeypatch):
+    """A plan is worth reading before a deletion, not after it."""
+    monkeypatch.setenv("LANGSMITH_API_KEY", "dummy")
+    monkeypatch.setattr("sys.argv", ["evals.push_dataset", "--dry-run"])
+    remote = _remote(*_all_rows())
+    remote[str(push_dataset.example_id("genuine-fit"))]["outputs"] = {}
+    client = _fake_client(rows=remote)
+    monkeypatch.setattr(push_dataset, "build_client", lambda: client)
+
+    assert push_dataset.main() == 0
+
+    assert _writes(client) == []
+    result = push_dataset.push(client, dry_run=True)
+    assert [row["metadata"]["key"] for row in result.planned.update] == ["genuine-fit"]
+    assert result.live is False
+    assert result.residual is None
+
+
+def test_nothing_is_deleted_when_pruning_is_off():
+    """A stray row left in place on purpose is not unfinished work.
+
+    `settled` must agree, or every `--no-prune` push would re-plan the same
+    stray, fail its own verification, and exit non-zero forever.
+    """
+    stray = "8f14e45f-ceea-4670-94ab-8f0f1e2f3a4b"
+    remote = _remote(*_all_rows()) | {
+        stray: {"inputs": {"brief": "added by hand"}, "outputs": {}, "metadata": {}}
+    }
+    client = _fake_client(rows=remote)
+
+    result = push_dataset.push(client, prune=False)
+
+    assert not [call for call in client.seen if call[0] == "delete_examples"]
+    assert result.planned.prune == (stray,)
+    assert result.converged
+
+
+def test_the_payload_dump_needs_no_credential_and_builds_no_client(
+    monkeypatch, tmp_path
+):
+    """The inspection path, and the only one a test can drive end to end.
+
+    It has to work on a machine with no LangSmith account at all, or the first
+    thing a reader does to find out what this pushes is push it.
+    """
+
+    def boom():
+        raise AssertionError("a client was built for a payload dump")
+
+    monkeypatch.setattr(push_dataset, "build_client", boom)
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
+    out = tmp_path / "rows.json"
+    monkeypatch.setattr("sys.argv", ["evals.push_dataset", "--out", str(out)])
+
+    assert push_dataset.main() == 0
+
+    assert [row["metadata"]["key"] for row in json.loads(out.read_text())] == [
+        case.key for case in CASES
+    ]
+
+
+def test_the_module_reads_no_credential_and_builds_no_client_at_import(monkeypatch):
+    """What keeps this file importable under a suite that blanks the key.
+
+    `Client()` resolves endpoint, key and workspace at construction, so one
+    built at module scope would make `tests/test_evals.py` uncollectable on a
+    clean checkout -- the offline contract broken by the import line alone.
+    """
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a client was constructed at import")
+
+    monkeypatch.setattr("langsmith.Client", boom)
+    monkeypatch.setenv("LANGSMITH_API_KEY", "")
+
+    reloaded = importlib.reload(push_dataset)
+
+    assert reloaded.plan(CASES, {}).counts() == (len(CASES), 0, 0, 0)
+
+
+def test_a_pruned_row_is_named_before_it_is_deleted(capsys):
+    """The one place this destroys someone's work by design.
+
+    Soft deletion and dataset versioning make it recoverable, but only for a
+    reader who knows it happened -- so the id and an excerpt of the row are
+    printed, and the plan block comes before the summary rather than after it.
+    """
+    stray = "8f14e45f-ceea-4670-94ab-8f0f1e2f3a4b"
+    remote = _remote(*_all_rows()) | {
+        stray: {
+            "inputs": {"brief": "a note somebody added by hand in the UI"},
+            "outputs": {},
+            "metadata": {},
+        }
+    }
+    client = _fake_client(rows=remote)
+
+    push_dataset.render(push_dataset.push(client, dry_run=True))
+
+    out = capsys.readouterr().out
+    assert stray in out
+    assert "a note somebody added by hand" in out
+    assert out.index(stray) < out.index("to prune")

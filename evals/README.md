@@ -12,12 +12,17 @@ uv run python -m evals.run_scout                  # all cases, with the judge
 uv run python -m evals.run_scout --no-judge       # programmatic scorers only
 uv run python -m evals.run_scout --case leaky-brief
 uv run python -m evals.run_scout --out results.json
+
+uv run python -m evals.push_dataset --dry-run     # what the mirror would change
+uv run python -m evals.push_dataset               # push it, then verify the push
+uv run python -m evals.push_dataset --out rows.json   # payloads only, no account
 ```
 
-**These call a real model and cost real money.** They are not collected by
-`pytest tests/` and do not run in CI — deliberately, and the reason is the same
-one `tests/conftest.py` encodes: the suite is offline by contract, CI configures
-no secrets, and a test that needs a live credential is a bug in the suite.
+**`run_scout` calls a real model and costs real money; `push_dataset` writes to
+a real workspace.** Neither is collected by `pytest tests/` and neither runs in
+CI — deliberately, and the reason is the same one `tests/conftest.py` encodes:
+the suite is offline by contract, CI configures no secrets, and a test that
+needs a live credential is a bug in the suite.
 
 ## What is here
 
@@ -25,8 +30,9 @@ no secrets, and a test that needs a live credential is a bug in the suite.
 |---|---|
 | `scout_cases.py` | Four fixtures and what a correct answer to each looks like. Pure data. |
 | `scorers.py` | Seven programmatic scorers and one LLM judge. Pure. |
-| `run_scout.py` | The runner. The only file that makes a network call. |
-| `../tests/test_evals.py` | Offline tests **of the scorers**, run on every push. |
+| `run_scout.py` | The runner. Calls a model; needs `ANTHROPIC_API_KEY`. |
+| `push_dataset.py` | Mirrors the fixtures into a LangSmith dataset. One direction, verified. Needs `LANGSMITH_API_KEY`. |
+| `../tests/test_evals.py` | Offline tests **of the scorers and the mirror**, run on every push. |
 
 That last row is the load-bearing one. An eval whose scoring is wrong reports a
 prompt regression as green, with the authority of a number attached — worse than
@@ -122,11 +128,42 @@ the mistake invariant 14 forbids for `fit_percent` — averaged back, a run that
 asserted almost nothing would read like one that asserted everything and was
 right.
 
-That feedback is the only write this directory makes to a LangSmith workspace, it
+That feedback is the only write **`run_scout`** makes to a LangSmith workspace, it
 happens only when tracing is already on, and a failure to post is printed and
-ignored — a measurement, never a gate. Nothing here creates a LangSmith dataset;
-promoting these cases to a managed one with `langsmith.evaluate` is a deliberate
-next step, not something a run does behind you. If it ever happens,
-`scout_cases.py` stays the source of truth and the dataset is a push-only mirror
-of it — two editable copies of a fixture set is the drift this repo keeps writing
-tests against.
+ignored — a measurement, never a gate.
+
+## The dataset mirror
+
+`push_dataset.py` is the other write, and it is nothing like the first one: it
+runs only when you run it, it does not care whether tracing is on, and a failure
+exits non-zero. A push is an operation on the world, and a failed one is a fact.
+
+```bash
+uv run python -m evals.push_dataset --dry-run
+```
+
+`scout_cases.py` stays the source of truth and the dataset is a **push-only
+mirror** of it. A hand-edit in the LangSmith UI is drift to overwrite, not a
+second opinion to merge, and a row no case claims is deleted — two editable
+copies of a fixture set is the drift this repo keeps writing tests against, and
+the point of a mirror is that only one end holds a pen.
+
+It proves that rather than promising it. Each case owns a `uuid5` example id
+derived from its key, so a push overwrites rows instead of appending them; the
+comparison is a digest **recomputed from what the dataset actually holds**,
+never a `source_sha` the mirror wrote earlier and would find agreeing with
+itself; and after writing, the push re-reads and re-plans. A second plan that is
+not empty means the write did not take, and that exits 1 rather than printing a
+count nobody checked.
+
+The reconciliation is a pure function of the fixtures and one fetch, so all of
+it is pinned offline in `tests/test_evals.py` — including the traps that would
+otherwise look like success: a `tuple` that JSON returns as a `list` and so
+differs from itself on every push, and the server-maintained `dataset_split` key
+that would read as somebody's hand-edit forever.
+
+Known limits, all in the module docstring: the dataset's own description is
+write-once (this SDK has no `update_dataset`), a rename is undetectable and
+leaves a stale fork, and pruning destroys hand-added rows by design — soft
+delete, with the id and an excerpt printed before the call, and `--no-prune` to
+opt out.
