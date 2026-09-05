@@ -11,6 +11,18 @@ pure half of it is, in `tests/test_evals.py`, because a mirror that is quietly
 wrong overwrites the fixture set with a lossy copy of itself and reports
 success doing it.
 
+The credential may sit in the file `.env.example` names, so `main` calls
+`load_dotenv()` itself. Nothing else on this import path does: `config.py`
+calls it at import and `run_scout` inherits that by importing it for
+`build_model`, while this module deliberately imports nothing from
+`grant_writer`. Without the call the documented `--dry-run` exited 1 saying the
+key was not set, on a machine where it was.
+
+A dry run writes nothing, and that includes the dataset itself: `push` forces
+`create` off under `dry_run`, so "what would a first push do?" can be answered
+against a name that does not exist yet without bringing it into being. `--out`
+goes further and builds no client and reads no environment file at all.
+
 `scout_cases.py` is the source of truth and this dataset is a push-only mirror
 of it. A hand-edit in the LangSmith UI is drift to overwrite, not a second
 opinion to merge -- two editable copies of a fixture set is the drift this repo
@@ -76,7 +88,9 @@ A rename is worse and is not detectable: the read raises not-found, `--create`
 makes a fresh empty dataset under the old name, and the renamed one becomes a
 stale fork that no longer receives pushes. The dataset name and URL are printed
 on every run for exactly this reason -- a person who renamed it sees the wrong
-link beside the name they expected.
+link beside the name they expected. `--dry-run` is the safe way to ask, because
+it is the one path that reports `(not created)` rather than making the fork it
+is warning about.
 
 A case key that was pruned and is later restored reuses an id the server has
 already seen soft-deleted, and neither this SDK nor its docs say what happens
@@ -111,6 +125,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any, TextIO
 
+from dotenv import load_dotenv
 from langsmith.utils import LangSmithConflictError, LangSmithNotFoundError
 
 from evals.scout_cases import CASES, ScoutCase
@@ -476,6 +491,10 @@ def push(
     programmatic `push(client, name="grant-writer-scout-cses")` is refused
     rather than quietly creating a second mirror and reporting success.
 
+    A dry run never creates, whatever `create` says. Same reasoning one level
+    down: `main` turns `create` on, so "write nothing" including the dataset
+    itself has to be enforced where `dry_run` is rather than asked of callers.
+
     `announce` is called with the planned result *before* `apply`, and is the
     only place the plan block is printed. Rendering afterwards was a claim this
     module made about itself and did not keep: a prune is destructive, and an
@@ -485,10 +504,20 @@ def push(
     existed = False
     snapshot: dict[str, dict[str, Any]] = {}
     try:
-        dataset, existed = ensure_dataset(client, name, create=create)
+        # `not dry_run` as well as `create`, because `main` turns `create` on
+        # for the default name: a plain `--dry-run` against a fresh workspace
+        # called `create_dataset` and printed the new dataset's URL directly
+        # above "Nothing was written." What it left behind carries no
+        # `mirror_source`, so `assert_ours` then refused the *next* real push
+        # -- the tool asking for `--adopt` on a dataset its own dry run made.
+        dataset, existed = ensure_dataset(client, name, create=create and not dry_run)
     except PushRefused:
         # A dry run against a name that does not exist is a fair question --
         # "what would a first push do?" -- and answering it must not create.
+        # Forcing `create` off above is what routes the question here instead
+        # of into a write, and it costs the answer nothing: a dataset that has
+        # just been created is as empty as the `{}` this path plans against,
+        # so the plan is identical and the create was pure side effect.
         if not dry_run:
             raise
     if dataset is not None:
@@ -690,6 +719,23 @@ def main() -> int:
                 json.dump(rows, handle, indent=2)
             print(f"Wrote {len(rows)} payloads to {args.out}. Nothing was pushed.")
             return 0
+
+        # Nothing else on this import path loads it. `config.py` calls
+        # `load_dotenv()` at import and `run_scout` inherits that by importing
+        # it for `build_model`; this module deliberately imports nothing from
+        # `grant_writer`, so without this line the key `.env.example` names
+        # read as unset however the file was filled in, and the documented
+        # `--dry-run` exited 1 on a machine where it was set.
+        #
+        # Below the `--out` return, and that placement is the care here. The
+        # suite blanks both credential names rather than popping them, because
+        # `load_dotenv` fills only names absent from `os.environ` -- but
+        # `test_the_payload_dump_needs_no_credential_and_builds_no_client`
+        # *deletes* them, to prove that path needs neither. Loading above the
+        # return would refill them from the developer's own file and hand an
+        # offline suite a live credential: invariant 19's failure, through a
+        # door `conftest.py` cannot hold shut.
+        load_dotenv()
 
         # Both spellings, for the reason invariant 19 spells out: the value is
         # read across two namespaces and checking only one reads as absent.

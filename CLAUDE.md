@@ -444,12 +444,18 @@ runs, and still produces plausible output.
 
     **Blanking `LANGSMITH_API_KEY` and `LANGCHAIN_API_KEY` is the half that does not depend on
     the list being complete.** Same `load_dotenv()` argument as `TAVILY_API_KEY`: blanked rather
-    than popped, because present-but-empty is what stops `config.py`'s import-time `load_dotenv()`
-    handing the real one back. Four names are a list upstream can extend; a credential is not, so
-    removing it is what makes a fifth spelling cost nothing. `test_review_fixes.py` §⑪ derives the
-    name set from `langsmith` itself rather than restating it, so an upstream addition fails a
-    vacuity guard there before it can quietly widen what the suite emits — restating the list in
-    the test would reproduce the bug's own shape, two hard-coded copies agreeing and both wrong.
+    than popped, because present-but-empty is what stops an import-time `load_dotenv()` handing
+    the real one back. **Two modules call it, not one** — `config.py` at import, and
+    `evals/push_dataset.main`, which imports nothing from the package and so loads the file itself
+    rather than refuse a credential that is set. The second is the one `conftest.py` cannot cover:
+    `test_the_payload_dump_needs_no_credential_and_builds_no_client` *deletes* both names to prove
+    that path needs neither, so a load sited above the `--out` early return would refill them from
+    the developer's own file and hand this suite a live key. Below it, and the deletion holds.
+    Four names are a list upstream can extend; a credential is not, so removing it is what makes a
+    fifth spelling cost nothing. `test_review_fixes.py` §⑪ derives the name set from `langsmith`
+    itself rather than restating it, so an upstream addition fails a vacuity guard there before it
+    can quietly widen what the suite emits — restating the list in the test would reproduce the
+    bug's own shape, two hard-coded copies agreeing and both wrong.
     That section asserts the credential's *presence*, never its value: pytest prints both sides of
     a failed comparison, so `== ""` puts a live key in the terminal and in the CI log of the very
     run that caught the regression. Observed while mutation-testing this entry, not theorised.
@@ -467,10 +473,18 @@ process — swap for `PostgresStore` before deploying.
 `tests/conftest.py` sets a dummy `ANTHROPIC_API_KEY`, forces tracing off under all four of the
 env spellings that enable it and blanks the LangSmith credential (invariant 19), and **blanks**
 `TAVILY_API_KEY` rather than popping it, so nothing hits the network. The distinction is
-load-bearing: `config.py` calls `load_dotenv()` at import, which only skips keys already present in
-`os.environ`, so popping handed a developer's real key straight back and the suite behaved one way
-locally and another on a clean checkout. Every consumer tests it with `if not os.getenv(...)`, so an
-empty string reads as absent. Tests that want a key set it with `monkeypatch`.
+load-bearing: `load_dotenv()` only skips keys already present in `os.environ`, so popping handed a
+developer's real key straight back and the suite behaved one way locally and another on a clean
+checkout. Every consumer tests it with `if not os.getenv(...)`, so an empty string reads as absent.
+Tests that want a key set it with `monkeypatch`.
+
+**Two modules call `load_dotenv()`**, and both reach this suite: `config.py` at import, which every
+test picks up through the package, and `evals/push_dataset.main`, which imports nothing from
+`grant_writer` and so loads the file itself rather than refuse a credential that is set. That
+second call sits *below* the `--out` early return on purpose — the test proving the payload dump
+needs no credential deletes both LangSmith names, and a load above the return would refill them
+from the developer's own file. Patch `push_dataset.load_dotenv` in any test that drives `main` past
+that return, or the assertion depends on whose machine it runs on.
 
 Tests assert on wiring by reaching into deepagents internals — `_check_fs_permission`,
 `supports_execution`, `graph.nodes["tools"].bound.tools_by_name`, `get_graph().nodes`. That is

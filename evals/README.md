@@ -13,7 +13,7 @@ uv run python -m evals.run_scout --no-judge       # programmatic scorers only
 uv run python -m evals.run_scout --case leaky-brief
 uv run python -m evals.run_scout --out results.json
 
-uv run python -m evals.push_dataset --dry-run     # what the mirror would change
+uv run python -m evals.push_dataset --dry-run     # the plan only; creates nothing
 uv run python -m evals.push_dataset               # push it, then verify the push
 uv run python -m evals.push_dataset --out rows.json   # payloads only, no account
 ```
@@ -31,7 +31,7 @@ needs a live credential is a bug in the suite.
 | `scout_cases.py` | Four fixtures and what a correct answer to each looks like. Pure data. |
 | `scorers.py` | Seven programmatic scorers and one LLM judge. Pure. |
 | `run_scout.py` | The runner. Calls a model; needs `ANTHROPIC_API_KEY`. |
-| `push_dataset.py` | Mirrors the fixtures into a LangSmith dataset. One direction, verified. Needs `LANGSMITH_API_KEY`. |
+| `push_dataset.py` | Mirrors the fixtures into a LangSmith dataset. One direction, verified. Needs `LANGSMITH_API_KEY`, which it loads from the environment file itself. |
 | `../tests/test_evals.py` | Offline tests **of the scorers and the mirror**, run on every push. |
 
 That last row is the load-bearing one. An eval whose scoring is wrong reports a
@@ -141,6 +141,21 @@ exits non-zero. A push is an operation on the world, and a failed one is a fact.
 ```bash
 uv run python -m evals.push_dataset --dry-run
 ```
+
+That dry run creates nothing, and "nothing" has to include the dataset itself.
+`main` turns `--create` on for the default name, so the flag documented to write
+nothing used to make an empty dataset on a fresh workspace and print its URL
+directly above the words "Nothing was written" — and the next real push was then
+refused by the ownership check, for adopting a dataset the dry run had made. It
+prints `(not created)` instead, which is also what makes it the safe way to
+check whether somebody renamed the mirror.
+
+The credential is read from the environment file rather than from the shell
+alone: this module imports nothing from `grant_writer`, so unlike `run_scout` it
+does not inherit `config.py`'s import-time `load_dotenv()` and calls one itself.
+`--out` is the exception and reads no file at all — it needs no credential, and
+proving that is what keeps the dump usable on a machine with no LangSmith
+account.
 
 `scout_cases.py` stays the source of truth and the dataset is a **push-only
 mirror** of it. A hand-edit in the LangSmith UI is drift to overwrite, not a

@@ -696,10 +696,24 @@ def _fake_client(*, rows=None, missing=False, racing=False, swallow_updates=Fals
 
 
 def _writes(client) -> list[tuple]:
+    """Every call that changes the workspace, the dataset itself included.
+
+    `create_dataset` is on the list for the reason it was missing from it: a
+    dry run that created the dataset it was only planning against satisfied
+    every "nothing was written" assertion in this file, because the one write
+    it made writes no example. A write-detector blind to a write is worse than
+    none -- it is the assertion the next reader trusts.
+    """
     return [
         call
         for call in client.seen
-        if call[0] in {"create_examples", "update_examples", "delete_examples"}
+        if call[0]
+        in {
+            "create_dataset",
+            "create_examples",
+            "update_examples",
+            "delete_examples",
+        }
     ]
 
 
@@ -1083,6 +1097,45 @@ def test_a_dry_run_plans_and_writes_nothing(monkeypatch):
     assert result.residual is None
 
 
+def test_a_dry_run_does_not_create_the_dataset_it_is_planning_against(
+    monkeypatch, capsys
+):
+    """ "Write nothing" has to include the dataset itself.
+
+    `main` turns `create` on for the default name, so the one flag documented
+    to write nothing called `create_dataset` on a fresh workspace and printed
+    the new dataset's URL directly above "Nothing was written." What it left
+    behind carries no `mirror_source`, so `assert_ours` then refused the *next*
+    real push -- the tool asking for `--adopt` on a dataset its own dry run had
+    made, and the two commands `evals/README.md` lists in that order unable to
+    follow each other on a clean workspace.
+
+    The create bought nothing, which is what makes it pure side effect: a
+    dataset that has just been created is as empty as the `{}` the refusal path
+    plans against, so both print the same four-line plan. The case above pairs
+    with this one and cannot replace it -- it runs against a dataset that
+    already exists, so it never reaches the branch that creates.
+    """
+    monkeypatch.setenv("LANGSMITH_API_KEY", "dummy")
+    monkeypatch.setattr("sys.argv", ["evals.push_dataset", "--dry-run"])
+    client = _fake_client(missing=True)
+    monkeypatch.setattr(push_dataset, "build_client", lambda: client)
+
+    assert push_dataset.main() == 0
+
+    assert ("create_dataset", push_dataset.DATASET_NAME) not in client.seen
+    assert _writes(client) == []
+    assert [call[0] for call in client.seen] == ["read_dataset"], (
+        "a dry run against a missing dataset reads once and stops; anything "
+        "more means it created one and then listed what it had just made"
+    )
+    out = capsys.readouterr().out
+    assert "(not created)" in out
+    assert re.findall(r"^  create\s+(\S+)$", out, re.MULTILINE) == [
+        case.key for case in CASES
+    ], "the plan a first push would make has to survive not creating anything"
+
+
 def test_nothing_is_deleted_when_pruning_is_off():
     """A stray row left in place on purpose is not unfinished work.
 
@@ -1125,6 +1178,69 @@ def test_the_payload_dump_needs_no_credential_and_builds_no_client(
     assert [row["metadata"]["key"] for row in json.loads(out.read_text())] == [
         case.key for case in CASES
     ]
+
+
+def test_the_payload_dump_does_not_reach_the_dotenv_loader(monkeypatch, tmp_path):
+    """The half of the credential fix that has to stay above the loader.
+
+    Pins invariant 19.
+    The suite blanks both LangSmith names rather than popping them, because
+    `load_dotenv` fills only names absent from `os.environ` -- so a blank one
+    is what stops the real key coming back. The case above *deletes* them,
+    which is the honest way to prove this path needs neither, and it is exactly
+    what a `load_dotenv()` sited one line higher would undo: a live credential
+    inside a suite that is offline by contract, arriving through a door
+    `conftest.py` cannot hold shut, opened by the fix to a different defect.
+    """
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the payload dump read an environment file")
+
+    monkeypatch.setattr(push_dataset, "load_dotenv", boom)
+    monkeypatch.setattr(push_dataset, "build_client", boom)
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
+    out = tmp_path / "rows.json"
+    monkeypatch.setattr("sys.argv", ["evals.push_dataset", "--out", str(out)])
+
+    assert push_dataset.main() == 0
+
+    assert len(json.loads(out.read_text())) == len(CASES)
+
+
+def test_the_credential_may_come_from_the_dotenv_file(monkeypatch):
+    """`main` read `os.environ` for a key nothing on this path had loaded.
+
+    `config.py` calls `load_dotenv()` at import and `run_scout` inherits that
+    by importing it for `build_model`. This module imports nothing from
+    `grant_writer` on purpose, so it was the one entry point in the repo where
+    a key sitting in the file `.env.example` names read as absent: the
+    documented `--dry-run` exited 1 saying the credential was not set, on a
+    machine where it was.
+
+    Both halves are driven with the loader stood in for, because the real one
+    reads the developer's own file -- asserting the refusal against it would
+    pass on a clean checkout and fail on the machine that has the key, which is
+    the machine-dependent green this suite is written to avoid everywhere else.
+    """
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
+    monkeypatch.setattr("sys.argv", ["evals.push_dataset", "--dry-run"])
+    client = _fake_client(rows=_remote(*_all_rows()))
+    monkeypatch.setattr(push_dataset, "build_client", lambda: client)
+
+    monkeypatch.setattr(push_dataset, "load_dotenv", lambda *a, **k: None)
+    assert push_dataset.main() == 1, "a file carrying no key is still no key"
+    assert client.seen == [], "a client was built with no credential to build it on"
+
+    monkeypatch.setattr(
+        push_dataset,
+        "load_dotenv",
+        lambda *a, **k: monkeypatch.setenv("LANGSMITH_API_KEY", "from-the-file"),
+    )
+
+    assert push_dataset.main() == 0
+    assert [call[0] for call in client.seen] == ["read_dataset", "list_examples"]
 
 
 def test_the_module_reads_no_credential_and_builds_no_client_at_import(monkeypatch):
