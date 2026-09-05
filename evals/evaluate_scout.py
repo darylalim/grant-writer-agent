@@ -56,6 +56,7 @@ import argparse
 import hashlib
 import os
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from langsmith import evaluate
@@ -63,7 +64,13 @@ from langsmith.evaluation import EvaluationResult, EvaluationResults
 
 from evals.push_dataset import _INPUT_FIELDS, DATASET_NAME, case_from_example
 from evals.run_scout import ask_judge, ask_scout
-from evals.scorers import JUDGE_PROMPT, Score, posting_scores, score_programmatically
+from evals.scorers import (
+    JUDGE_PROMPT,
+    Score,
+    feedback_fields,
+    posting_scores,
+    score_programmatically,
+)
 from grant_writer.config import COMPLIANCE_MODEL, DISCOVERY_MODEL
 from grant_writer.prompts import SCOUT_PROMPT
 
@@ -96,11 +103,16 @@ def scout_target(inputs: dict[str, Any]) -> dict[str, Any]:
     return {"output": ask_scout(**inputs)}
 
 
+#: Prefix, not a key. Both evaluators can break on the same row, and two rows
+#: posted under one key collapse into a single column that says which half
+#: broke only inside the comment text.
+HARNESS_KEY = "harness-error"
+
+
 def _result(score: Score) -> EvaluationResult:
     """One `Score` as the feedback row it becomes."""
-    return EvaluationResult(
-        key=score.name, score=float(score.passed), comment=score.detail or None
-    )
+    key, value, comment = feedback_fields(score)
+    return EvaluationResult(key=key, score=value, comment=comment)
 
 
 def _harness_error(where: str, exc: Exception) -> EvaluationResult:
@@ -121,7 +133,7 @@ def _harness_error(where: str, exc: Exception) -> EvaluationResult:
     here is subtler than silence, which is why it is worth the four lines.
     """
     return EvaluationResult(
-        key="harness-error",
+        key=f"{HARNESS_KEY}-{where}",
         score=0.0,
         comment=f"{where}: {type(exc).__name__}: {exc}",
     )
@@ -134,8 +146,16 @@ def _scorable(run: Run, example: Example | None) -> tuple[ScoutCase, str] | None
     limit or a dropped connection does not fail the row -- it arrives here as
     `run.error` set and no output. Scored anyway, that posts `parses: 0.0` and a
     row of zeros beside it: a dead API rendered as a prompt regression, with a
-    number attached. The caller turns `None` into "post nothing", which is the
-    same answer a skipped scorer gets and for the same reason.
+    number attached.
+
+    An *empty* reply from a call that succeeded is the opposite case and must
+    not join it. `run_scout` scores that `parses: 0.0, eligibility: 0.0`, which
+    is correct -- the model was asked and produced nothing, and that is a
+    regression a reader needs to see. Turning it away here because the string
+    is short would leave the two runners disagreeing about the one row they
+    most need to agree on, with the experiment blind to it. Only the target
+    failing makes a row unscorable: an error, a missing row, or an output that
+    is not a string at all.
 
     `example` is optional because the SDK's evaluator contract is: an evaluator
     attached to a *project* rather than to a dataset is run on live traces and
@@ -151,9 +171,7 @@ def _scorable(run: Run, example: Example | None) -> tuple[ScoutCase, str] | None
     same way.
     """
     output = (run.outputs or {}).get("output")
-    if example is None or run.error:
-        return None
-    if not isinstance(output, str) or not output.strip():
+    if example is None or run.error or not isinstance(output, str):
         return None
     case = case_from_example(
         dict(example.inputs or {}),
@@ -182,9 +200,12 @@ def programmatic_scores(run: Run, example: Example | None) -> EvaluationResults:
             return {"results": []}
         case, output = scorable
         scores = posting_scores(score_programmatically(case, output))
+        # Inside the `try`, not after it. `EvaluationResult` forbids extra
+        # fields, so a `Score` that grows one raises here -- and outside, that
+        # raise is the very fallback this catch exists to avoid.
+        return {"results": [_result(score) for score in scores]}
     except Exception as exc:  # noqa: BLE001 - a broken eval is not a verdict
         return {"results": [_harness_error("programmatic", exc)]}
-    return {"results": [_result(score) for score in scores]}
 
 
 def grounding_judge(run: Run, example: Example | None) -> EvaluationResults:
@@ -201,9 +222,12 @@ def grounding_judge(run: Run, example: Example | None) -> EvaluationResults:
             return {"results": []}
         case, output = scorable
         scores = posting_scores([ask_judge(case, output)])
+        # Inside the `try`, not after it. `EvaluationResult` forbids extra
+        # fields, so a `Score` that grows one raises here -- and outside, that
+        # raise is the very fallback this catch exists to avoid.
+        return {"results": [_result(score) for score in scores]}
     except Exception as exc:  # noqa: BLE001 - a broken eval is not a verdict
         return {"results": [_harness_error("judge", exc)]}
-    return {"results": [_result(score) for score in scores]}
 
 
 def _sha(text: str) -> str:
@@ -241,38 +265,80 @@ def experiment_metadata(*, dataset: str, judge: bool) -> dict[str, Any]:
     }
 
 
-def render(rows: Iterable[Any], *, out: Any = None) -> int:
-    """Print a per-row table. Returns the number of real failures.
+@dataclass(frozen=True)
+class Tally:
+    """What one experiment came to, counted apart rather than summed.
+
+    `broken` is separate from `failed` and that is the whole reason this is a
+    dataclass and not an int. A `harness-error` row scores `0.0` like a failed
+    check does, so one counter folds the eval's own malfunction into the
+    scout's -- and a run whose judge 529'd on every row would print the same
+    line as one with four real regressions in it. `_harness_error` exists to
+    stop exactly that collapse; counting it as a failure undoes it one layer up.
+
+    `blank` is separate for the opposite reason. `parses_cleanly` never skips,
+    so a scorable row always posts at least one verdict -- which makes an empty
+    batch mean "this row could not be scored at all", never "this case asserted
+    nothing". Worth its own number rather than its own silence.
+    """
+
+    checked: int = 0
+    failed: int = 0
+    broken: int = 0
+    blank: int = 0
+
+    def summary(self) -> str:
+        """The closing line, shaped like `run_scout.main`'s.
+
+        With a denominator, and that is not cosmetic: a run in which every
+        model call died has nothing to fail, so a bare failure count prints
+        `0` for it -- the same line a perfect run prints. `0/0 checks passed`
+        cannot be read that way.
+        """
+        lines = [f"{self.checked - self.failed}/{self.checked} checks passed."]
+        if self.broken:
+            lines.append(
+                f"{self.broken} harness error(s): the eval broke, not the scout."
+            )
+        if self.blank:
+            lines.append(f"{self.blank} row(s) scored nothing at all.")
+        return " ".join(lines)
+
+
+def render(rows: Iterable[Any]) -> Tally:
+    """Print a per-row table and count what it showed.
 
     Deliberately shaped like `run_scout._render`: the same eval read two ways
     should not need the reader to learn two layouts. A row with no results is
-    printed as such rather than skipped -- that is either a target that never
-    answered or a case that asserted nothing, and both are worth seeing.
+    printed as such rather than skipped -- it means the target never answered,
+    and a table that omits it reads as a table of everything that happened.
 
-    `out=None` rather than `out=sys.stdout`, because a default argument is
-    bound once at import and would then ignore every later redirect -- the one
-    `capsys` installs included. `push_dataset._out` carries the same note, and
-    the bug it describes is one this repo has already shipped once.
+    Prints to `sys.stdout` and takes no stream. `push_dataset.render` takes one
+    because its tests redirect it; here the summary line lives in `main`, so a
+    stream threaded through this function alone would split one report across
+    two destinations -- which is worse than not offering the choice.
     """
-    stream = sys.stdout if out is None else out
-    failures = 0
+    checked = failed = broken = blank = 0
     for row in rows:
         example = row["example"]
         key = (example.metadata or {}).get("key", str(example.id))
-        print(f"\n{'=' * 78}\n{key}\n{'-' * 78}", file=stream)
+        print(f"\n{'=' * 78}\n{key}\n{'-' * 78}")
         results = row["evaluation_results"]["results"]
         if not results:
-            print("  · nothing posted", file=stream)
+            blank += 1
+            print("  · nothing posted -- the target never answered")
             continue
         for result in results:
+            if result.key.startswith(HARNESS_KEY):
+                broken += 1
+                print(f"  ! {result.key:<24} {result.comment or ''}")
+                continue
+            checked += 1
             passed = bool(result.score)
             if not passed:
-                failures += 1
-            print(
-                f"  {'✓' if passed else '✗'} {result.key:<14} {result.comment or ''}",
-                file=stream,
-            )
-    return failures
+                failed += 1
+            print(f"  {'✓' if passed else '✗'} {result.key:<24} {result.comment or ''}")
+    return Tally(checked=checked, failed=failed, broken=broken, blank=blank)
 
 
 def main() -> int:
@@ -329,8 +395,8 @@ def main() -> int:
         # judge needing the scout's answer.
         max_concurrency=0,
     )
-    failures = render(results)
-    print(f"\n{'=' * 78}\n{failures} failing check(s). {results.experiment_name}")
+    tally = render(results)
+    print(f"\n{'=' * 78}\n{tally.summary()} {results.experiment_name}")
     # Zero either way, exactly as `run_scout.main` returns zero: this is a
     # measurement, and a non-zero exit invites wiring it into a pipeline that
     # then blocks on a model's mood.

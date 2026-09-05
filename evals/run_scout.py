@@ -49,6 +49,7 @@ from evals.scorers import (
     JUDGE_PROMPT,
     Score,
     build_judge_payload,
+    feedback_fields,
     posting_scores,
     read_judge_verdict,
     score_programmatically,
@@ -248,12 +249,13 @@ def post_scores(run: RunTree | None, scores: list[Score]) -> None:
         # seven were computed reads exactly like a run of four scorers, the
         # collapse the skipped-scorer rule above exists to prevent, arriving by
         # another route.
+        key, value, comment = feedback_fields(score)
         try:
             client.create_feedback(
                 run.id,
-                key=score.name,
-                score=float(score.passed),
-                comment=score.detail or None,
+                key=key,
+                score=value,
+                comment=comment,
                 # Both supplied on purpose. `session_id` is what the run_id-only
                 # form was deprecated in favour of; `trace_id` lets the write be
                 # routed without a lookup on the far side.

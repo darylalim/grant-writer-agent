@@ -266,7 +266,14 @@ telling all three apart is why the harness has any code in it at all.
 `evaluate` swallows whatever the target raises and logs it, so a rate limit
 does not fail a row -- the evaluator is handed no output and `run.error` set.
 Scored anyway, that reports a dead API as a prompt regression with a number
-attached, so it is checked for and skipped like any other unscoreable row.
+attached, so a row whose target failed posts nothing and is counted apart.
+
+Note what that does *not* cover. A call that succeeded and returned an empty
+string is the scout's answer, and `run_scout` scores it -- `parses` fails,
+because nothing parsed. Turning that row away here for being short would leave
+the experiment blind to a regression the other runner reports plainly, so only
+the target failing makes a row unscorable: an error, a missing row, or an
+output that is not a string at all.
 
 An evaluator that raises is not silent, but it reports badly. LangSmith emits
 one error result per feedback key it infers from the evaluator's source, it
@@ -275,8 +282,20 @@ evaluators here build their results in a comprehension -- it falls back to the
 function's own name. So an uncaught exception lands as a score-less
 `programmatic_scores` row on a table whose other columns are named for
 scorers, carrying no exception, no case, and no clue which half broke. Catching
-it and posting `harness-error` is what makes that legible; the key is
-deliberately not any scorer's name.
+it and posting `harness-error-programmatic` or `harness-error-judge` is what
+makes that legible -- keyed per half, because both can break on the same row,
+and neither key is any scorer's name.
+
+### Three numbers, not one
+
+The closing line counts those apart rather than summing them, and both
+separations are load-bearing. A `harness-error` row scores `0.0` exactly as a
+failed check does, so one total reports a judge that 529'd on every row
+identically to four real regressions -- the collapse `harness-error` exists to
+prevent, undone in the line a person actually reads. And the passes are printed
+over a denominator: a run in which every model call died has nothing to fail,
+so a bare failure count prints `0` for it, which is what a flawless run prints
+too. `0/0 checks passed` cannot be read that way.
 
 ### What does not disarm it
 

@@ -332,6 +332,21 @@ def posting_scores(scores: list[Score]) -> list[Score]:
     return [score for score in scores if not score.skipped]
 
 
+def feedback_fields(score: Score) -> tuple[str, float, str | None]:
+    """The three values a `Score` becomes wherever it is written down.
+
+    Written twice before this: `run_scout.post_scores` passing them to
+    `create_feedback`, and `evaluate_scout._result` building an
+    `EvaluationResult`. Two different SDK surfaces, but the *mapping* is one
+    decision -- that a skipped-but-passed score is a `1.0`, and that an empty
+    detail is no comment rather than an empty one. Changed in one place only,
+    the two runners write different feedback for identical `Score` objects and
+    nothing fails; it is the same argument `posting_scores` above carries, one
+    step further along.
+    """
+    return score.name, float(score.passed), score.detail or None
+
+
 def score_programmatically(case: ScoutCase, output: str) -> list[Score]:
     """Run every non-model scorer over one scout output."""
     parsed = parse_scored_markdown(output, key=case.key)

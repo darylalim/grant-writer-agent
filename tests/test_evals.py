@@ -52,6 +52,7 @@ from evals.scorers import (
     JUDGE_PROMPT,
     Score,
     build_judge_payload,
+    feedback_fields,
     posting_scores,
     read_judge_verdict,
     score_programmatically,
@@ -1562,6 +1563,37 @@ def _keys(results) -> list[str]:
     return [result.key for result in results["results"]]
 
 
+def test_a_score_becomes_the_same_feedback_whichever_runner_writes_it():
+    """One mapping, two SDK surfaces, and an empty detail to tell them apart.
+
+    `post_scores` hands these three to `create_feedback` and `_result` builds
+    an `EvaluationResult` from them. The surfaces differ; the decision does
+    not -- that a passing score is `1.0`, and that an empty detail is *no*
+    comment rather than an empty one. Split in two, a change to either lands
+    in one runner and the two write different feedback for identical `Score`
+    objects with nothing failing.
+
+    Asserted with an empty `detail`, because that is the only input the two
+    spellings disagree about: every fixture scorer sets one, so a case built
+    from `CASES` alone cannot see `detail` and `detail or None` come apart.
+    """
+    assert feedback_fields(Score(name="gaps", passed=True, detail="")) == (
+        "gaps",
+        1.0,
+        None,
+    )
+    assert feedback_fields(Score(name="parses", passed=False, detail="no rows")) == (
+        "parses",
+        0.0,
+        "no rows",
+    )
+
+    # And that both writers actually go through it. A correct helper nothing
+    # calls is the duplication it was extracted to remove, still in place.
+    assert "feedback_fields" in inspect.getsource(run_scout.post_scores)
+    assert "feedback_fields" in inspect.getsource(evaluate_scout._result)
+
+
 def test_a_skipped_scorer_is_omitted_rather_than_posted_as_a_pass():
     """A case that declines to assert a dimension has not passed it.
 
@@ -1684,17 +1716,18 @@ def test_a_row_carrying_a_field_the_scout_call_does_not_take_is_refused():
             evaluate_scout.scout_target({**row, stray: "anything"})
 
 
-def test_the_table_distinguishes_a_row_that_posted_nothing(capsys):
-    """Three outcomes, and the one that must not read as a pass.
+def test_the_table_counts_a_broken_eval_apart_from_a_failing_scout(capsys):
+    """Three outcomes, three numbers, and the two that must not be summed.
 
-    `render` is the only thing a person actually looks at after a run, and the
-    row that posted nothing is the one worth printing rather than skipping: it
-    is either a case that asserted nothing or a model call that died, and a
-    table that simply omits it reads as a table of everything that happened.
+    A `harness-error` row scores `0.0` exactly as a failed check does, so one
+    counter reports a judge that 529'd on every row identically to four real
+    regressions -- `_harness_error` exists to stop that collapse, and folding
+    it back into the failure total undoes it one layer up, in the line a
+    person actually reads.
 
-    The failure count is the other half. It counts posted verdicts that failed,
-    so an empty row contributes nothing to it -- the same rule `posting_scores`
-    holds one layer down, arriving where a human reads it.
+    The denominator is the other half. A run in which every model call died
+    has nothing to fail, so a bare failure count prints `0` for it: the same
+    line a perfect run prints. `0/0 checks passed` cannot be read that way.
     """
     rows = [
         {
@@ -1713,18 +1746,41 @@ def test_the_table_distinguishes_a_row_that_posted_nothing(capsys):
         {
             "example": SimpleNamespace(id="row-c", metadata=None),
             "evaluation_results": {
-                "results": [EvaluationResult(key="harness-error", score=0.0)]
+                "results": [
+                    EvaluationResult(key="harness-error-judge", score=0.0, comment="x")
+                ]
             },
         },
     ]
 
-    assert evaluate_scout.render(rows) == 2
+    tally = evaluate_scout.render(rows)
+
+    assert (tally.checked, tally.failed) == (2, 1)
+    assert (tally.broken, tally.blank) == (1, 1)
+    assert tally.summary().startswith("1/2 checks passed.")
+    assert "harness error" in tally.summary()
+    assert "scored nothing" in tally.summary()
 
     printed = capsys.readouterr().out
     assert "nothing posted" in printed
     assert "genuine-fit" in printed and "leaky-brief" in printed
     # No `key` in metadata, so the row is named by its id rather than dropped.
     assert "row-c" in printed
+
+
+def test_a_run_that_measured_nothing_does_not_read_as_a_clean_one():
+    """The line a person scrolls to, on the run that has least to say.
+
+    Every row's model call died, so nothing was checked and nothing failed. A
+    bare failure count is `0` here and `0` on a flawless run, and the two are
+    the furthest apart an experiment gets.
+    """
+    dead = evaluate_scout.Tally(checked=0, failed=0, broken=0, blank=4)
+    clean = evaluate_scout.Tally(checked=24, failed=0, broken=0, blank=0)
+
+    assert dead.summary() != clean.summary()
+    assert dead.summary().startswith("0/0 checks passed.")
+    assert clean.summary() == "24/24 checks passed."
 
 
 def test_a_target_that_never_answered_is_not_scored_as_a_bad_draft(monkeypatch):
@@ -1739,12 +1795,14 @@ def test_a_target_that_never_answered_is_not_scored_as_a_bad_draft(monkeypatch):
     them happening to return zeros: reaching them at all is the failure.
 
     The first row is the one that earned the `run.error` check its own line.
-    Every other row here has no usable output, so the type-and-emptiness test
-    alone would turn them all away and the error test would be dead code that
-    reads like a guard. A row carrying *both* text and an error is what tells
-    them apart -- a partially traced call, where something came back and the
-    run still failed -- and scoring that is the same collapse as scoring
-    nothing at all, arriving with enough output to look like a verdict.
+    Every other row here has no usable output, so the type test alone would
+    turn them away and the error test would be dead code that reads like a
+    guard. A row carrying *both* text and an error is what tells them apart --
+    a partially traced call, where something came back and the run still
+    failed -- and scoring that is the same collapse as scoring nothing at all,
+    arriving with enough output to look like a verdict.
+
+    An empty reply is deliberately not in this list; see the case below.
     """
 
     def boom(*args, **kwargs):
@@ -1758,12 +1816,32 @@ def test_a_target_that_never_answered_is_not_scored_as_a_bad_draft(monkeypatch):
         _run(GOOD, error="RuntimeError('overloaded_error')"),
         _run(None, error="RuntimeError('overloaded_error')"),
         _run(None),
-        _run(""),
-        _run("   "),
         _run({"not": "a string"}),
     ):
         assert evaluate_scout.programmatic_scores(run, example) == {"results": []}
         assert evaluate_scout.grounding_judge(run, example) == {"results": []}
+
+
+def test_an_empty_reply_is_the_scouts_answer_and_is_scored_like_one():
+    """The one row the two runners most need to agree about.
+
+    A call that succeeds and returns nothing is a prompt regression, and
+    `run_scout` reports it as one -- `parses` fails because no criterion
+    parsed, and `eligibility` fails because there is no verdict to compare.
+    Turning the row away here for being short would leave the experiment
+    blind to exactly the failure it exists to catch, while the other runner
+    saw it plainly. Only the *target* failing makes a row unscorable.
+    """
+    for output in ("", "   "):
+        posted = evaluate_scout.programmatic_scores(
+            _run(output), _example("genuine-fit")
+        )
+        direct = posting_scores(score_programmatically(_case("genuine-fit"), output))
+
+        assert [(r.key, r.score) for r in posted["results"]] == [
+            (score.name, float(score.passed)) for score in direct
+        ]
+        assert ("parses", 0.0) in [(r.key, r.score) for r in posted["results"]]
 
 
 def test_an_evaluator_with_no_reference_row_posts_nothing(monkeypatch):
@@ -1780,7 +1858,11 @@ def test_an_evaluator_with_no_reference_row_posts_nothing(monkeypatch):
     def boom(*args, **kwargs):
         raise AssertionError("scored a run with no reference row")
 
+    # `ask_judge` too, and not for tidiness: if the `example is None` check is
+    # ever reordered below the scoring, the real one runs and this
+    # offline-by-contract case opens a socket to answer whether a guard holds.
     monkeypatch.setattr(evaluate_scout, "case_from_example", boom)
+    monkeypatch.setattr(evaluate_scout, "ask_judge", boom)
 
     assert evaluate_scout.programmatic_scores(_run(GOOD), None) == {"results": []}
     assert evaluate_scout.grounding_judge(_run(GOOD), None) == {"results": []}
@@ -1821,6 +1903,7 @@ def test_an_evaluator_that_raises_says_so_rather_than_scoring_nothing(monkeypatc
     def boom(*args, **kwargs):
         raise ValueError("row is not a case")
 
+    _case_from_example = evaluate_scout.case_from_example
     monkeypatch.setattr(evaluate_scout, "case_from_example", boom)
     example, run = _example("genuine-fit"), _run(GOOD)
 
@@ -1829,11 +1912,25 @@ def test_an_evaluator_that_raises_says_so_rather_than_scoring_nothing(monkeypatc
         (evaluate_scout.grounding_judge, "judge"),
     ):
         posted = evaluator(run, example)
-        assert _keys(posted) == ["harness-error"]
+        # Keyed per half. Both can break on the same row, and one shared key
+        # writes two feedback records into one column whose only difference is
+        # a prefix inside the comment.
+        assert _keys(posted) == [f"harness-error-{where}"]
         result = posted["results"][0]
         assert result.score == 0.0
         assert where in (result.comment or "")
         assert "ValueError" in (result.comment or "")
+
+    # The mapping step is inside the `try` too, and only this reaches it:
+    # `EvaluationResult` forbids extra fields, so a `Score` that grows one
+    # raises where the scores are turned into rows rather than where they are
+    # computed. Outside the `try`, that raise is the SDK fallback the catch
+    # exists to avoid, reached from three lines further down.
+    monkeypatch.setattr(evaluate_scout, "case_from_example", _case_from_example)
+    monkeypatch.setattr(evaluate_scout, "_result", boom)
+
+    posted = evaluate_scout.programmatic_scores(run, example)
+    assert _keys(posted) == ["harness-error-programmatic"]
 
 
 def test_the_batched_results_are_a_shape_the_sdk_will_accept(monkeypatch):
@@ -1956,7 +2053,27 @@ def test_the_run_needs_both_credentials_before_it_spends_either(monkeypatch, cap
     monkeypatch.setenv("LANGCHAIN_API_KEY", "lc-test-key")
     assert evaluate_scout.main() == 0
     assert len(started) == 1
-    assert started[0]["data"] == push_dataset.DATASET_NAME
+
+    # The call itself, not just that one happened. `max_concurrency=0` carries
+    # a comment saying an upstream flip would otherwise parallelise a billed
+    # run with no edit here -- unasserted, deleting the argument is green.
+    call = started[0]
+    assert call["data"] == push_dataset.DATASET_NAME
+    assert call["max_concurrency"] == 0
+    assert call["evaluators"] == [
+        evaluate_scout.programmatic_scores,
+        evaluate_scout.grounding_judge,
+    ]
+    assert call["metadata"] == evaluate_scout.experiment_metadata(
+        dataset=push_dataset.DATASET_NAME, judge=True
+    )
+
+    # `--no-judge` drops the second evaluator and says so in the metadata, so
+    # an inverted flag cannot quietly spend a second model call per row.
+    monkeypatch.setattr("sys.argv", ["evals.evaluate_scout", "--no-judge"])
+    assert evaluate_scout.main() == 0
+    assert started[1]["evaluators"] == [evaluate_scout.programmatic_scores]
+    assert started[1]["metadata"]["judge"] is False
 
 
 def test_the_harness_builds_no_client_and_calls_no_loader_of_its_own(monkeypatch):

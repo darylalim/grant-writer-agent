@@ -19,9 +19,11 @@ directory would push without having an account to push it to.
 
 `evaluate_scout` needs both, being the two halves at once: it calls a model per
 row and scores the answers into an experiment on the dataset the mirror pushed.
-It checks for both before starting, and in that order -- `evaluate` posts a
-project before the first billed call, so a missing workspace credential costs
-nothing rather than costing four model calls and then failing to record them.
+Both are checked before `evaluate` is reached at all, which is the property that
+matters -- their relative order carries nothing, since neither costs anything to
+ask. What would cost is asking late: `evaluate` posts a project before the first
+billed call, so a workspace credential discovered missing in there is four model
+calls already spent and nowhere to record them.
 
 The one exception is `tests/test_evals.py`, which exercises the *scorers* in
 this package against canned model output, the mirror's reconciliation against a
