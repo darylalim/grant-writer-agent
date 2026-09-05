@@ -147,8 +147,11 @@ That dry run creates nothing, and "nothing" has to include the dataset itself.
 nothing used to make an empty dataset on a fresh workspace and print its URL
 directly above the words "Nothing was written" — and the next real push was then
 refused by the ownership check, for adopting a dataset the dry run had made. It
-prints `(not created)` instead, which is also what makes it the safe way to
-check whether somebody renamed the mirror.
+prints `(not created)` beside the name instead, and says in a line of its own
+that no dataset by that name exists — which together are what make it the safe
+way to check whether somebody renamed the mirror. The token alone would not be:
+declining to create is what discards the "no dataset named X" refusal, and a
+workspace that has simply never held the mirror prints the same `(not created)`.
 
 The credential is read from the environment file rather than from the shell
 alone: this module imports nothing from `grant_writer`, so unlike `run_scout` it

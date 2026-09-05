@@ -89,8 +89,10 @@ makes a fresh empty dataset under the old name, and the renamed one becomes a
 stale fork that no longer receives pushes. The dataset name and URL are printed
 on every run for exactly this reason -- a person who renamed it sees the wrong
 link beside the name they expected. `--dry-run` is the safe way to ask, because
-it is the one path that reports `(not created)` rather than making the fork it
-is warning about.
+it is the one path that reports the absence rather than making the fork it is
+warning about: `(not created)` beside the name, and a line saying outright that
+no dataset of that name exists. The token alone would not settle it -- a
+workspace that has never held the mirror prints the same one.
 
 A case key that was pruned and is later restored reuses an id the server has
 already seen soft-deleted, and neither this SDK nor its docs say what happens
@@ -453,6 +455,11 @@ class PushResult:
     #: pointing at another, on the line the docstring offers as the only signal
     #: that somebody renamed the mirror.
     name: str
+    #: `None` on exactly one path: a dry run whose dataset does not exist, the
+    #: one place `push` swallows `ensure_dataset`'s refusal. `render_plan`
+    #: reads it as "not found" and says so, which is only sound while that
+    #: stays the sole producer -- a second one would print the sentence over a
+    #: dataset that is merely unidentified.
     dataset_id: str | None
     #: `Dataset.url` is `Optional[str]`; the id is the fallback.
     url: str | None
@@ -515,9 +522,14 @@ def push(
         # A dry run against a name that does not exist is a fair question --
         # "what would a first push do?" -- and answering it must not create.
         # Forcing `create` off above is what routes the question here instead
-        # of into a write, and it costs the answer nothing: a dataset that has
+        # of into a write, and it costs the *plan* nothing: a dataset that has
         # just been created is as empty as the `{}` this path plans against,
-        # so the plan is identical and the create was pure side effect.
+        # so the rows are identical and the create was pure side effect.
+        #
+        # What swallowing does cost is the refusal's own sentence, which was
+        # the only thing on screen saying the dataset is not there. `dataset`
+        # stays `None` through to `PushResult.dataset_id`, and `render_plan`
+        # says it from that -- this branch being the sole way to produce it.
         if not dry_run:
             raise
     if dataset is not None:
@@ -591,10 +603,26 @@ def _out(out: TextIO | None) -> TextIO:
 
 
 def render_plan(result: PushResult, *, out: TextIO | None = None) -> None:
-    """What the push is about to do. Printed before any write, never after."""
+    """What the push is about to do. Printed before any write, never after.
+
+    Exactly one path produces `dataset_id is None` -- a dry run whose dataset
+    does not exist, where `push` swallows `ensure_dataset`'s refusal to keep
+    the question answerable without creating anything. That refusal carried the
+    only sentence saying the dataset is missing, so this says it instead.
+    `(not created)` alone cannot: it reads identically on a workspace that has
+    never held the mirror and on one where somebody renamed it, and telling
+    those two apart is the whole reason this module's docstring offers
+    `--dry-run` as the safe way to ask.
+    """
     stream = _out(out)
     where = result.url or result.dataset_id or "(not created)"
     print(f"\n{result.name}  {where}\n", file=stream)
+    if result.dataset_id is None:
+        print(
+            f"No dataset named {result.name!r} exists. The plan below is a "
+            f"first push; if you expected to find one, check for a rename.\n",
+            file=stream,
+        )
 
     for verb, rows in (
         ("create", result.planned.create),
@@ -683,7 +711,8 @@ def main() -> int:
     parser.add_argument(
         "--create",
         action="store_true",
-        help="make the dataset if it does not exist (implied for the default name)",
+        help="make the dataset if it does not exist (implied for the default "
+        "name; ignored under --dry-run, which creates nothing)",
     )
     parser.add_argument(
         "--adopt",
@@ -741,7 +770,8 @@ def main() -> int:
         # read across two namespaces and checking only one reads as absent.
         if not (os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")):
             print(
-                "LANGSMITH_API_KEY is not set; this writes to a real workspace.",
+                "Neither LANGSMITH_API_KEY nor LANGCHAIN_API_KEY is set; this "
+                "writes to a real workspace.",
                 file=sys.stderr,
             )
             return 1

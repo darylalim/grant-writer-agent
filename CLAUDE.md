@@ -484,7 +484,13 @@ test picks up through the package, and `evals/push_dataset.main`, which imports 
 second call sits *below* the `--out` early return on purpose — the test proving the payload dump
 needs no credential deletes both LangSmith names, and a load above the return would refill them
 from the developer's own file. Patch `push_dataset.load_dotenv` in any test that drives `main` past
-that return, or the assertion depends on whose machine it runs on.
+that return — `tests/test_evals._no_dotenv` is that patch, and carries the argument — or the
+assertion depends on whose machine it runs on. The real loader assigns straight into `os.environ`,
+which `monkeypatch` never saw happen and so never undoes, so a name `conftest.py` does not pre-blank
+leaks into every case collected after it. That patch cannot see a load moved to *module* scope,
+which fires before any test binds anything;
+`test_the_module_reads_no_credential_and_builds_no_client_at_import` covers that by patching
+`dotenv.load_dotenv` itself before its reload.
 
 Tests assert on wiring by reaching into deepagents internals — `_check_fs_permission`,
 `supports_execution`, `graph.nodes["tools"].bound.tools_by_name`, `get_graph().nodes`. That is

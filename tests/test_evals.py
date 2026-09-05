@@ -651,6 +651,20 @@ def _fake_client(*, rows=None, missing=False, racing=False, swallow_updates=Fals
         rows = store
         dataset_obj = dataset
 
+        #: The methods below that only look. `_writes` counts every *other*
+        #: recorded call as a write, so a mutating method added here is caught
+        #: with no second edit -- which is the direction that matters: the
+        #: defect this replaced was a write-detector that reported nothing,
+        #: and an over-reporting one cannot reproduce it. Add a *reading*
+        #: method and the first `_writes(client) == []` assertion it reaches
+        #: fails loudly, one line from the method that caused it.
+        #:
+        #: A class attribute rather than a marker on each function, because
+        #: two cases rebind `delete_examples` on the instance with a plain
+        #: stub; a detector reading marks off bound methods would stop seeing
+        #: those, and this one is unmoved by them.
+        reads = frozenset({"has_dataset", "read_dataset", "list_examples"})
+
         def has_dataset(self, *, dataset_name=None, dataset_id=None):
             calls.append(("has_dataset", dataset_name))
             return not missing
@@ -698,23 +712,36 @@ def _fake_client(*, rows=None, missing=False, racing=False, swallow_updates=Fals
 def _writes(client) -> list[tuple]:
     """Every call that changes the workspace, the dataset itself included.
 
-    `create_dataset` is on the list for the reason it was missing from it: a
+    Derived from the fake rather than restated beside it: `_Client.reads` names
+    the three methods that only look, and every other call recorded counts as a
+    write. The hand-maintained allowlist this replaces had the shape of the
+    defect it was meant to catch -- `create_dataset` was absent from it, so a
     dry run that created the dataset it was only planning against satisfied
     every "nothing was written" assertion in this file, because the one write
     it made writes no example. A write-detector blind to a write is worse than
-    none -- it is the assertion the next reader trusts.
+    none: it is the assertion the next reader trusts.
+
+    `client.reads` with no fallback, because the other fake in this file
+    records bare strings in `.seen` -- handed one, this has to raise rather
+    than report that nothing was written.
     """
-    return [
-        call
-        for call in client.seen
-        if call[0]
-        in {
-            "create_dataset",
-            "create_examples",
-            "update_examples",
-            "delete_examples",
-        }
-    ]
+    return [call for call in client.seen if call[0] not in client.reads]
+
+
+def _no_dotenv(monkeypatch) -> None:
+    """Stand `push_dataset`'s loader down, for any test that drives `main`.
+
+    `main` calls `load_dotenv()` below the `--out` early return, so every case
+    that gets past that return reads the developer's own environment file for
+    real. python-dotenv assigns straight into `os.environ`, which `monkeypatch`
+    never saw happen and so never undoes: any name `conftest.py` does not
+    pre-blank -- `LANGSMITH_ENDPOINT`, an uncommented `GRANT_WRITER_*_MODEL`
+    that `test_wiring` pins -- is then set for the rest of the session, and
+    which later cases see it depends on collection order. The assertion here
+    would depend on whose machine it runs on too, which is the machine-
+    dependent green this suite is written to avoid everywhere else.
+    """
+    monkeypatch.setattr(push_dataset, "load_dotenv", lambda *a, **k: None)
 
 
 def test_the_same_case_always_lands_on_the_same_example_id():
@@ -1059,6 +1086,7 @@ def test_a_write_that_did_not_take_is_reported_rather_than_assumed(monkeypatch):
     the failure mode that would otherwise be a mirror reporting "1 updated"
     forever while the row never changed.
     """
+    _no_dotenv(monkeypatch)
     monkeypatch.setenv("LANGSMITH_API_KEY", "dummy")
     monkeypatch.setattr("sys.argv", ["evals.push_dataset"])
     remote = _remote(*_all_rows())
@@ -1081,6 +1109,7 @@ def test_a_write_that_did_not_take_is_reported_rather_than_assumed(monkeypatch):
 
 def test_a_dry_run_plans_and_writes_nothing(monkeypatch):
     """A plan is worth reading before a deletion, not after it."""
+    _no_dotenv(monkeypatch)
     monkeypatch.setenv("LANGSMITH_API_KEY", "dummy")
     monkeypatch.setattr("sys.argv", ["evals.push_dataset", "--dry-run"])
     remote = _remote(*_all_rows())
@@ -1112,10 +1141,15 @@ def test_a_dry_run_does_not_create_the_dataset_it_is_planning_against(
 
     The create bought nothing, which is what makes it pure side effect: a
     dataset that has just been created is as empty as the `{}` the refusal path
-    plans against, so both print the same four-line plan. The case above pairs
-    with this one and cannot replace it -- it runs against a dataset that
-    already exists, so it never reaches the branch that creates.
+    plans against, so both plan the same four rows. What the refusal path has
+    to add is the sentence it swallowed -- `ensure_dataset` raised "no dataset
+    named X", `push` catches it to keep the question answerable without
+    creating, and `(not created)` on its own reads the same on a workspace that
+    has never held the mirror as on one where somebody renamed it. The case
+    above pairs with this one and cannot replace it -- it runs against a
+    dataset that already exists, so it never reaches the branch that creates.
     """
+    _no_dotenv(monkeypatch)
     monkeypatch.setenv("LANGSMITH_API_KEY", "dummy")
     monkeypatch.setattr("sys.argv", ["evals.push_dataset", "--dry-run"])
     client = _fake_client(missing=True)
@@ -1123,7 +1157,6 @@ def test_a_dry_run_does_not_create_the_dataset_it_is_planning_against(
 
     assert push_dataset.main() == 0
 
-    assert ("create_dataset", push_dataset.DATASET_NAME) not in client.seen
     assert _writes(client) == []
     assert [call[0] for call in client.seen] == ["read_dataset"], (
         "a dry run against a missing dataset reads once and stops; anything "
@@ -1134,6 +1167,56 @@ def test_a_dry_run_does_not_create_the_dataset_it_is_planning_against(
     assert re.findall(r"^  create\s+(\S+)$", out, re.MULTILINE) == [
         case.key for case in CASES
     ], "the plan a first push would make has to survive not creating anything"
+    assert [
+        line
+        for line in out.splitlines()
+        if push_dataset.DATASET_NAME in line and "(not created)" not in line
+    ], (
+        "the header token alone is not a rename signal -- it says the same "
+        "thing on a first push -- so the swallowed refusal has to be spoken "
+        "somewhere below it, or --dry-run is not what evals/README.md offers"
+    )
+
+
+def test_a_first_push_creates_the_dataset_the_dry_run_would_not():
+    """The other leg of `create and not dry_run`, and the one nothing drove.
+
+    Forcing `create` off under `dry_run` is a conjunction, and a suite that
+    only ever exercises the false leg cannot tell it from the constant
+    `create=False`. Mutated to that, every case in this file still passes while
+    the documented first push -- `--create`, or the default name, against a
+    workspace that has never held the mirror -- is refused and exits 1. The
+    call list below is the assertion that dies: `["read_dataset"]` and nothing
+    after it.
+
+    `adopt` is deliberately not passed. `ensure_dataset` reports `existed=False`
+    on the create branch and `assert_ours` short-circuits on that, so a dataset
+    this run made is ours by construction; a regression there would demand
+    `--adopt` for a dataset the tool had created seconds earlier.
+    """
+    client = _fake_client(missing=True)
+
+    result = push_dataset.push(client, create=True)
+
+    assert [call[0] for call in client.seen] == [
+        "read_dataset",
+        "create_dataset",
+        "list_examples",
+        "create_examples",
+        "list_examples",
+    ], "a first push reads, creates, then pushes into what it just made"
+    assert [call[0] for call in _writes(client)] == [
+        "create_dataset",
+        "create_examples",
+    ]
+    assert sorted(client.rows) == sorted(
+        str(push_dataset.example_id(case.key)) for case in CASES
+    )
+    assert result.live is True
+    assert result.planned.counts() == (len(CASES), 0, 0, 0)
+    assert result.converged is True
+    assert result.residual is not None
+    assert result.residual.counts() == (0, 0, len(CASES), 0)
 
 
 def test_nothing_is_deleted_when_pruning_is_off():
@@ -1160,14 +1243,33 @@ def test_the_payload_dump_needs_no_credential_and_builds_no_client(
 ):
     """The inspection path, and the only one a test can drive end to end.
 
+    Pins invariant 19.
     It has to work on a machine with no LangSmith account at all, or the first
-    thing a reader does to find out what this pushes is push it.
+    thing a reader does to find out what this pushes is push it -- and the
+    `delenv` pair below is the honest way to say so, since the suite elsewhere
+    *blanks* both names rather than popping them and `load_dotenv` fills only
+    names absent from `os.environ`. Deleting them is therefore exactly what a
+    `load_dotenv()` sited one line higher would undo: a live credential inside
+    a suite that is offline by contract, through a door `conftest.py` cannot
+    hold shut, opened by the fix to a different defect. So the loader is stood
+    in for too, and the two stubs are kept apart -- which of them fired is the
+    difference between "this path built a client" and "this path read an
+    environment file", and a shared one would name neither.
+
+    This case cannot see a `load_dotenv()` moved to *module* scope, which runs
+    long before `monkeypatch` reaches this binding;
+    `test_the_module_reads_no_credential_and_builds_no_client_at_import`
+    patches the source binding before its reload and covers that.
     """
 
-    def boom():
+    def boom_client():
         raise AssertionError("a client was built for a payload dump")
 
-    monkeypatch.setattr(push_dataset, "build_client", boom)
+    def boom_loader(*args, **kwargs):
+        raise AssertionError("the payload dump read an environment file")
+
+    monkeypatch.setattr(push_dataset, "build_client", boom_client)
+    monkeypatch.setattr(push_dataset, "load_dotenv", boom_loader)
     monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
     monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
     out = tmp_path / "rows.json"
@@ -1178,34 +1280,6 @@ def test_the_payload_dump_needs_no_credential_and_builds_no_client(
     assert [row["metadata"]["key"] for row in json.loads(out.read_text())] == [
         case.key for case in CASES
     ]
-
-
-def test_the_payload_dump_does_not_reach_the_dotenv_loader(monkeypatch, tmp_path):
-    """The half of the credential fix that has to stay above the loader.
-
-    Pins invariant 19.
-    The suite blanks both LangSmith names rather than popping them, because
-    `load_dotenv` fills only names absent from `os.environ` -- so a blank one
-    is what stops the real key coming back. The case above *deletes* them,
-    which is the honest way to prove this path needs neither, and it is exactly
-    what a `load_dotenv()` sited one line higher would undo: a live credential
-    inside a suite that is offline by contract, arriving through a door
-    `conftest.py` cannot hold shut, opened by the fix to a different defect.
-    """
-
-    def boom(*args, **kwargs):
-        raise AssertionError("the payload dump read an environment file")
-
-    monkeypatch.setattr(push_dataset, "load_dotenv", boom)
-    monkeypatch.setattr(push_dataset, "build_client", boom)
-    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
-    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
-    out = tmp_path / "rows.json"
-    monkeypatch.setattr("sys.argv", ["evals.push_dataset", "--out", str(out)])
-
-    assert push_dataset.main() == 0
-
-    assert len(json.loads(out.read_text())) == len(CASES)
 
 
 def test_the_credential_may_come_from_the_dotenv_file(monkeypatch):
@@ -1246,15 +1320,30 @@ def test_the_credential_may_come_from_the_dotenv_file(monkeypatch):
 def test_the_module_reads_no_credential_and_builds_no_client_at_import(monkeypatch):
     """What keeps this file importable under a suite that blanks the key.
 
+    Pins invariant 19.
     `Client()` resolves endpoint, key and workspace at construction, so one
     built at module scope would make `tests/test_evals.py` uncollectable on a
     clean checkout -- the offline contract broken by the import line alone.
+
+    The loader is patched at its *source*, `dotenv.load_dotenv`, and before the
+    reload: `from dotenv import load_dotenv` re-executes on a reload and binds
+    whatever the package holds then, so this is the one stub a module-scope
+    call would actually hit. Patching `push_dataset.load_dotenv` cannot -- that
+    binding is replaced long after import -- which is why the payload-dump case
+    above passes unchanged when the call is hoisted to module scope, and why
+    the claim it makes needed a second home rather than a second wording.
+    Hoisted, the environment file is read on import: before `conftest.py` can
+    blank anything on a fresh interpreter, and on every reload after.
     """
 
     def boom(*args, **kwargs):
         raise AssertionError("a client was constructed at import")
 
+    def boom_loader(*args, **kwargs):
+        raise AssertionError("an environment file was read at import")
+
     monkeypatch.setattr("langsmith.Client", boom)
+    monkeypatch.setattr("dotenv.load_dotenv", boom_loader)
     monkeypatch.setenv("LANGSMITH_API_KEY", "")
 
     try:
@@ -1266,6 +1355,12 @@ def test_the_module_reads_no_credential_and_builds_no_client_at_import(monkeypat
         # one today, which is the only reason leaving it would stay green --
         # the first case that does would fail `pytest.raises` with no
         # explanation, at a distance, depending on collection order.
+        #
+        # Undone first, or the restoring reload runs with the stubs still in
+        # and a failing case leaves the module holding them: the real failure
+        # arrives chained behind a second one, and every later case reads a
+        # `push_dataset` that never finished re-executing.
+        monkeypatch.undo()
         importlib.reload(push_dataset)
 
 
