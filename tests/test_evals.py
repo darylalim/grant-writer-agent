@@ -10,11 +10,19 @@ collected here, because these cost nothing and must run on every push. The
 distinction is the credential: `evals/run_scout.py` needs a real key, and
 CLAUDE.md is explicit that a test needing one is a bug in the suite.
 
-`evals/push_dataset.py` gets the same treatment for the same reason, at the end
-of this file: the network half of a mirror is two reads and three writes, and
-everything that *decides* what those are is a pure function of the fixture set
-and one fetch. A mirror that is quietly wrong overwrites the source of truth
-with a lossy copy of itself and reports success doing it.
+`evals/push_dataset.py` gets the same treatment for the same reason, in the
+second section below: the network half of a mirror is two reads and three
+writes, and everything that *decides* what those are is a pure function of the
+fixture set and one fetch. A mirror that is quietly wrong overwrites the source
+of truth with a lossy copy of itself and reports success doing it.
+
+`evals/evaluate_scout.py` closes the file, and it is the thinnest of the three
+by design: almost all of it is `evaluate()` itself, which builds a client and
+posts an experiment. What is left is the part that decides *what gets written
+down* -- which rows are scored at all, which verdicts are omitted rather than
+posted as passes, and what a broken evaluator says instead of nothing. Every
+one of those fails silently, and every one of them is reachable with no
+credential.
 
 Each case below is a scout output that is *wrong in one specific way*, checked
 against the scorer that has to notice. A scorer is only worth having if it fails
@@ -23,22 +31,28 @@ on something, and the cheapest way to be sure of that is to hand it the failure.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import inspect
 import json
 import re
 import uuid
 from dataclasses import fields, replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langsmith.evaluation import EvaluationResult
+from langsmith.evaluation.evaluator import run_evaluator
 from langsmith.run_trees import RunTree
 from langsmith.utils import LangSmithConflictError, LangSmithNotFoundError
 
-from evals import push_dataset, run_scout
+from evals import evaluate_scout, push_dataset, run_scout
 from evals.scorers import (
     JUDGE_PROMPT,
     Score,
     build_judge_payload,
+    posting_scores,
     read_judge_verdict,
     score_programmatically,
 )
@@ -1497,3 +1511,489 @@ def test_a_field_mirrored_into_two_groups_is_refused(monkeypatch):
 
     with pytest.raises(push_dataset.PushRefused, match="more than once"):
         push_dataset.mirror_row(_case("genuine-fit"))
+
+
+# ---- the dataset-driven evaluate() harness ----------------------------------
+#
+# `evaluate()` itself is not reachable here: it constructs a `Client`, resolves
+# the dataset by name, and POSTs an experiment before the first row runs. What
+# these cover is everything it calls -- the target, the two evaluators, and the
+# metadata the experiment carries -- because that is where this harness can be
+# wrong without saying so. An evaluator cannot fail *usefully*: LangSmith
+# infers the feedback keys it would report an error under from literal
+# `{"key": ...}` dicts in the source and, finding none, falls back to the
+# function's own name -- so an uncaught exception posts one score-less row
+# keyed `programmatic_scores`, on a table whose other columns are named for
+# scorers. A row that scored nothing, a row whose model call died, and a row
+# whose scorer raised are three different facts, and only the last of them
+# arrives with a name on it.
+
+
+def _example(key: str):
+    """A dataset row as `evaluate` hands it to an evaluator.
+
+    Built through `_row` and `_remote` rather than by hand, so it is the same
+    JSON round trip the mirror tests use -- which is the one that turns
+    `forbidden` back into a list. A hand-built namespace would hold the tuple
+    `scout_cases.py` declares and never exercise `case_from_example`'s job of
+    putting it back, since a list makes the frozen dataclass unhashable.
+    """
+    row = _row(key)
+    return SimpleNamespace(id=row["id"], **_remote(row)[row["id"]])
+
+
+def _run(output, error=None):
+    """The `Run` an evaluator reads.
+
+    The evaluators themselves touch only `outputs` and `error`. `id` is here
+    because `run_evaluator(...).evaluate_run` stamps it onto the feedback it
+    builds, and that is the path the shape case below runs -- a stand-in
+    without one raises inside the SDK rather than in anything of ours. Fixed
+    rather than minted, so no case here depends on a clock.
+    """
+    return SimpleNamespace(
+        id=uuid.UUID("00000000-0000-5000-8000-000000000001"),
+        outputs={"output": output},
+        error=error,
+    )
+
+
+def _keys(results) -> list[str]:
+    return [result.key for result in results["results"]]
+
+
+def test_a_skipped_scorer_is_omitted_rather_than_posted_as_a_pass():
+    """A case that declines to assert a dimension has not passed it.
+
+    The same rule `post_scores` holds for feedback, arriving through the other
+    runner: `genuine-fit` expects nothing unanswerable, so `gaps` skips, and a
+    `1.0` sitting in its column would be indistinguishable from a scout that
+    was asked and got it right. `leaky-brief` asserts less still -- no expected
+    verdict, no disqualification, no marker -- and four columns is what an
+    honest row for it looks like.
+
+    Asserted against a non-empty result set on purpose. `{"results": []}` posts
+    nothing, so "gaps is not among the keys" is satisfied by a batch that lost
+    every score, and a subset assertion alone would pass on the bug.
+    """
+    scored = evaluate_scout.programmatic_scores(_run(GOOD), _example("genuine-fit"))
+    assert len(scored["results"]) == 6
+    assert "gaps" not in _keys(scored)
+
+    sparse = evaluate_scout.programmatic_scores(_run(GOOD), _example("leaky-brief"))
+    assert set(_keys(sparse)) == {"parses", "citations", "no-invention", "no-total"}
+
+
+def test_an_example_reaches_the_scorers_as_the_case_it_was_pushed_from():
+    """The `case_from_example` round trip, through the evaluator that needs it.
+
+    `push_dataset` has carried that function with no production caller since it
+    was written, on the argument that a dataset-driven run must reuse
+    `score_programmatically` rather than grow a second scoring path. This is
+    that caller, and the claim is equality: what the evaluator posts for a row
+    is what the scorers say about the case the row was mirrored from, verdict
+    for verdict and comment for comment.
+
+    Anything less than equality would let the two paths agree on which columns
+    exist while disagreeing about what is in them.
+    """
+    through = evaluate_scout.programmatic_scores(_run(GOOD), _example("genuine-fit"))
+    direct = posting_scores(score_programmatically(_case("genuine-fit"), GOOD))
+
+    assert [(r.key, r.score, r.comment) for r in through["results"]] == [
+        (s.name, float(s.passed), s.detail or None) for s in direct
+    ]
+
+
+def test_the_target_hands_the_dataset_row_straight_to_the_shared_scout_call(
+    monkeypatch,
+):
+    """One payload, two runners, and the signature that keeps them honest.
+
+    `scout_target` splats the row in, so `push_dataset._INPUT_FIELDS` is the
+    single contract on both ends: the mirror writes those three keys and
+    `ask_scout` takes exactly those three keywords. Pinning the signature is
+    what makes the splat safe -- rename a field on one side only and this fails
+    here, rather than at the first billed run with a `TypeError` per row.
+    """
+    seen = {}
+
+    def recorder(**kwargs):
+        seen.update(kwargs)
+        return "scored file"
+
+    monkeypatch.setattr(evaluate_scout, "ask_scout", recorder)
+    case = _case("genuine-fit")
+
+    assert evaluate_scout.scout_target(_row("genuine-fit")["inputs"]) == {
+        "output": "scored file"
+    }
+    assert seen == {
+        "brief": case.brief,
+        "candidate": case.candidate,
+        "profile": case.profile,
+    }
+
+    taken = set(inspect.signature(run_scout.ask_scout).parameters) - {"config"}
+    assert taken == set(push_dataset._INPUT_FIELDS)
+
+
+def test_the_scout_payload_is_spelled_out_in_exactly_one_place():
+    """Two copies of it would measure two prompts and report one number.
+
+    The eval's whole claim is that `evaluate_scout` and `run_scout` put the
+    same question to the model. A second f-string in the second runner keeps
+    that true only until somebody edits one of them, and nothing downstream
+    could tell: both runs parse, both score, and the tables differ for a reason
+    no column carries.
+    """
+    assert "<opportunity-file>" in inspect.getsource(run_scout.ask_scout)
+    assert "<opportunity-file>" not in inspect.getsource(evaluate_scout)
+
+    # Every module in the package, found rather than listed, and read as text
+    # rather than imported: a fourth runner added later is scanned with no edit
+    # here, which a hard-coded tuple is exactly how you fail to do. Counted, so
+    # a second copy *inside* `run_scout` fails too -- membership would call
+    # that one place.
+    sources = sorted(Path(run_scout.__file__).parent.glob("*.py"))
+    assert {"run_scout.py", "evaluate_scout.py", "push_dataset.py"} <= {
+        path.name for path in sources
+    }, "the package moved and this scan found nothing to be right about"
+
+    spelled = {
+        path.name: path.read_text(encoding="utf-8").count("<org-profile-file>")
+        for path in sources
+    }
+    assert {name: n for name, n in spelled.items() if n} == {"run_scout.py": 1}
+
+
+def test_a_row_carrying_a_field_the_scout_call_does_not_take_is_refused():
+    """`**inputs` is a contract, so something has to check it.
+
+    Two of the three ways a stray field can arrive are safe on their own: an
+    unknown name raises `TypeError` out of `ask_scout`, and a missing one
+    raises too. `config` is the third, and it is not safe -- `ask_scout` takes
+    it, `run_scout` passes it to label its calls, and a row carrying that key
+    would be handed to `.invoke()` as runtime configuration. A hand-edited
+    dataset row steering the model call it is supposed to be an input to.
+    """
+    row = _row("genuine-fit")["inputs"]
+
+    for stray in ("config", "rubric"):
+        with pytest.raises(TypeError, match="non-input field"):
+            evaluate_scout.scout_target({**row, stray: "anything"})
+
+
+def test_the_table_distinguishes_a_row_that_posted_nothing(capsys):
+    """Three outcomes, and the one that must not read as a pass.
+
+    `render` is the only thing a person actually looks at after a run, and the
+    row that posted nothing is the one worth printing rather than skipping: it
+    is either a case that asserted nothing or a model call that died, and a
+    table that simply omits it reads as a table of everything that happened.
+
+    The failure count is the other half. It counts posted verdicts that failed,
+    so an empty row contributes nothing to it -- the same rule `posting_scores`
+    holds one layer down, arriving where a human reads it.
+    """
+    rows = [
+        {
+            "example": SimpleNamespace(id="a", metadata={"key": "genuine-fit"}),
+            "evaluation_results": {
+                "results": [
+                    EvaluationResult(key="parses", score=1.0, comment="82% fit"),
+                    EvaluationResult(key="citations", score=0.0, comment="2 unfound"),
+                ]
+            },
+        },
+        {
+            "example": SimpleNamespace(id="b", metadata={"key": "leaky-brief"}),
+            "evaluation_results": {"results": []},
+        },
+        {
+            "example": SimpleNamespace(id="row-c", metadata=None),
+            "evaluation_results": {
+                "results": [EvaluationResult(key="harness-error", score=0.0)]
+            },
+        },
+    ]
+
+    assert evaluate_scout.render(rows) == 2
+
+    printed = capsys.readouterr().out
+    assert "nothing posted" in printed
+    assert "genuine-fit" in printed and "leaky-brief" in printed
+    # No `key` in metadata, so the row is named by its id rather than dropped.
+    assert "row-c" in printed
+
+
+def test_a_target_that_never_answered_is_not_scored_as_a_bad_draft(monkeypatch):
+    """A dead API must not arrive on screen as a prompt regression.
+
+    `evaluate` catches everything the target raises and logs it, so a rate
+    limit does not fail the row -- the evaluator is handed `run.error` and no
+    output. Scored anyway that is `parses: 0.0` and a row of zeros beside it,
+    with a number attached and nothing saying the model was never reached.
+
+    The scorers are replaced with a stub that raises, so this cannot pass by
+    them happening to return zeros: reaching them at all is the failure.
+
+    The first row is the one that earned the `run.error` check its own line.
+    Every other row here has no usable output, so the type-and-emptiness test
+    alone would turn them all away and the error test would be dead code that
+    reads like a guard. A row carrying *both* text and an error is what tells
+    them apart -- a partially traced call, where something came back and the
+    run still failed -- and scoring that is the same collapse as scoring
+    nothing at all, arriving with enough output to look like a verdict.
+    """
+
+    def boom(*args, **kwargs):
+        raise AssertionError("scored a row the model never answered")
+
+    monkeypatch.setattr(evaluate_scout, "score_programmatically", boom)
+    monkeypatch.setattr(evaluate_scout, "ask_judge", boom)
+    example = _example("genuine-fit")
+
+    for run in (
+        _run(GOOD, error="RuntimeError('overloaded_error')"),
+        _run(None, error="RuntimeError('overloaded_error')"),
+        _run(None),
+        _run(""),
+        _run("   "),
+        _run({"not": "a string"}),
+    ):
+        assert evaluate_scout.programmatic_scores(run, example) == {"results": []}
+        assert evaluate_scout.grounding_judge(run, example) == {"results": []}
+
+
+def test_an_evaluator_with_no_reference_row_posts_nothing(monkeypatch):
+    """These score against the row, so without one there is nothing to say.
+
+    The SDK's evaluator contract makes `example` optional, because an evaluator
+    attached to a *project* runs on live traces and is handed no reference row.
+    Both of these rebuild the case they score against from that row, so the
+    absence has to be answered rather than indexed into -- otherwise the first
+    person to attach one to a project gets an attribute error per trace, from
+    inside a callback whose failures LangSmith logs and swallows.
+    """
+
+    def boom(*args, **kwargs):
+        raise AssertionError("scored a run with no reference row")
+
+    monkeypatch.setattr(evaluate_scout, "case_from_example", boom)
+
+    assert evaluate_scout.programmatic_scores(_run(GOOD), None) == {"results": []}
+    assert evaluate_scout.grounding_judge(_run(GOOD), None) == {"results": []}
+
+
+def test_a_judge_reply_it_cannot_read_is_not_counted_as_a_pass(monkeypatch):
+    """The judge's own malfunction is not a verdict about the scout.
+
+    `read_judge_verdict` already marks an unreadable reply skipped; what this
+    pins is that the skip survives the trip through the evaluator instead of
+    being flattened into the `1.0` that `Score.passed` carries on it. That
+    default is deliberate -- a skipped score must not read as a failure either
+    -- which is exactly why it has to be dropped rather than posted.
+    """
+    example, run = _example("genuine-fit"), _run(GOOD)
+
+    for reply, expected in (("hello?", []), ("PASS", [1.0]), ("FAIL\nquoted", [0.0])):
+        monkeypatch.setattr(
+            evaluate_scout, "ask_judge", lambda *a, r=reply, **k: read_judge_verdict(r)
+        )
+        posted = evaluate_scout.grounding_judge(run, example)
+        assert [result.score for result in posted["results"]] == expected
+        assert _keys(posted) == ["grounded"] * len(expected)
+
+
+def test_an_evaluator_that_raises_says_so_rather_than_scoring_nothing(monkeypatch):
+    """An eval that broke must not read like an eval that had nothing to say.
+
+    LangSmith reports an evaluator's exception as one error result per feedback
+    key it infers from the source, and it infers them from literal
+    `{"key": "..."}` dicts. Both evaluators here build their results in a
+    comprehension, so it finds none and falls back to the function's own name:
+    an uncaught raise posts a score-less `programmatic_scores` row, which is
+    not any scorer's name and carries no exception, no case, and no half of the
+    harness. Catching it is what turns that into something a reader can act on.
+    """
+
+    def boom(*args, **kwargs):
+        raise ValueError("row is not a case")
+
+    monkeypatch.setattr(evaluate_scout, "case_from_example", boom)
+    example, run = _example("genuine-fit"), _run(GOOD)
+
+    for evaluator, where in (
+        (evaluate_scout.programmatic_scores, "programmatic"),
+        (evaluate_scout.grounding_judge, "judge"),
+    ):
+        posted = evaluator(run, example)
+        assert _keys(posted) == ["harness-error"]
+        result = posted["results"][0]
+        assert result.score == 0.0
+        assert where in (result.comment or "")
+        assert "ValueError" in (result.comment or "")
+
+
+def test_the_batched_results_are_a_shape_the_sdk_will_accept(monkeypatch):
+    """Run the real coercion, because "nothing to post" is easy to get wrong.
+
+    `None` and `{}` both raise inside `evaluate`, so the empty batch has to be
+    spelled `{"results": []}` and cannot be defaulted into. A refactor that
+    reaches for the obvious `return None` fails here rather than on the first
+    billed run, where four rows are already paid for.
+
+    The judge is stubbed, and that is not tidiness. Left real, this case is the
+    one thing in an offline-by-contract suite that opens a socket -- and worse,
+    it passes either way: `grounding_judge` catches the connection error and
+    returns a `harness-error` batch, which is still a list, so the success
+    shape it exists to coerce is never reached. A billed call and a vacuous
+    assertion, from the same missing line.
+    """
+    monkeypatch.setattr(
+        evaluate_scout, "ask_judge", lambda *a, **k: read_judge_verdict("PASS")
+    )
+    example = _example("genuine-fit")
+
+    for evaluator, populated in (
+        (evaluate_scout.programmatic_scores, 6),
+        (evaluate_scout.grounding_judge, 1),
+    ):
+        scored = run_evaluator(evaluator).evaluate_run(_run(GOOD), example)
+        assert len(scored["results"]) == populated
+        assert all(result.key for result in scored["results"])
+
+        empty = run_evaluator(evaluator).evaluate_run(_run(None, error="boom"), example)
+        assert empty["results"] == []
+
+
+def test_the_experiment_records_which_prompt_it_measured():
+    """The dataset holds the fixtures; only the experiment can hold the prompt.
+
+    Deliberately so -- a prompt baked into the rows would have to be pushed
+    before it could be measured, and the mirror would then own a copy of the
+    product. The cost is that an experiment carries no evidence of what it
+    tested unless it says: two tables of numbers, no way to tell which prompt
+    produced which, and a regression that cannot be attributed to the edit that
+    caused it.
+    """
+    labelled = evaluate_scout.experiment_metadata(dataset="scratch", judge=True)
+
+    assert (
+        labelled["scout_prompt_sha"]
+        == (hashlib.sha256(SCOUT_PROMPT.encode("utf-8")).hexdigest()[:12])
+    )
+    # Recomputed, not merely asserted different from the scout's. Unequal is
+    # satisfied by the digest of anything at all, including a copy-paste that
+    # hashed the wrong constant.
+    assert (
+        labelled["judge_prompt_sha"]
+        == (hashlib.sha256(JUDGE_PROMPT.encode("utf-8")).hexdigest()[:12])
+    )
+    # The dataset actually run against, not the module default: `--dataset`
+    # exists, and a constant here labels every scratch run as the mirror.
+    assert labelled["dataset"] == "scratch"
+
+    unjudged = evaluate_scout.experiment_metadata(
+        dataset=push_dataset.DATASET_NAME, judge=False
+    )
+    assert unjudged["judge"] is False
+    assert unjudged["judge_model"] is None and unjudged["judge_prompt_sha"] is None
+    assert unjudged["scout_prompt_sha"] == labelled["scout_prompt_sha"]
+    assert unjudged["dataset"] == push_dataset.DATASET_NAME
+
+
+def test_the_run_needs_both_credentials_before_it_spends_either(monkeypatch, capsys):
+    """Two guards, each pinned alone, and a run that gets past both.
+
+    This is the only runner that needs both: it calls a model per row and
+    writes an experiment to a workspace. Both refuse before `evaluate`, which
+    POSTs a project ahead of the first billed call -- so a missing credential
+    costs nothing rather than costing four model calls and then failing to
+    record them.
+
+    Every case gives the *other* credential, and reads the message back. Two
+    bare `main() == 1` assertions are satisfied by a runner that refuses
+    everything, which is the shape a guard collapses into when it is wrong:
+    `if True:` passes them both, and so does `and` where `or` is written.
+
+    The last case is the one that costs the others their vacuity. Truthiness
+    rather than `is None` because `conftest.py` blanks these names rather than
+    popping them, and `or` rather than `and` because LangSmith itself falls
+    through an empty value to the `LANGCHAIN_` spelling -- so a developer with
+    only that one exported must get a run, not a lecture about a key they set.
+    """
+    started = []
+
+    class _Results(list):
+        """What `evaluate` returns: rows to iterate, and a name to print."""
+
+        experiment_name = "scout-prompt-0000"
+
+    def fake_evaluate(*args, **kwargs):
+        started.append(kwargs)
+        return _Results()
+
+    monkeypatch.setattr(evaluate_scout, "evaluate", fake_evaluate)
+    monkeypatch.setattr("sys.argv", ["evals.evaluate_scout"])
+
+    monkeypatch.setenv("LANGSMITH_API_KEY", "ls-test-key")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert evaluate_scout.main() == 1
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+    assert started == []
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "")
+    monkeypatch.setenv("LANGCHAIN_API_KEY", "")
+    assert evaluate_scout.main() == 1
+    assert "LANGSMITH_API_KEY" in capsys.readouterr().err
+    assert started == []
+
+    # The positive case, and the `LANGCHAIN_` spelling at the same time: this
+    # is the run a wrongly written guard refuses.
+    monkeypatch.setenv("LANGCHAIN_API_KEY", "lc-test-key")
+    assert evaluate_scout.main() == 0
+    assert len(started) == 1
+    assert started[0]["data"] == push_dataset.DATASET_NAME
+
+
+def test_the_harness_builds_no_client_and_calls_no_loader_of_its_own(monkeypatch):
+    """What keeps this module importable under a suite that blanks the key.
+
+    Pins invariant 19.
+    Named for what a reload can actually see. Importing this module *does*
+    read the environment file -- `grant_writer.config` does it, through
+    `run_scout` -- and that is the arrangement wanted: one loader on the import
+    path, already covered where it lives. What must not appear is a second call
+    here, which would be a second thing to keep honest for no credential
+    gained. The absence is asserted rather than left to read as an oversight.
+
+    The loader is patched at its source and before the reload, for the reason
+    the mirror's own case gives: a module-scope call binds whatever `dotenv`
+    holds when the import line runs, and that is the only stub it can hit.
+    """
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a client was constructed at import")
+
+    def boom_loader(*args, **kwargs):
+        raise AssertionError("an environment file was read at import")
+
+    monkeypatch.setattr("langsmith.Client", boom)
+    monkeypatch.setattr("dotenv.load_dotenv", boom_loader)
+    monkeypatch.setenv("LANGSMITH_API_KEY", "")
+
+    try:
+        reloaded = importlib.reload(evaluate_scout)
+        assert not hasattr(reloaded, "load_dotenv")
+        assert reloaded.experiment_metadata(dataset="d", judge=False)["eval"] == (
+            "scout-prompt"
+        )
+    finally:
+        # Undone before the restoring reload, exactly as the mirror's case is:
+        # a failure here would otherwise leave every later case importing a
+        # module that never finished re-executing.
+        monkeypatch.undo()
+        importlib.reload(evaluate_scout)

@@ -313,6 +313,25 @@ def read_judge_verdict(reply: str) -> Score:
     )
 
 
+def posting_scores(scores: list[Score]) -> list[Score]:
+    """The scores that may be written down. A skip is not a pass.
+
+    One rule, three consumers: `run_scout.post_scores`, which posts feedback on
+    a traced case, and both evaluators in `evaluate_scout`, which omit a skipped
+    `Score` from the batch they hand back rather than sending a `1.0`. A case
+    that declines to assert on a dimension has not passed it, and a pass sitting
+    where "not checked" belongs is the collapse invariant 14 forbids for
+    `fit_percent` -- averaged back, a run that asserted almost nothing reads like
+    one that asserted everything and was right.
+
+    Here rather than at each caller because three copies of a filter is three
+    chances to disagree about what a skip means, and the disagreement would be
+    invisible: every copy still returns a list of `Score`, and the run that read
+    the wrong one still prints a number.
+    """
+    return [score for score in scores if not score.skipped]
+
+
 def score_programmatically(case: ScoutCase, output: str) -> list[Score]:
     """Run every non-model scorer over one scout output."""
     parsed = parse_scored_markdown(output, key=case.key)

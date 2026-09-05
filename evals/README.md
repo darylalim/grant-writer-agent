@@ -16,13 +16,18 @@ uv run python -m evals.run_scout --out results.json
 uv run python -m evals.push_dataset --dry-run     # the plan only; creates nothing
 uv run python -m evals.push_dataset               # push it, then verify the push
 uv run python -m evals.push_dataset --out rows.json   # payloads only, no account
+
+uv run python -m evals.evaluate_scout             # the same eval, as an experiment
+uv run python -m evals.evaluate_scout --no-judge
+uv run python -m evals.evaluate_scout --prefix opus-scout
 ```
 
 **`run_scout` calls a real model and costs real money; `push_dataset` writes to
-a real workspace.** Neither is collected by `pytest tests/` and neither runs in
-CI — deliberately, and the reason is the same one `tests/conftest.py` encodes:
-the suite is offline by contract, CI configures no secrets, and a test that
-needs a live credential is a bug in the suite.
+a real workspace; `evaluate_scout` does both.** None of the three is collected
+by `pytest tests/` and none runs in CI — deliberately, and the reason is the
+same one `tests/conftest.py` encodes: the suite is offline by contract, CI
+configures no secrets, and a test that needs a live credential is a bug in the
+suite.
 
 ## What is here
 
@@ -32,7 +37,8 @@ needs a live credential is a bug in the suite.
 | `scorers.py` | Seven programmatic scorers and one LLM judge. Pure. |
 | `run_scout.py` | The runner. Calls a model; needs `ANTHROPIC_API_KEY`. |
 | `push_dataset.py` | Mirrors the fixtures into a LangSmith dataset. One direction, verified. Needs `LANGSMITH_API_KEY`, which it loads from the environment file itself. |
-| `../tests/test_evals.py` | Offline tests **of the scorers and the mirror**, run on every push. |
+| `evaluate_scout.py` | The same eval as a LangSmith *experiment* over that dataset, so two runs are a table rather than two readings. Needs both keys. |
+| `../tests/test_evals.py` | Offline tests **of the scorers, the mirror, and the harness** — run on every push, and the only cover any of this gets. |
 
 That last row is the load-bearing one. An eval whose scoring is wrong reports a
 prompt regression as green, with the authority of a number attached — worse than
@@ -200,3 +206,83 @@ A dataset that already existed and holds no row of the mirror's is refused,
 including an empty one: adopting a colleague's freshly created dataset is the
 wrong-name accident arriving through the door the ownership check was built to
 hold. `--adopt` is the way to say you meant it.
+
+## The experiment harness
+
+`run_scout` and `evaluate_scout` put the same question to the same model with
+the same prompt -- literally, since the second imports `ask_scout` and
+`ask_judge` from the first, and `tests/test_evals.py` refuses a second copy of
+the payload in either. What differs is the shape of the answer, and it is worth
+being clear about which one you want.
+
+`run_scout` iterates the fixtures in this process and posts each verdict as
+**feedback** on a trace it opened. That is the right tool while you are editing
+a prompt and want to read one run closely: seven verdicts and an excerpt of the
+judge's reasoning, in a terminal, now -- with the scout's full text under
+`--out` and on the trace, which the table deliberately does not repeat.
+
+`evaluate_scout` runs the same work as an **experiment** over the dataset the
+mirror pushed. That is the right tool once the prompt is stable and the
+question is comparative -- sonnet against opus, or `SCOUT_PROMPT` before and
+after an edit -- because LangSmith lines experiments up side by side on rows
+that are pinned to be identical. The two runners are not redundant; they answer
+"what did it say" and "did it get worse".
+
+The dataset is the case list there, and that is a behavioural difference rather
+than a detail: editing `scout_cases.py` changes what `run_scout` measures
+immediately and changes what `evaluate_scout` measures only after a push.
+Nothing warns you. `--dry-run` is how you ask.
+
+### Why the evaluators are not uploaded
+
+LangSmith can host an evaluator and run it on every experiment against a
+dataset, with no code passed at the call site. Not these. `scorers.py` imports
+`parse_scored_markdown` and `untraceable_citations` from
+`grant_writer.opportunities`, and an uploaded evaluator runs in a sandbox with
+no such package -- so hosting them means reimplementing the parser beside the
+copy the product uses. That is the two-copies drift the scorers exist to avoid,
+and the whole argument for scoring this eval with code is that the code is
+already written and already tested.
+
+So the evaluators are ordinary callables passed to `evaluate(evaluators=[...])`,
+and there are two of them rather than eight. The programmatic one calls
+`score_programmatically` once and hands back a batch, because that is the
+scoring path the suite covers and seven wrappers would be seven more places to
+disagree with it. Each verdict still carries its own key, so the experiment
+table still has a column per scorer.
+
+### What a blank column means
+
+A skipped scorer posts **nothing**, exactly as it does through `run_scout` --
+same filter, `scorers.posting_scores`, called by both. A case that declines to
+assert on a dimension has not passed it, and averaged back a `1.0` sitting
+where "not checked" belongs makes a run that asserted almost nothing read like
+one that asserted everything and was right. That is invariant 14's collapse
+arriving through the eval.
+
+Two other things can put a row on that table without a verdict on it, and
+telling all three apart is why the harness has any code in it at all.
+
+`evaluate` swallows whatever the target raises and logs it, so a rate limit
+does not fail a row -- the evaluator is handed no output and `run.error` set.
+Scored anyway, that reports a dead API as a prompt regression with a number
+attached, so it is checked for and skipped like any other unscoreable row.
+
+An evaluator that raises is not silent, but it reports badly. LangSmith emits
+one error result per feedback key it infers from the evaluator's source, it
+infers them from literal `{"key": "..."}` dicts, and finding none -- both
+evaluators here build their results in a comprehension -- it falls back to the
+function's own name. So an uncaught exception lands as a score-less
+`programmatic_scores` row on a table whose other columns are named for
+scorers, carrying no exception, no case, and no clue which half broke. Catching
+it and posting `harness-error` is what makes that legible; the key is
+deliberately not any scorer's name.
+
+### What does not disarm it
+
+Invariant 19's tracing switch. `evaluate()` opens its own tracing context with
+`enabled=True` whenever it is uploading results, so unlike `run_scout`, whose
+feedback write is gated on `tracing_is_enabled()`, there is no environment
+variable here that turns the writing off. What keeps this inert under `pytest`
+is the credential `tests/conftest.py` blanks and the guard in `main` that reads
+it, and nothing else.

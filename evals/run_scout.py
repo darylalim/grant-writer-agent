@@ -49,6 +49,7 @@ from evals.scorers import (
     JUDGE_PROMPT,
     Score,
     build_judge_payload,
+    posting_scores,
     read_judge_verdict,
     score_programmatically,
 )
@@ -72,6 +73,65 @@ def _text(reply: object) -> str:
             if isinstance(part, dict) and part.get("type") == "text"
         )
     return str(content)
+
+
+def ask_scout(
+    *,
+    brief: str,
+    candidate: str,
+    profile: str,
+    config: RunnableConfig | None = None,
+) -> str:
+    """One scout call, and the only place its payload is spelled out.
+
+    Keyword-only, and named for `push_dataset._INPUT_FIELDS` rather than for a
+    `ScoutCase`, because there are now two callers and only one of them holds a
+    case: `evaluate_scout.scout_target` is handed a dataset row as a plain dict
+    and splats it straight in. A second copy of this f-string is the drift this
+    repo keeps writing tests against -- two runs would report confidently on
+    different prompts, and nothing would say which one you were reading.
+
+    The brief carries the harness override that makes this work at all: the
+    scout is told in `SCOUT_PROMPT` to write the file and report on it, and
+    `scout_cases._PLAIN_BRIEF` countermands that with "reply with the file
+    content itself". Passing the brief through rather than reconstructing it is
+    what keeps the dataset able to change that instruction.
+    """
+    scout = build_model(DISCOVERY_MODEL)
+    payload = (
+        f"{brief}\n\n"
+        f"<opportunity-file>\n{candidate}\n</opportunity-file>\n\n"
+        f"<org-profile-file>\n{profile}\n</org-profile-file>"
+    )
+    return _text(
+        scout.invoke(
+            [SystemMessage(SCOUT_PROMPT), HumanMessage(payload)], config=config
+        )
+    )
+
+
+def ask_judge(
+    case: ScoutCase, output: str, *, config: RunnableConfig | None = None
+) -> Score:
+    """One grounding-judge call, returned already read.
+
+    `read_judge_verdict` is applied here rather than by the caller so that the
+    judge's own malfunction cannot reach a caller as a scout result: an
+    unreadable reply comes back `skipped`, and `posting_scores` drops it. Split
+    across two call sites, one of them would eventually read the reply itself
+    and the skip would quietly become a pass.
+    """
+    grader = build_model(COMPLIANCE_MODEL)
+    verdict = _text(
+        grader.invoke(
+            [
+                SystemMessage(JUDGE_PROMPT),
+                HumanMessage(build_judge_payload(case, output)),
+            ],
+            config=config,
+        )
+    )
+    return read_judge_verdict(verdict)
 
 
 def call_config(role: str, case: ScoutCase, model_spec: str) -> RunnableConfig:
@@ -151,7 +211,7 @@ def post_scores(run: RunTree | None, scores: list[Score]) -> None:
     if run is None or not tracing_is_enabled():
         return
 
-    posting = [score for score in scores if not score.skipped]
+    posting = posting_scores(scores)
     if not posting:
         return
 
@@ -228,33 +288,21 @@ def run_case(case: ScoutCase, *, judge: bool) -> dict:
         metadata={"case": case.key, "why": case.why},
         inputs={"case": case.key, "why": case.why},
     ) as run:
-        scout = build_model(DISCOVERY_MODEL)
-        payload = (
-            f"{case.brief}\n\n"
-            f"<opportunity-file>\n{case.candidate}\n</opportunity-file>\n\n"
-            f"<org-profile-file>\n{case.profile}\n</org-profile-file>"
-        )
-        output = _text(
-            scout.invoke(
-                [SystemMessage(SCOUT_PROMPT), HumanMessage(payload)],
-                config=call_config("scout", case, DISCOVERY_MODEL),
-            )
+        output = ask_scout(
+            brief=case.brief,
+            candidate=case.candidate,
+            profile=case.profile,
+            config=call_config("scout", case, DISCOVERY_MODEL),
         )
 
         scores: list[Score] = score_programmatically(case, output)
 
         if judge:
-            grader = build_model(COMPLIANCE_MODEL)
-            verdict = _text(
-                grader.invoke(
-                    [
-                        SystemMessage(JUDGE_PROMPT),
-                        HumanMessage(build_judge_payload(case, output)),
-                    ],
-                    config=call_config("judge", case, COMPLIANCE_MODEL),
+            scores.append(
+                ask_judge(
+                    case, output, config=call_config("judge", case, COMPLIANCE_MODEL)
                 )
             )
-            scores.append(read_judge_verdict(verdict))
 
         post_scores(run, scores)
 

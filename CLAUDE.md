@@ -14,6 +14,7 @@ uvx ruff format --check src/ tests/ evals/ streamlit_app.py   # ruff's default 8
 
 uv run python -m evals.run_scout              # prompt eval: LIVE model, costs money
 uv run python -m evals.push_dataset --dry-run # dataset mirror: plan only; drop the flag to write
+uv run python -m evals.evaluate_scout         # same eval as an experiment: LIVE, needs both keys
 
 uv run grant-writer discover --scan-id X --focus "rural health"   # before drafting
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
@@ -501,7 +502,10 @@ may need these updated.
 cover wiring; they cannot cover the prompts, and the prompts are the product — a
 prompt edit that weakens the anti-fabrication rules passes every test, every hook, and
 CI. `evals/` holds fixture cases and scorers for that, run by hand against a live model
-(`uv run python -m evals.run_scout`). It stays uncollectable because the suite is offline
+(`uv run python -m evals.run_scout`, or `evals.evaluate_scout` for the same work as a
+LangSmith experiment over the pushed dataset — one reads a run closely, the other says
+whether it got worse, and neither is redundant with the other because they answer
+different questions). It stays uncollectable because the suite is offline
 by contract and a test needing a real credential is a bug in the suite. `pythonpath = ["."]`
 in `pyproject.toml` is what lets `tests/test_evals.py` import it — those are offline tests
 *of the scorers*, and they exist because an eval whose scoring is wrong reports a prompt
