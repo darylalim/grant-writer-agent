@@ -166,12 +166,21 @@ def no_forbidden_specifics(
     prose in order to reject it is the rule being followed, and telling those
     two apart is a judgement, so it belongs to the judge below rather than to a
     string match.
+
+    Gap markers are exempt, and the fourth run is why. `SCOUT_PROMPT` tells the
+    scout to put `[NEEDS INPUT: ...]` in a citation slot, so turning the leaked
+    priority into "Are any partner districts in persistent-poverty counties?"
+    landed where this scorer reads -- and was flagged as invention, when asking
+    instead of asserting is the anti-fabrication rule itself. A marker is the
+    scout saying it had nothing to quote; `untraceable_citations` exempts it
+    for the same reason, and the two must agree on what a citation is.
     """
     del output
     quoted = "\n".join(
         citation.text
         for criterion in parsed.criteria
         for citation in criterion.citations
+        if not citation.is_gap
     )
     found = [needle for needle in case.forbidden if needle in quoted]
     return Score(

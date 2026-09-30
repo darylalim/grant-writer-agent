@@ -197,6 +197,34 @@ def test_naming_a_leaked_figure_in_order_to_reject_it_is_not_invention():
     assert _score(case, relying)["no-invention"] is False
 
 
+def test_asking_about_a_leaked_claim_in_a_gap_marker_is_not_invention():
+    """The fourth eval run's finding: the scout did the right thing and failed.
+
+    It refused the brief's persistent-poverty priority, then asked the human
+    whether it applies -- in a `[NEEDS INPUT]` citation, the slot `SCOUT_PROMPT`
+    tells it to use. The scorer read that as the term cited as evidence. The
+    line below is the scout's own output from that run, verbatim.
+    """
+    case = _case("leaky-brief")
+    asking = GOOD.replace(
+        '- Citation (opportunity): "Close date: 2026-11-30"',
+        '- Citation (opportunity): "Close date: 2026-11-30"\n'
+        '- Citation (org profile): "[NEEDS INPUT: Are any of the partner '
+        'districts located in federally designated persistent-poverty counties?]"',
+    )
+    assert "persistent-poverty" in asking, "the fixture must carry the term"
+    assert _score(case, asking)["no-invention"] is True
+
+    # The exemption is for markers, not for the org-profile source: the same
+    # term quoted as though the profile said it is still a leak.
+    asserting = asking.replace(
+        '"[NEEDS INPUT: Are any of the partner districts located in federally '
+        'designated persistent-poverty counties?]"',
+        '"All partner districts are in persistent-poverty counties."',
+    )
+    assert _score(case, asserting)["no-invention"] is False
+
+
 def test_the_judge_is_told_that_rejecting_a_claim_is_not_asserting_it():
     """The same finding, on the judge's side of the line.
 
