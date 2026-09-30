@@ -55,11 +55,18 @@ from evals.scorers import (
     score_programmatically,
 )
 from evals.scout_cases import CASES, ScoutCase
-from grant_writer.config import COMPLIANCE_MODEL, DISCOVERY_MODEL, build_model
+from grant_writer.config import DISCOVERY_MODEL, GRADER_MODEL, build_model
 from grant_writer.prompts import SCOUT_PROMPT
 
 if TYPE_CHECKING:  # the client now arrives on the run; see `post_scores`
     from langsmith import Client
+
+# The judge grades the scout, so it must not be the scout's model: one model
+# checking its own output shares its blind spots, and the judge exists precisely
+# because it is not a second opinion from the same place. The grader already
+# sits a tier above discovery for the same reason. Named once here so the
+# experiment's recorded `judge_model` cannot drift from the model actually called.
+JUDGE_MODEL = GRADER_MODEL
 
 
 def _text(reply: object) -> str:
@@ -122,7 +129,7 @@ def ask_judge(
     across two call sites, one of them would eventually read the reply itself
     and the skip would quietly become a pass.
     """
-    grader = build_model(COMPLIANCE_MODEL)
+    grader = build_model(JUDGE_MODEL)
     verdict = _text(
         grader.invoke(
             [
@@ -301,9 +308,7 @@ def run_case(case: ScoutCase, *, judge: bool) -> dict:
 
         if judge:
             scores.append(
-                ask_judge(
-                    case, output, config=call_config("judge", case, COMPLIANCE_MODEL)
-                )
+                ask_judge(case, output, config=call_config("judge", case, JUDGE_MODEL))
             )
 
         post_scores(run, scores)

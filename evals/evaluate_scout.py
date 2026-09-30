@@ -63,7 +63,7 @@ from langsmith import evaluate
 from langsmith.evaluation import EvaluationResult, EvaluationResults
 
 from evals.push_dataset import _INPUT_FIELDS, DATASET_NAME, case_from_example
-from evals.run_scout import ask_judge, ask_scout
+from evals.run_scout import JUDGE_MODEL, ask_judge, ask_scout
 from evals.scorers import (
     JUDGE_PROMPT,
     Score,
@@ -71,7 +71,7 @@ from evals.scorers import (
     posting_scores,
     score_programmatically,
 )
-from grant_writer.config import COMPLIANCE_MODEL, DISCOVERY_MODEL
+from grant_writer.config import DISCOVERY_MODEL
 from grant_writer.prompts import SCOUT_PROMPT
 
 if TYPE_CHECKING:
@@ -260,7 +260,7 @@ def experiment_metadata(*, dataset: str, judge: bool) -> dict[str, Any]:
         "scout_model": DISCOVERY_MODEL,
         "scout_prompt_sha": _sha(SCOUT_PROMPT),
         "judge": judge,
-        "judge_model": COMPLIANCE_MODEL if judge else None,
+        "judge_model": JUDGE_MODEL if judge else None,
         "judge_prompt_sha": _sha(JUDGE_PROMPT) if judge else None,
     }
 

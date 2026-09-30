@@ -437,6 +437,23 @@ def test_the_scout_and_the_judge_are_told_apart():
     }
 
 
+def test_the_shipped_judge_is_not_the_scouts_own_model():
+    """The case above labels two literals apart; this one checks what ships.
+
+    It passed for as long as the judge ran on `COMPLIANCE_MODEL`, which shipped
+    as the same Sonnet as the scout -- so every grounding verdict was the scout's
+    model checking the scout's model. Read from `DEFAULT_MODELS` rather than the
+    resolved constants so a developer's `GRANT_WRITER_*_MODEL` cannot make this
+    pass or fail. `evaluate_scout` must record the model `run_scout` calls, not
+    a second import that can be pointed elsewhere.
+    """
+    from grant_writer.config import DEFAULT_MODELS, GRADER_MODEL
+
+    assert run_scout.JUDGE_MODEL is GRADER_MODEL
+    assert DEFAULT_MODELS["grader"] != DEFAULT_MODELS["discovery"]
+    assert evaluate_scout.JUDGE_MODEL is run_scout.JUDGE_MODEL
+
+
 def test_feedback_is_gated_on_the_switch_the_suite_forces_off(monkeypatch):
     """`trace()` hands back a real RunTree even with tracing disabled.
 
