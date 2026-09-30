@@ -39,6 +39,7 @@ from grant_writer.config import (
     DEFAULT_MODELS,
     GRADER_MODEL,
     MAX_OUTPUT_TOKENS,
+    MODEL_EFFORT,
     PROJECT_ROOT,
     Settings,
     build_model,
@@ -659,6 +660,21 @@ def test_default_model_resolves_to_a_usable_output_ceiling(role, spec):
     assert max_tokens >= MAX_OUTPUT_TOKENS, (
         f"{role}: {spec!r} resolves to max_tokens={max_tokens}, below the "
         f"{MAX_OUTPUT_TOKENS} a full section needs."
+    )
+
+
+@pytest.mark.parametrize(("role", "spec"), sorted(DEFAULT_MODELS.items()))
+def test_default_model_sends_an_explicit_effort(role, spec):
+    """Every shipped model must carry `MODEL_EFFORT` in the request it builds.
+
+    Asserted on the outgoing payload rather than on a constructor attribute,
+    because a kwarg the client accepts and never serialises is the failure: the
+    request goes out without it, and Opus 5.5 quietly runs at `medium`.
+    """
+    model = build_model(spec)
+    payload = model._get_request_payload([("user", "hi")])  # ty: ignore[unresolved-attribute]
+    assert payload.get("output_config", {}).get("effort") == MODEL_EFFORT, (
+        f"{role}: {spec!r} sends {payload.get('output_config')!r}"
     )
 
 

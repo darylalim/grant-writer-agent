@@ -29,12 +29,16 @@ BackendProfile = Literal["local", "server"]
 # can pin what the project *ships* regardless of any GRANT_WRITER_*_MODEL set in
 # the developer's environment or .env -- see test_wiring, which asserts each one
 # resolves to a real output ceiling.
+#
+# The grader is `RubricMiddleware`'s model, and it judges the drafter's output
+# against the funder's criteria. A weaker model grading a stronger one's prose
+# passes what it cannot see the fault in, so it sits in the drafter's tier.
 DEFAULT_MODELS = {
-    "drafting": "anthropic:claude-opus-5",
-    "research": "anthropic:claude-sonnet-5",
-    "compliance": "anthropic:claude-sonnet-5",
-    "grader": "anthropic:claude-sonnet-5",
-    "discovery": "anthropic:claude-sonnet-5",
+    "drafting": "anthropic:claude-opus-5-5",
+    "research": "anthropic:claude-sonnet-5-5",
+    "compliance": "anthropic:claude-sonnet-5-5",
+    "grader": "anthropic:claude-opus-5-5",
+    "discovery": "anthropic:claude-sonnet-5-5",
 }
 
 DRAFTING_MODEL = os.getenv("GRANT_WRITER_DRAFTING_MODEL", DEFAULT_MODELS["drafting"])
@@ -58,9 +62,16 @@ DISCOVERY_MODEL = os.getenv("GRANT_WRITER_DISCOVERY_MODEL", DEFAULT_MODELS["disc
 # GRANT_WRITER_*_MODEL overrides too, which no test can enumerate, so the fix
 # belongs at the construction site rather than in a version pin. 64000 tokens is
 # roughly 48,000 words: far past any section limit, so this only ever removes
-# the truncation, never binds. Models that think (Opus 5 does so by default)
-# spend reasoning from the same budget, which is why the headroom is generous.
+# the truncation, never binds. Every shipped model thinks, and reasoning is
+# spent from the same budget, which is why the headroom is generous.
 MAX_OUTPUT_TOKENS = 64000
+
+# Set explicitly for the same reason as the ceiling: the provider default moves
+# under us. Opus 5.5 defaults to `medium` where Opus 5 defaulted to `high`, so
+# the upgrade alone would have made drafting think less -- no error, just a
+# shallower proposal. Thinking cannot be disabled on these models; effort is
+# the only depth control. Anthropic specs only: other providers reject the key.
+MODEL_EFFORT = "high"
 
 
 def build_model(spec: str) -> BaseChatModel:
@@ -70,6 +81,8 @@ def build_model(spec: str) -> BaseChatModel:
     importing this module stays cheap and the CLI's `require_api_keys` check
     still reports missing credentials before any client is constructed.
     """
+    if spec.startswith("anthropic:"):
+        return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS, effort=MODEL_EFFORT)
     return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS)
 
 

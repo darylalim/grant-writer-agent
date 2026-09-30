@@ -172,7 +172,7 @@ was duplicated logic waiting to happen:
   prompt, dropped `SubAgentMiddleware`'s task-usage guidance, and stopped generating filesystem
   tool-usage prose — about 5.6k characters that used to sit under `ORCHESTRATOR_PROMPT` and
   `DISCOVERY_PROMPT`, plus a `task` tool description that shrank from roughly 90 lines to 8. The
-  models here match no harness profile (`DEFAULT_MODELS` names opus-5/sonnet-5; the registry knows
+  models here match no harness profile (`DEFAULT_MODELS` names opus-5-5/sonnet-5-5; the registry knows
   4.x ids), so nothing refills it. Upstream's reasoning is that the prose duplicated the tools' own
   schema descriptions, and that is largely true — but the argument *for delegating rather than
   doing the work inline* was the single largest thing removed, and this project depends on it: the
@@ -184,7 +184,7 @@ was duplicated logic waiting to happen:
 
 Roles are split where context isolation pays: research floods context with search results, drafting
 needs skills loaded, and compliance must judge drafts without the drafter's rationalizations in
-context. Model tier per role (`DRAFTING_MODEL` opus, others sonnet) is overridable via
+context. Model tier per role (`DRAFTING_MODEL` and `GRADER_MODEL` opus, others sonnet) is overridable via
 `GRANT_WRITER_*_MODEL` env vars.
 
 ### Virtual paths vs. disk
@@ -258,12 +258,20 @@ runs, and still produces plausible output.
    bare spec string.** Left to the provider default, `ChatAnthropic` reads `max_tokens` from
    a profile registry bundled with `langchain-anthropic` and falls back to 4096 for any id
    it does not recognize — a valid id, an HTTP 200, no exception, and a narrative that stops
-   mid-sentence. Opus 5 thinks by default and reasoning is billed against that same ceiling,
-   so the cap bites sooner than the word count suggests. `build_model` sets
-   `MAX_OUTPUT_TOKENS` explicitly, which is what makes a `GRANT_WRITER_*_MODEL` override to
-   an unrecognized id safe — no test can enumerate those. `DEFAULT_MODELS` holds the shipped
-   ids so `test_wiring` pins what the project ships rather than whatever the developer's
-   environment overrides them to.
+   mid-sentence. This is not hypothetical: `langchain-anthropic` 1.6.1 resolves
+   `claude-opus-5-5` and `claude-sonnet-5-5`, the shipped defaults, to exactly 4096. Every
+   shipped model thinks and reasoning is billed against that same ceiling, so the cap bites
+   sooner than the word count suggests. `build_model` sets `MAX_OUTPUT_TOKENS` explicitly,
+   which is what makes a `GRANT_WRITER_*_MODEL` override to an unrecognized id safe — no test
+   can enumerate those. `DEFAULT_MODELS` holds the shipped ids so `test_wiring` pins what the
+   project ships rather than whatever the developer's environment overrides them to.
+
+   **Effort is the same trap one field over.** Thinking cannot be disabled on Opus 5.5 or
+   Sonnet 5.5, so `output_config.effort` is the only depth control — and Opus 5.5 defaults it
+   to `medium` where Opus 5 defaulted to `high`. The upgrade alone would have made drafting
+   think less, with nothing raised. `build_model` sends `MODEL_EFFORT` on every `anthropic:`
+   spec, and the test asserts it on the outgoing request payload rather than the constructor,
+   since an accepted-but-unserialised kwarg is precisely how it would go missing.
 10. **The application id input must stay outside `st.form`.** `st.form` batches its
     widgets and sends them only when Submit is pressed. `streamlit_app.py` reads that
     id back to decide which application the file browser shows, so inside the form the
