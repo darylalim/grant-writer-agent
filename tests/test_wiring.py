@@ -349,8 +349,14 @@ def test_the_rubric_grader_wakes_when_a_rubric_is_present():
     middleware = RubricMiddleware(model=build_model(GRADER_MODEL))
     middleware._grade = cast(
         Any,
-        lambda _state, _iteration: GraderResponse(
-            result="satisfied", explanation="stub", criteria=[]
+        # Keyword-only `context` matches the upstream signature exactly rather
+        # than absorbing `**kwargs`, so a further change to the call fails here.
+        # One criterion, because deepagents 0.7.21 downgrades a `satisfied`
+        # that no criterion backs to `needs_revision` as incomplete grading.
+        lambda _state, _iteration, *, context=None: GraderResponse(
+            result="satisfied",
+            explanation="stub",
+            criteria=[{"name": "The response is concise.", "passed": True}],
         ),
     )
 

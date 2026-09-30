@@ -258,8 +258,12 @@ runs, and still produces plausible output.
    bare spec string.** Left to the provider default, `ChatAnthropic` reads `max_tokens` from
    a profile registry bundled with `langchain-anthropic` and falls back to 4096 for any id
    it does not recognize — a valid id, an HTTP 200, no exception, and a narrative that stops
-   mid-sentence. This is not hypothetical: `langchain-anthropic` 1.6.1 resolves
-   `claude-opus-5-5` and `claude-sonnet-5-5`, the shipped defaults, to exactly 4096. Every
+   mid-sentence. This is not hypothetical: `langchain-anthropic` 1.6.1 resolved
+   `claude-opus-5-5` and `claude-sonnet-5-5`, the shipped defaults, to exactly 4096. 1.7.5
+   knows both and resolves them to 128000, but still gives 4096 to any id it does not know,
+   so the registry catching up covers today's ids and never the next rename. It also means
+   `MAX_OUTPUT_TOKENS` now *lowers* the shipped models' cap rather than raising it — a
+   ceiling this project chose, not a rescue, so raise it here if a run is truncated. Every
    shipped model thinks and reasoning is billed against that same ceiling, so the cap bites
    sooner than the word count suggests. `build_model` sets `MAX_OUTPUT_TOKENS` explicitly,
    which is what makes a `GRANT_WRITER_*_MODEL` override to an unrecognized id safe — no test
