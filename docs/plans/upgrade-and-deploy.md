@@ -69,6 +69,14 @@ Stopping at the end of any tier still leaves a coherent result.
 A "graph run" is one full `draft` or `discover` (many model calls); a "prompt call" is one model
 call. Estimate the dollar cost from 4b's measured baseline before each batch.
 
+**Tier 1 approved 2026-10-19 "as listed"** by the user: A0b, A4 / 4b / 4c and H2, exactly as in the
+rows below, with no dollar cap stated. That covers **those runs only**. Ask again before anything
+beyond them: an extra repeat to confirm a surprising 4b number, a re-run after a failure, or more
+H2 repeats. Report each run's measured cost as it completes, so the total is visible. Tiers 2
+and 3 are **not** approved. After C2 lands, its `ask` rules still show a confirmation prompt for
+these commands. That prompt is mechanical; this approval is what lets the session proceed
+without stopping to ask.
+
 | Step | Live runs |
 |---|---|
 | A0b | 1 partial `draft --approve` (to create a parked thread) |
