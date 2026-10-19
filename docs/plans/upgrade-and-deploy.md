@@ -11,6 +11,7 @@ before starting, because the versions below go stale.
 | D | Per-role effort, refusal handling, model fit | 2+ commits (D1, D2 separate) |
 | E | Multi-user deployment for one team: E0 org-profile template split, then Postgres, per-user threads, sign-in | Several commits; the largest track |
 | F | Streamlit theme designed for the app: warm paper neutrals, one indigo accent, serif headings; modes mirrored | 2–3 commits (test, config, re-pin) |
+| G | Adaptive layout: approval panel first, one tab per workflow, a pane-height control, readable prose width | 4 commits (G1–G4) |
 
 Do the tracks in order. Each one leaves the suite green and can ship on its own. E depends on A's
 upgraded langgraph libraries and on D2, because a hosted user has no terminal to notice a refusal
@@ -906,3 +907,120 @@ both. Check specifically:
 
 If the serif reads as fussy at 14px, drop `headingFont` and keep the rest. The palette stands
 without it.
+
+## Track G (after F, before E5): a layout that adapts to the display
+
+Designed 2026-10-19 from a read of `streamlit_app.py` against the bundled Streamlit layout
+reference (Streamlit 1.64). Constraint, as for Track F: **native layout primitives only, no CSS
+injection**. Streamlit has no media queries and no viewport-width API. The adaptive behaviour
+available is: columns stack at ≤640px, horizontal containers wrap, `width`/`height="stretch"`,
+and user-chosen sizing. The design works with those, not around them.
+
+### Today's layout, and where it breaks
+
+`layout="wide"` (`:68`), then one long column: title → *Find opportunities* form → *Draft a
+proposal* form → *Activity* feed (`height=440`, `:1370`) → follow-up `chat_input` → status slot,
+where the **approval panel** renders (`:1610`) → shortlist → *Application files*: a metrics row,
+then picker and content in `st.columns([1, 2])`, each `height=480` (`:865`–`:870`), with PDFs at
+`height=430` (`:779`). Run settings sit in the sidebar.
+
+| Display | What goes wrong |
+|---|---|
+| **Phone** (≤640px) | Columns stack, so the file picker becomes a **480px box holding a short radio list**, followed by a 480px content box: about 1,000px of fixed boxes. The approval panel, the one thing a human must act on, sits **below both forms and the 440px feed**. |
+| **Tablet / small laptop** (~768–1366px) | No stacking, so the `[1, 2]` columns get cramped. 440 + 480 fixed boxes overrun a 768px-tall viewport, so the feed and the files can never be seen together. |
+| **Desktop / ultrawide** (≥1920px) | `wide` lets rendered drafts run edge to edge. Prose lines become far too long to read comfortably, in an app whose main job is reading drafts. Meanwhile the fixed heights waste a tall monitor. |
+| **All** | Both workflows' forms are always on screen, one above the other, so the page is long before any output appears. |
+
+### The design
+
+**1. Approval first, on every display.** Reserve a slot directly under the title (beside the
+existing slot reservations at `:1143`) and render the approval panel there whenever the phase
+is AWAITING. Every other control is already disabled then (`turn_locked`), and the panel is the
+**sole exit** (invariant 11), so on a phone it must be the first thing on screen, not the last.
+Keep it as an inline panel, **not** `@st.dialog`: a dialog can be dismissed, and dismissing it
+would leave a page whose every control is disabled. That is the invariant 11 dead end in a new
+form.
+
+**2. One workflow at a time: `st.tabs(["Find opportunities", "Draft a proposal"], key=...)`.**
+Each tab holds its form and that workflow's results (the shortlist, or the application files).
+The *Activity* feed and the follow-up input stay **outside** the tabs, because they belong to
+whichever run is active. That roughly halves the page on every display.
+- Use `key=` so the selected tab survives reruns. Check that `st.rerun()` at the end of a run
+  doesn't snap back to the first tab, and set `default=` from `active_kind` so the tab matches
+  the run in progress.
+- `st.tabs` computes every tab by default, which is what the code does today, so the run logic is
+  unchanged. Don't adopt lazy tabs (`on_change="rerun"` with `.open`) in this track: it changes
+  which code runs on each pass.
+- Each run form stays its own `st.form`. The id boxes stay **outside** the forms (invariant 10),
+  inside their tab.
+
+**3. Replace fixed heights with a user-chosen pane height.** With no viewport API, let the
+person pick. Add a *Pane height* control (`Compact` / `Comfortable` / `Tall`, for example 320 /
+480 / 720px) with an explicit key, and derive every scroll box from it: the feed, the file
+content, and the PDF view (always 50px less than the content box, which is today's 480 → 430
+relationship). Default to *Comfortable*, today's 480. It is a display preference, not a run
+setting, so it does **not** go through `turn_locked` and stays usable during AWAITING. Put it in
+a small popover by the page title (`st.popover(":material/tune:")`), *not* in the sidebar, which
+is all locked during AWAITING and hidden on phones. It must also not be part of `get_agent`'s
+cache key `(profile, approve, search)`.
+
+**4. File browser: equal heights on desktop, natural height when stacked.** Give the content
+box the pane height, and the picker box `height="stretch"`, so on a wide screen it matches the
+content row, and stacked on a phone it shrinks to its list instead of a fixed 480px. *Verify this
+renders as described.* Stretch needs a bounded parent, and a stacked column may not supply one.
+If it doesn't, fall back to: the picker as `st.selectbox` placed above the content, at every
+width. That's simpler, and it's still fine on desktop for the handful of files an application has.
+
+**5. A readable measure for drafts on wide screens.** Keep `layout="wide"`: the forms, feed and
+metrics use the width well. Constrain only *rendered prose*: in `render_file`'s Markdown view,
+wrap the body in `st.container(width=<px>)` at about 760–820px (roughly 75–85 characters at 14px
+Inter). *Verify* that a fixed `width` shrinks to fit on a narrow display rather than forcing
+horizontal scroll. If it doesn't, keep the prose stretched; a too-long line is less bad than a
+sideways-scrolling page. The source view keeps the full width, because code blocks need it.
+
+**6. Leave alone what already adapts.** The metrics row (`st.container(horizontal=True)`) wraps
+by itself. The sidebar collapses to a menu on phones. `st.chat_input` pins to the bottom on every
+display. Button rows are already horizontal containers.
+
+### Interaction with the invariants (these are the risks, not the layout)
+
+- **Invariant 10:** the id boxes stay outside `st.form`, and the browse picker stays an input
+  method that *writes* the id box. Moving them into tabs changes their parent, not those rules.
+  Re-run the `form_id` structural test.
+- **Invariant 11:** every control that can *start a turn* keeps its `turn_locked` gate. The new
+  tabs and the pane-height control start no turn and must stay usable during AWAITING; check that
+  they don't. Changing tabs must never submit, resume or discard anything.
+- **AppTest:** cases select widgets **by label**, never by index (the `_button` helper exists
+  because an index lookup silently pointed at the wrong button once a form was added above). Tabs
+  reorder the element tree, which is exactly that situation, so any lookup still done by index
+  will now address the wrong widget. Search the suite for `[0]`-style lookups before moving
+  anything. Remember too that AppTest doesn't model `st.form` batching.
+- **Fragments:** `render_feed` / the file browser use `@st.fragment` (`:469`, `:597`, `:827`).
+  A fragment rerun must still find its container after moving into a tab.
+
+### Order of edits (the suite hook gates `streamlit_app.py` and `tests/*.py`)
+
+Do the riskiest structural move by itself, with the tests proving nothing about the runs changed:
+
+1. **G1, approval slot first:** move the panel's slot under the title. Small, and it is the change
+   that matters most on phones.
+2. **G2, the pane-height control:** derive the four fixed heights from it. Default 480, so the
+   page renders the same as today.
+3. **G3, tabs:** the structural move. Before it, check that no AppTest lookup depends on element
+   order. Add tests that each tab holds its form, that the id boxes have no `form_id`, and that
+   the tab follows `active_kind` across a rerun.
+4. **G4, file browser and prose width** (with the fallbacks above, if verification says so).
+
+### Visual verification (required; AppTest has no viewport)
+
+Run the app (the `run` skill), then drive it with Chrome (`resize_window`) at **390×844**
+(phone), **820×1180** (tablet), **1366×768** (laptop) and **2560×1440** (desktop). Screenshot
+each **in both theme modes** (Track F). At each width check:
+
+- with a thread parked, the approval panel is the first thing below the title;
+- the file picker isn't a mostly empty fixed box when stacked;
+- feed and content heights follow the pane-height control;
+- draft prose stays readable on 2560px;
+- nothing scrolls sideways at 390px.
+
+Record the screenshots in the PR. They are the only evidence for this track.
