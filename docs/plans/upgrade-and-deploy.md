@@ -10,6 +10,7 @@ before starting, because the versions below go stale.
 | C | CI tool pins: ruff / ty; C2: pin the hooks to match, widen their triggers, add `ask` rules; C3: `setup-uv` v10, pin uv, Dependabot for actions | 3 commits (C, C2, C3) |
 | D | Per-role effort, refusal handling, model fit | 2+ commits (D1, D2 separate) |
 | E | Multi-user deployment for one team: E0 org-profile template split, then Postgres, per-user threads, sign-in | Several commits; the largest track |
+| F | Streamlit theme designed for the app: warm paper neutrals, one indigo accent, serif headings; modes mirrored | 2–3 commits (test, config, re-pin) |
 
 Do the tracks in order. Each one leaves the suite green and can ship on its own. E depends on A's
 upgraded langgraph libraries and on D2, because a hosted user has no terminal to notice a refusal
@@ -732,3 +733,176 @@ org profile (Track E's decision), it affects **every user**, and nothing on scre
 
 Commit E0 through E4 separately, including E3b. E2, E3b and E4 are what make hosting safe, so none
 of them ships as part of another commit. Run `/security-review` on each one before it merges.
+
+## Track F (independent; any time after C2): a theme designed for this app
+
+Designed 2026-10-19. The current theme is shadcn's zinc template, copied unchanged and well
+engineered (tested contrast, a validated chart ramp, both modes). But it is generic, and entirely
+monochrome: **nothing on the page is coloured to mark an action**. In a tool whose most important
+moments are *Draft proposal* (a billed run) and *Approve* (a write bound for submission), the primary
+buttons look like every other dark-grey control. Track F keeps everything the current file got
+right and changes three things: **a warm "paper" neutral, one ink-indigo accent, and serif
+headings.**
+
+### Direction
+
+| | Choice | Why |
+|---|---|---|
+| Feel | A calm document workspace: paper and ink, not a dashboard | Users read long drafts and judge them; the page should feel like a proposal, not a console |
+| Neutrals | Tailwind **stone** (warm grey) in place of zinc | Warm paper is easier on the eyes over long reading, and it still reads as neutral |
+| Accent | One **indigo**, used for the primary action, links and selected controls | Says "act here", and stays clear of the semantic red, amber, green and blue used by status colours |
+| Headings | **Source Serif 4** (a serif), with Inter kept for body text and JetBrains Mono for code | Headings look like a document's; body text stays a UI font for legibility at 14px |
+| Geometry | Unchanged: 6px radius, widget borders on, 14px base | The layout is built on `st.container(border=True)`; nothing there needs to change |
+
+### How the two modes complement each other
+
+Each mode is the other **mirrored step for step on the same two scales**. Surfaces that are
+stone-50/100/200 in light become stone-900/800/700 in dark, and the accent moves to a lighter indigo
+in dark so it stays vivid on a dark page. The *roles* are identical in both: the same token always
+does the same job, only the luminance flips. That is what "complementary" means here, and it is
+testable: `test_dark_mirrors_the_light_half_s_surface_boundaries` already checks it.
+
+### Measured (2026-10-19, with `test_theme_config.py`'s own formulas)
+
+| Check | Light | Dark | Floor |
+|---|---|---|---|
+| Body text on page | stone-950 on white **19.76** | stone-50 on stone-950 **18.92** | 4.5 |
+| Link on page | indigo-700 **7.90** | indigo-300 **9.91** | 4.5 |
+| Text on sidebar | **18.92** | **16.74** | 4.5 |
+| Primary button: white label on fill | indigo-700 **7.90** | `#605EEF` **4.83** | 4.5 |
+| Lit segment on its 10% wash | **6.71** | **3.82** | 3.0 |
+| Code text on code background | stone-800 on stone-100 **13.90** | stone-200 on stone-800 **12.08** | 4.5 |
+| `grayColor` stone-500 on white | **4.80** | (rendered via the derived `grayTextColor`; re-measure) | n/a |
+| Chart ramp, worst entry on the page | **3.19** | **3.05** | 3.0 |
+
+The dark primary is the one hard value. Streamlit uses `primaryColor` for two jobs that pull
+opposite ways: a button fill under a hard-coded **white** label (wants dark) and the foreground of
+a lit segmented control (wants light). The two curves cross near 4.4:1 on any near-black page, *so
+no hue escapes it*. Contrast is luminance, and choosing a hue doesn't change luminance. No Tailwind
+indigo step clears both: indigo-500 gives 4.47 / 4.10 (the label fails AA), indigo-600 gives
+6.29 / 2.98 (the segment fails 3:1). `#605EEF`, searched between them, lands at **4.83 / 3.82**,
+*the same numbers the current zinc-500 achieves (4.83 / 3.80)*. The accessibility budget is
+unchanged, and the control gains a hue as a second cue, alongside its wash and border.
+`#6365F1` hits exactly 4.50; don't use it, because it has no margin.
+
+Two caveats to carry into the file's comments:
+
+- The chart ramp is unchanged, and it now clears the new dark page by only 0.05 (3.05). On the dark
+  **sidebar** (stone-900), `#A21CAF` is 2.77 and `#B91C1C` 2.70, the same caveat the file already
+  documents for zinc-900. The app draws no charts yet.
+- On the dark sidebar, the lit segment drops to 3.30 (still above 3.0).
+
+### Proposed `.streamlit/config.toml` values
+
+Keep the file's existing structure and its long comments. Rewrite the provenance note (no longer
+"shadcn.toml unchanged"), the primary-colour note (new hue, same trade-off) and the
+derived-grey note (re-measure with the new `grayColor`).
+
+```toml
+[theme]
+base = "light"
+baseFontSize = 14
+baseFontWeight = 400
+showSidebarBorder = true
+showWidgetBorder = true
+baseRadius = "6px"
+buttonRadius = "6px"
+font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+headingFont = "'Source Serif 4':https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+codeFontSize = "0.875rem"
+headingFontSizes = ["36px", "30px", "24px", "20px", "16px", "14px"]
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+linkUnderline = true
+
+grayColor = "#78716C"     # stone-500 (was zinc-500), so muted text matches the warm neutrals
+blueColor = "#3B82F6"
+greenColor = "#22C55E"
+redColor = "#EF4444"
+yellowColor = "#EAB308"
+orangeColor = "#F97316"
+violetColor = "#8B5CF6"
+chartCategoricalColors = [ ...unchanged, validated ramp... ]
+
+[theme.light]
+primaryColor = "#4338CA"              # indigo-700
+backgroundColor = "#FFFFFF"           # paper
+secondaryBackgroundColor = "#FAFAF9"  # stone-50
+codeBackgroundColor = "#F5F5F4"       # stone-100
+textColor = "#0C0A09"                 # stone-950, ink
+linkColor = "#4338CA"                 # indigo-700, with linkUnderline as the second cue
+borderColor = "#E7E5E4"               # stone-200
+codeTextColor = "#292524"             # stone-800
+dataframeBorderColor = "#E7E5E4"
+dataframeHeaderBackgroundColor = "#FAFAF9"
+
+[theme.light.sidebar]
+backgroundColor = "#FAFAF9"           # stone-50
+secondaryBackgroundColor = "#F5F5F4"  # stone-100
+codeBackgroundColor = "#E7E5E4"       # stone-200
+textColor = "#0C0A09"
+borderColor = "#D6D3D1"               # stone-300; NOT stone-200, which would collide with code bg
+primaryColor = "#4338CA"
+dataframeHeaderBackgroundColor = "#F5F5F4"
+dataframeBorderColor = "#E7E5E4"
+
+[theme.dark]
+primaryColor = "#605EEF"              # searched indigo: 4.83 label / 3.82 segment (see above)
+backgroundColor = "#0C0A09"           # stone-950
+secondaryBackgroundColor = "#1C1917"  # stone-900
+codeBackgroundColor = "#292524"       # stone-800
+textColor = "#FAFAF9"                 # stone-50
+linkColor = "#A5B4FC"                 # indigo-300: the light link's hue, lifted for a dark page
+borderColor = "#44403C"               # stone-700
+codeTextColor = "#E7E5E4"             # stone-200
+dataframeBorderColor = "#44403C"
+dataframeHeaderBackgroundColor = "#1C1917"
+
+[theme.dark.sidebar]
+backgroundColor = "#1C1917"           # stone-900
+secondaryBackgroundColor = "#292524"  # stone-800
+codeBackgroundColor = "#44403C"       # stone-700
+textColor = "#FAFAF9"
+borderColor = "#57534E"               # stone-600, mirroring light's distinct sidebar border
+primaryColor = "#605EEF"
+dataframeHeaderBackgroundColor = "#292524"
+dataframeBorderColor = "#44403C"
+```
+
+The light sidebar's border/code collision that the template inherited (both zinc-200) is
+deliberately *fixed* here, with stone-300 for the border. The mirror test only demands that dark
+not *introduce* a collision, so this is an improvement it allows.
+
+### Order of edits (the suite hook gates `.streamlit/config.toml` and `tests/*.py`)
+
+Each edit must pass the suite on its own, and today's tests pin the old values, so:
+
+1. **Test first, loosened without losing anything.** In `tests/test_theme_config.py`:
+   - Retire `test_light_half_still_matches_the_vendored_template` and `DOCUMENTED_DEVIATIONS`. The
+     light half stops being a template copy *by design*. Say so in the commit.
+   - Make `LIGHT_PAGE` / `DARK_PAGE` come from the config's `backgroundColor` values, not literals,
+     so the contrast tests measure whatever the page is.
+
+   The suite stays green against the *old* config.
+2. **Config.** Apply the values above and rewrite the comments. Every remaining test recomputes
+   contrast and must pass, which is the evidence the design holds.
+3. **Re-pin the design's own decisions** as new tests, in the file's existing style:
+   - the light and dark primaries share a hue, so the modes are complementary rather than two
+     unrelated palettes;
+   - the dark primary keeps the 4.5 label / 3.0 segment split (the existing test already checks
+     this);
+   - `headingFont` is set and stays in a valid section.
+
+### Visual check (the tests can't judge looks)
+
+Run the app (the `run` skill), switch between Light and Dark in the settings menu, and screenshot
+both. Check specifically:
+
+- the *Draft proposal* and *Approve* buttons read as the primary action;
+- the Source/Rendered segmented control in `render_file` and `approval_panel` clearly shows which
+  side is lit;
+- serif headings next to Inter body text look deliberate, not mismatched;
+- bordered containers are distinguishable from the page in both modes.
+
+If the serif reads as fussy at 14px, drop `headingFont` and keep the rest. The palette stands
+without it.
