@@ -9,6 +9,27 @@ This plan is long (about 1,350 lines). Read this section first, then only the st
 **The implementing session must not settle an open decision itself**: ask the user, using the
 table below. Tick the progress checklist in the commit that completes each step.
 
+### Rules that apply to every step
+
+- **Branches and PRs.** First merge *this plan* to `main` as its own PR, so every later branch
+  starts from it. Then do one branch and one PR per track, or per step for the large ones (each of
+  D, E and G gets one PR per step), cut from an up-to-date `main` and merged **in the order below**.
+  Tick the checklist inside each PR. A push to `main` only releases when `version` changes
+  (A6), so ordinary merges are safe. Don't keep one long-lived branch for everything: A6's release
+  needs A on `main` before the rest exists.
+- **Docs travel with the code.** Each step updates the README *and* `CLAUDE.md` in the same commit
+  wherever a fact it states changes. The plan lists the README edits; `CLAUDE.md` is affected by
+  at least D1 (invariant 9), D2 (a new invariant), E0, E1 and E5 (backend profiles,
+  architecture), E2 (thread ids, a new invariant), E7 (logging) and H (the evals and testing
+  sections).
+- **Invariant numbers.** New invariants take the **next free number when they land**, not the
+  number the plan guessed (D2 says 20 and E2 says 21; E0 and E3b may add more). `test_invariants.py`
+  checks both directions, so a wrong number fails the suite rather than going unnoticed.
+- **Fixed inputs.** Every live comparison (A4, 4b, H2–H4, D4) uses the committed fixtures in
+  `evals/fixtures/` (created in A0), never "a small RFP" picked on the day.
+- **This file's fate.** When the last step lands, add a "Completed <date>" line at the top and keep
+  the file in `docs/plans/` as the record of why things are the way they are. Don't delete it.
+
 ### Order of work
 
 ```
@@ -79,14 +100,16 @@ call. Estimate the dollar cost from 4b's measured baseline before each batch.
 | 14 | Sign-in provider | open | Any OIDC provider whose sign-in page passes the accessibility check | E4/E5 |
 | 15 | Host | container platform + managed Postgres / LangSmith Deployment | Decide after A–D, from what E1–E4 needed | E5 |
 | 16 | Tracing in the deployment | off / full / content hidden | Content hidden: keeps timing, tokens and errors without proposal text | E5/E7 |
-| 17 | Retention and deletion | periods, per-user deletion | Organisation policy; the user decides | E5 |
+| 17 | Retention and deletion | periods; what per-user deletion removes | Organisation policy. Must say: deleting a user's data removes their threads, files, run-table rows and LangSmith traces, while the approval audit (E7) keeps IDs and decisions with no content, so it survives deletion | E5 |
+| 18 | CLI against the shared database | refuse / allow with an operator flag | Refuse when `DATABASE_URL` is set; allow only with an explicit flag, logged | E2 |
 
 ### Progress checklist
 
 Tick each box in the commit that completes the step. Fill in its hash in the *next* commit
 (a commit can't contain its own hash), or note it there as `(previous commit)`.
 
-- [ ] A0 / A0b: re-survey; checkpoints backed up; parked thread created (no commit)
+- [ ] Plan PR: this file merged to `main` (commit: `       `)
+- [ ] A0 / A0b: re-survey; checkpoints backed up; parked thread created; fixtures committed; "before" baseline taken (commit: `       `)
 - [ ] A1–A3: lock upgraded; gates green; `uv audit` clean; checkpoints resume; risky packages audited (commit: `       `)
 - [ ] A4 / 4b / 4c: smoke test, cost/caching baseline, live trace check, recorded in A's commit message
 - [ ] A5–A6: docs updated; optional release 0.2.2 (commit: `       `)
@@ -153,11 +176,6 @@ document the existing ones.
   (`02b1f96`).
 - **The only caps that do bind are outside `[project]`.** They are tracks B and C below.
 
-**Decided order (2026-10-19):** Track A first, as its own commit. Then B and C, each as its own
-separate commit afterwards, in that order. Do not fold either into A's commit. Track D (model
-configuration) comes last, because it changes what the agents do rather than what they are built
-from, and its checks depend on A's langchain-anthropic version.
-
 | Package | Locked | Latest | Notes |
 |---|---|---|---|
 | deepagents | 0.7.21 | 0.7.28 | Patch releases have broken things before; audit required |
@@ -222,6 +240,18 @@ and **no parked thread**. The parked case matters most, so create one *before* u
 then answer `quit`. This is a live run that costs money, so ask first. The `__interrupt__` query is
 a quick check; the authority is `activity.is_parked(agent, {"configurable": {"thread_id": ...}})`.
 
+**Also in 0b, on the old lock: fixtures and the performance baseline.**
+
+1. Commit a fixed input set to `evals/fixtures/` (its own small commit, before the upgrade): one
+   **public**, non-sensitive solicitation (a short excerpt of a real public RFP is fine; record
+   its source URL), and a **fictional** org profile. Never use real organisation or personnel data,
+   because this directory is tracked. In the same commit, add `evals/out/` to `.gitignore`. A2 keeps
+   the rest of its additions, but outputs start landing here before A2.
+2. Take step 4b's **"before" measurements now**, on the old lock, with those fixtures. Once step 1
+   runs `uv lock --upgrade`, the old lock is gone (short of reverting) and so is the only fair
+   comparison.
+
+
 ### 1. Upgrade and sync
 
 ```bash
@@ -241,7 +271,7 @@ The hooks only fire on `Edit`/`Write`, so a Bash-only change has run nothing yet
 uv run pytest tests/ -q
 uvx ruff@0.16.4 check src/ tests/ evals/ streamlit_app.py
 uvx ruff@0.16.4 format --check src/ tests/ evals/ streamlit_app.py
-uvx ty@0.0.74 check src/ tests/
+uvx ty@0.0.74 check src/ tests/ evals/ streamlit_app.py
 ```
 
 Use the CI-pinned tool versions, not bare `uvx`, so that track A's result doesn't mix with track
@@ -322,7 +352,7 @@ Only a live run covers the prompts, the `anthropic` SDK bump, and deepagents pro
 
 ```bash
 uv run python -m evals.run_scout
-uv run grant-writer draft --app-id upgrade-smoke --rfp <a small RFP> --funder NSF
+uv run grant-writer draft --app-id upgrade-smoke --rfp evals/fixtures/<the fixture RFP> --funder NSF
 ```
 
 On the draft run, look for: the orchestrator delegating via `task` (instead of drafting inline),
@@ -333,8 +363,8 @@ On the draft run, look for: the orchestrator delegating via `task` (instead of d
 Nothing else in this plan would notice a cost or speed regression from the upgrade, which changes
 prompts (deepagents), request shapes (langchain-anthropic) and the SDK (anthropic 1.10 → 1.15).
 
-1. **Before `uv lock --upgrade`**, on the old lock, run one `discover` and one `draft` on a
-   **fixed, small** RFP and focus, and keep the inputs in `evals/out/perf/`. Record, per run:
+1. **"Before": already taken in step 0b**, on the old lock: one `discover` and one `draft` on the
+   committed `evals/fixtures/` inputs, with outputs in `evals/out/perf/` (ignored). Record, per run:
    input tokens, output tokens, **cache-read and cache-creation input tokens**, number of model
    calls, wall-clock time, and cost at the current prices (Opus 5.5 $4/$20, Sonnet 5.5 $2/$10
    per M tokens). Take the figures from each response's usage metadata (or from LangSmith, if
@@ -376,6 +406,11 @@ tests and CI.
 - Update any version-specific claim in `CLAUDE.md` that became false (invariant 9's 1.7.5 figures,
   the Streamlit notes). The hook runs the suite on `CLAUDE.md` edits, because
   `test_invariants.py` parses it.
+- Already fixed during the plan review on 2026-10-19, on this branch: `CLAUDE.md` and
+  `test_theme_config.py`'s docstring said **ten** theme options are top-level-only, and
+  `config.toml` and a test docstring called `chartCategoricalColors` top-level-only. Streamlit 1.62
+  cut the set to seven and made the chart ramps per-mode. After upgrading to 1.66, re-check the
+  count the test derives, and update the prose if it moved again.
 
 **README (same commit).** In "Where state lives", add the missing row for the checkpoints, which
 is the state this track has to protect: `.grant_writer/checkpoints.sqlite` | Until deleted |
@@ -412,8 +447,9 @@ this repo, so keep it and extend it. Match the existing style: each entry gets a
   treat `.env.*` as secret, so the two should agree. Make this edit with `Edit`, not a shell
   command. The `.env` Bash guard matches the name anywhere in a command, including inside a
   heredoc of prose; it blocked a plan edit on 2026-10-19 for exactly that reason.
-- `evals/out/`, as the conventional `--out` target for `run_scout` and `push_dataset`. Their
-  records carry raw model output. Mention the convention in `evals/README.md`.
+- `evals/out/` is **already** ignored by A0's fixtures commit. A2 only documents the convention
+  (the `--out` target for `run_scout` and `push_dataset`, whose records carry raw model output) in
+  `evals/README.md`.
 - Optional: drop `.mypy_cache/`, since the project uses ty, not mypy. It is harmless either way.
 
 Check: `git status --short --ignored` before and after. No tracked file may become ignored, and
@@ -466,6 +502,10 @@ so the wheel's metadata and the GitHub "About" box agree:
 4. Note that the local `uv` is 0.12.22. With a mismatched backend, uv installs `uv_build` from
    PyPI instead of using its built-in fast path. That works, but it is slower, so consider
    `uv self update`.
+5. **Choose the uv version here, not in C3.** `uv_build` 0.13 pairs with uv 0.13. Update the local
+   uv, and record the chosen version in the commit message. C3 step 2 then pins exactly that
+   version (`required-version`), so the local machine, CI and the build backend agree. Track B
+   comes before C3 in the order of work, so this is where the choice belongs.
 
 Keep this as its own commit: it changes what gets published, not what runs.
 
@@ -473,7 +513,8 @@ Keep this as its own commit: it changes what gets published, not what runs.
 
 1. Run `uvx ruff@0.17.1 format --check` and `check`. A new minor version can reformat code or
    enable new rules within the selected families.
-2. Run `uvx ty@0.0.89 check src/ tests/`, and read every diagnostic. If the upstream count
+2. Run `uvx ty@0.0.89 check src/ tests/ evals/ streamlit_app.py` (the same scope as the hook and
+   CI, which is where the baseline of 2 was measured), and read every diagnostic. If the upstream count
    changes, update **both** thresholds: the ty hook in `.claude/settings.json` and the type-check
    step in `.github/workflows/ci.yml`.
 3. Bump the pins in `ci.yml`. The `CLAUDE.md` Commands section names `ruff@0.16.4` /
@@ -548,8 +589,7 @@ The "upgrade everything" survey above covered Python packages only, but the acti
    independent of the local 0.12.22. Prefer `required-version` in `pyproject.toml`, which pins it
    for local `uv` *and* CI from one place, over a `version:` input repeated three times. Check in
    the v10 notes that `setup-uv` honours it. This interacts with Track B: `uv_build`'s range and the
-   uv that runs it should move together. If B's packaging check needs a known uv in CI, do this
-   step before B.
+   uv that runs it should move together. Pin the version **Track B chose** (see B step 5).
 2b. **Add `uv audit` to CI**, as a step in the `lint` job after `uv sync --locked`. It should fail
    on any advisory that isn't listed as accepted in the workflow, with a reason. Through the
    setup-uv v10 bump, keep the workflow's least-privilege permissions exactly as they are: the
@@ -580,7 +620,7 @@ each role, and in a failure mode nothing handles yet.
 | Sonnet 5.5 | $2 / $10 | `high` | Effort levels were recalibrated; `medium` is suggested for agentic work |
 | Haiku 5.5 | $0.10 / $0.50 | `medium` | No server-side refusal fallback |
 
-### D1. Per-role effort in `build_model` (one commit)
+### D1. Per-role effort in `build_model` (two commits: steps 1–2, then step 3 after H3)
 
 At present `MODEL_EFFORT = "high"` is applied to every role (`config.py:74`). Make effort a
 per-role setting while keeping invariant 9's rule: send it explicitly on every `anthropic:` spec,
@@ -629,7 +669,8 @@ That makes it a new silent failure of exactly the kind `CLAUDE.md` lists.
    `server-side-fallback-2026-07-01` beta with `fallbacks: "default"`). That changes what every
    request sends and how it is billed, so it is a product decision; do not slip it into this
    commit.
-4. If D2.2 lands, add it as **invariant 20** with a test that claims it (`Pins invariant 20.`).
+4. If D2.2 lands, add it as a **new invariant** (the next free number, 20 as of 2026-10-19) with a
+   test that claims it.
 5. **README:** add a "Guardrails" bullet saying that a turn declined by a safety classifier is
    shown as declined, with its category, and not as an empty reply. Say that health and biomedical
    topics can trigger false refusals, and what to do about one (rephrase, or retry later). If the
@@ -667,10 +708,10 @@ and H4's refusal rate, not single runs.
 2. **Optional: try Haiku 5.5 as the scout.** Run
    `GRANT_WRITER_DISCOVERY_MODEL=anthropic:claude-haiku-5-5 uv run python -m evals.run_scout`.
    It is 20× cheaper than Sonnet. Switch `DEFAULT_MODELS["discovery"]` only if the citation and
-   invention scores hold. The judge stays on `GRADER_MODEL` (Opus), so it still differs from the
-   scout.
-3. For drafting, run one real `draft` at the new settings and read the output. No offline test can
-   judge prose quality.
+   invention scores hold. The judge is H1's pinned judge, which differs from the scout's model.
+3. For drafting, run H3's drafting eval (`--repeat 3`) at the new settings against the old ones,
+   then read one real `draft` as a final human check. H3 can't judge *quality* of prose, only its
+   grounding and limits, so the read-through still matters.
 
 4. **Cost per completed run, not per request.** For the D1 settings against the old all-`high`
    settings, on the same inputs: total tokens, cache-read tokens, model calls, rubric rounds
@@ -787,9 +828,9 @@ instead of graphs, and it gets the same fix:
 - In the `server` profile, scope the Store namespaces for anything per-user. `/skills/` and
   `/memories/org/` stay shared, because there is one organisation. If per-user memories are ever
   added, they need their own namespace (invariant 6's reason, one level down).
-- Add this as **invariant 21**, with a claiming test (`Pins invariant 21.`) that two users with the
-  same app id get different thread ids and cannot read each other's checkpoints. If D2 did not
-  produce invariant 20, renumber this one to 20.
+- Add this as a **new invariant** (the next free number when it lands), with a claiming test that
+  two users with the same app id get different thread ids and cannot read each other's
+  checkpoints *or each other's files on disk* (next bullets).
 - `parked_state` and `is_parked` read the checkpoint by thread id. Both must use the per-user id,
   or a user could be shown, or approve, a different user's pending write.
 - **Security test (essential):** user B, supplying user A's app id, can't read A's checkpoint,
@@ -797,6 +838,20 @@ instead of graphs, and it gets the same fix:
   every entry point: the run form, the follow-up input, the approval panel, and the file browser.
   The user id must come only from E4's authenticated session, never from any value the client
   supplies.
+- **Disk paths are per user too, not only thread ids.** Real-disk writers key on the bare id:
+  `applications/<app-id>/` (the UI's RFP upload, `extract_pdf_text`'s output) and
+  `opportunities/<scan-id>/` (`fetch_grants_gov_opportunity`, allowed to write `opportunities` per
+  `tools._DISCOVERY_WRITE_DIRS`). So user B's scan `x` overwrites user A's scan `x`, and the thread
+  fix above doesn't touch it. In the deployed configuration, give `application_dir` /
+  `opportunities_dir` a user segment (or move these writes into the backend, with E3), and pass
+  each graph's **per-user** allowed root to `_resolve_output_path`. That is invariant 2's
+  real-disk-writer rule: this is a second enforcement point, not covered by the first. Extend the
+  security test above to files: B can't read, list or overwrite A's directories.
+- **The CLI must not bypass this.** It keeps unprefixed thread ids, which is right on one laptop.
+  But with `DATABASE_URL` set, `grant-writer chat --app-id <anything>` would reach the *shared*
+  database with no sign-in, including any raw per-user thread id. Make the CLI **refuse to run when
+  `DATABASE_URL` is set** unless an explicit operator flag is given (decision 18), and log every
+  such use (E7).
 
 ### E3. Uploads must not depend on one machine's disk
 
@@ -876,6 +931,9 @@ org profile (Track E's decision), it affects **every user**, and nothing on scre
   organisation**, checked before a turn starts like the spending limit. When it's reached, show
   "N runs in progress, try again shortly" instead of starting a run that will fail. Size it to the
   organisation's rate-limit tier.
+- **Web search costs too.** Tavily is billed per search and rate-limited. Count searches per
+  run in E7's run table, include them in the spending limit, and alert on Tavily errors the same
+  way as Anthropic 429s.
 
 ### E5. Deployment (decide the host here)
 
