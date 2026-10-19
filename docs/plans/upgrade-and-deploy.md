@@ -60,7 +60,7 @@ Stopping at the end of any tier still leaves a coherent result.
 
 | Tier | Steps | Result |
 |---|---|---|
-| **1. Upgrade safely** | A, A2, C, C2, H1, H2 | Latest dependencies, no known advisories, hooks match CI, and evals that can see a regression |
+| **1. Upgrade safely** | A, A2, C, C2, H1, H2, then release 0.2.2 | Latest dependencies, no known advisories, hooks match CI, and evals that can see a regression, tagged as `v0.2.2` |
 | **2. Improve quality** | B, C3, D1–D4, H3, H4, F, G | Per-role effort, visible refusals, a drafting eval, a theme and layout fit for the app |
 | **3. Deploy for a team** | E0–E7 | Postgres, per-user isolation, sign-in, limits, operations. Start only once a team deployment is actually decided |
 
@@ -84,7 +84,7 @@ call. Estimate the dollar cost from 4b's measured baseline before each batch.
 
 | # | Decision | Options | Recommendation | Needed by |
 |---|---|---|---|---|
-| 1 | Release after Track A? | bump to 0.2.2 / wait | Bump, in its own commit, once A is green | A6 |
+| 1 | When to release 0.2.2 | after A / after Tier 1 | **Decided 2026-10-19: after Tier 1**, once H2 passes on A's result, as its own PR | end of Tier 1 |
 | 2 | Dependabot | actions only / none | Actions only (Python stays manual and audited) | C3 |
 | 3 | How CI pins uv | `required-version` / `version:` inputs | `required-version`: one place, local and CI | C3 |
 | 4 | Effort per role | values | drafting, grader, compliance `high`; research, discovery `medium`, confirmed by D4 | D1 step 3 |
@@ -112,7 +112,7 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
 - [ ] A0 / A0b: re-survey; checkpoints backed up; parked thread created; fixtures committed; "before" baseline taken (commit: `       `)
 - [ ] A1–A3: lock upgraded; gates green; `uv audit` clean; checkpoints resume; risky packages audited (commit: `       `)
 - [ ] A4 / 4b / 4c: smoke test, cost/caching baseline, live trace check, recorded in A's commit message
-- [ ] A5–A6: docs updated; optional release 0.2.2 (commit: `       `)
+- [ ] A5–A6: docs updated; A committed, no release (commit: `       `)
 - [ ] A2: `.gitignore`, description, topics, README intro (commit: `       `)
 - [ ] B: `uv_build` 0.13; archive contents checked (commit: `       `)
 - [ ] C: CI ruff/ty pins (commit: `       `)
@@ -120,6 +120,12 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
 - [ ] C3: setup-uv v10; uv pinned; `uv audit` in CI; Dependabot (commit: `       `)
 - [ ] H1: pinned judge, `--repeat`, eval labels (commit: `       `)
 - [ ] H2: delegation check; run on A's result (commit: `       `)
+- [ ] **Release 0.2.2 (end of Tier 1):** its own PR, only `version` bumped in `pyproject.toml`, merged
+  after A, A2, C, C2, H1 and H2 are all on `main` and H2 passed on A's result. Release notes: the
+  dependency changes; the three cleared aiohttp advisories (GHSA-494j-54xm-rwp3,
+  GHSA-5wr8-gcqf-gqf3, GHSA-2g87-pp6c-29x5); and the caveat that the wheel doesn't *enforce*
+  the fix, because aiohttp is indirect and has no minimum version here, so only `uv.lock` pins
+  it. Then check the CI run's "Decide whether to release" step tagged `v0.2.2` (commit: `       `)
 - [ ] D1 steps 1–2: per-role effort plumbing, no behaviour change (commit: `       `)
 - [ ] H3: drafting eval (commit: `       `)
 - [ ] D1 step 3 + D3: effort values; forced-tool-choice test (commit: `       `)
@@ -420,9 +426,13 @@ dependencies. Point the row at step 0b's backup command.
 ### 6. Commit (and optionally release)
 
 Model the message on `02b1f96`: say what moved, which bumps matter and why, what broke and how it
-was fixed, and confirm the ty baseline was read rather than counted. A release is a *separate*
-commit bumping `version` to `0.2.2`, because bumping the version is the release: CI tags and
-publishes it on a green push to `main`.
+was fixed, and confirm the ty baseline was read rather than counted.
+
+**Don't release here.** Decided 2026-10-19: 0.2.2 is released **at the end of Tier 1**, not after A,
+for three reasons. A alone changes nothing the wheel ships (the lock, docs and tests aren't in it,
+and `pyproject.toml`'s ranges are unchanged). A's evidence isn't complete until H2's delegation
+check passes on A's result. And CI tags and publishes on a green push to `main`, so a release
+can't be quietly withdrawn. See "Release 0.2.2" at the end of the Tier 1 steps in the checklist.
 
 **Rolling back is two steps, not one.** `git revert` brings back the old lock, but the checkpoint
 file may now contain rows written by the new version, and reading new rows with the old version
