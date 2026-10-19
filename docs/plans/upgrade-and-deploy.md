@@ -7,7 +7,7 @@ before starting, because the versions below go stale.
 
 This plan is long (about 1,350 lines). Read this section first, then only the step you are on.
 **The implementing session must not settle an open decision itself**: ask the user, using the
-table below. Update the progress checklist in the same commit that completes each step.
+table below. Tick the progress checklist in the commit that completes each step.
 
 ### Order of work
 
@@ -83,7 +83,8 @@ call. Estimate the dollar cost from 4b's measured baseline before each batch.
 
 ### Progress checklist
 
-Tick each box and fill in the commit hash in the same commit that completes the step.
+Tick each box in the commit that completes the step. Fill in its hash in the *next* commit
+(a commit can't contain its own hash), or note it there as `(previous commit)`.
 
 - [ ] A0 / A0b: re-survey; checkpoints backed up; parked thread created (no commit)
 - [ ] A1–A3: lock upgraded; gates green; `uv audit` clean; checkpoints resume; risky packages audited (commit: `       `)
