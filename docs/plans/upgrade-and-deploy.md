@@ -232,6 +232,29 @@ this repo, so keep it and extend it. Match the existing style: each entry gets a
 Check: `git status --short --ignored` before and after. No tracked file may become ignored, and
 `.env.example` must still show as tracked.
 
+**Same commit: the project description.** Decided 2026-10-19. One text is used in both places,
+so the wheel's metadata and the GitHub "About" box agree:
+
+> AI grant-writing agent on LangChain Deep Agents: finds funding opportunities, fit-scores them
+> with quoted evidence, and drafts proposals with human approval of final files. Marks unknowns
+> for input instead of inventing data.
+
+(One line in the actual field; it is wrapped here for width. 218 characters, under GitHub's 350.)
+
+1. `pyproject.toml` → `[project] description = "..."`. The `PostToolUse` suite hook doesn't watch
+   `pyproject.toml` until C2, so run `uv run pytest tests/ -q` and `uv run grant-writer --help` by
+   hand. The `--help` text may come from elsewhere, so check whether it should change too. This
+   edit does **not** release anything: only a `version` change does.
+2. GitHub repo settings. These are outward-facing, so the user confirms before they run:
+   ```bash
+   gh repo edit --description "<the text above>" \
+     --add-topic grant-writing,grants,grant-proposals,funding,nonprofit,research-funding,ai-agents,multi-agent,llm,human-in-the-loop,deep-agents,langchain,langgraph,claude,anthropic,streamlit,python
+   ```
+   That's 17 topics. Hold back `postgresql` until Track E ships, and `grants-gov` unless that tool
+   is meant to be a headline feature.
+3. Check the README's opening line against the description. They don't need to match word for word,
+   but they shouldn't contradict each other.
+
 ---
 
 ## Track B (separate commit, after A): `uv_build` 0.12 → 0.13
