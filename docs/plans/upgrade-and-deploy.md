@@ -116,18 +116,23 @@ without stopping to ask.
 Tick each box in the commit that completes the step. Fill in its hash in the *next* commit
 (a commit can't contain its own hash), or note it there as `(previous commit)`.
 
-- [ ] Plan PR: this file merged to `main` (commit: `       `)
-- [ ] A0 / A0b: re-survey; checkpoints backed up; parked thread created; fixtures committed; "before" baseline taken (commit: `       `)
-- [ ] A1–A3: lock upgraded; gates green; `uv audit` clean; checkpoints resume; risky packages audited (commit: `       `)
+- [x] Plan PR: this file merged to `main` (commit: `6b63ca2`)
+- [ ] A0 / A0b: re-survey; checkpoints backed up; parked thread created; fixtures committed; "before" baseline taken (commit: `ee9d209` fixtures)
+  - 2026-10-19: re-survey, backup and fixtures done. **Parked thread and "before" baseline blocked**: the API key is not scoped to a workspace (`anthropic-workspace-id` required). Old lock kept runnable in a worktree at `.grant_writer/oldlock` (detached at `6b63ca2`) so both can still be taken on it.
+- [ ] A1–A3: lock upgraded; gates green; `uv audit` clean; checkpoints resume; risky packages audited (commit: `c06e8b1`)
+  - Done except the live half of 2b (resume a thread with `chat`; approve the parked one). Offline read of every existing thread on both locks matched.
 - [ ] A4 / 4b / 4c: smoke test, cost/caching baseline, live trace check, recorded in A's commit message
 - [ ] A5–A6: docs updated; A committed, no release (commit: `       `)
-- [ ] A2: `.gitignore`, description, topics, README intro (commit: `       `)
+- [ ] A2: `.gitignore`, description, topics, README intro (commit: `160f25f`)
+  - Done except `gh repo edit` (description and topics), which is outward-facing and waits for the user.
 - [ ] B: `uv_build` 0.13; archive contents checked (commit: `       `)
-- [ ] C: CI ruff/ty pins (commit: `       `)
-- [ ] C2: hooks pinned; triggers widened; `ask` rules (commit: `       `)
+- [x] C: CI ruff/ty pins (commit: `6ef0929`)
+- [ ] C2: hooks pinned; triggers widened; `ask` rules (commit: `a334939`)
+  - Pins and triggers pipe-tested. Whether the `ask` prompt actually appears is unconfirmed: needs the user to say whether a guarded command prompted.
 - [ ] C3: setup-uv v10; uv pinned; `uv audit` in CI; Dependabot (commit: `       `)
-- [ ] H1: pinned judge, `--repeat`, eval labels (commit: `       `)
-- [ ] H2: delegation check; run on A's result (commit: `       `)
+- [x] H1: pinned judge, `--repeat`, eval labels (commit: `84215b3`)
+- [ ] H2: delegation check; run on A's result (commit: `c2d9ce4` code and offline tests)
+  - The live run on A's result is still to do (blocked on the API key).
 - [ ] **Release 0.2.2 (end of Tier 1):** its own PR, only `version` bumped in `pyproject.toml`, merged
   after A, A2, C, C2, H1 and H2 are all on `main` and H2 passed on A's result. Release notes: the
   dependency changes; the three cleared aiohttp advisories (GHSA-494j-54xm-rwp3,
