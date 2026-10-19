@@ -7,7 +7,7 @@ before starting, because the versions below go stale.
 |---|---|---|
 | A | Lock upgrade to latest, plus checkpoint safety | 1 commit (+ optional release) |
 | B | `uv_build` 0.12 → 0.13 | 1 commit |
-| C | CI tool pins: ruff / ty | 1 commit |
+| C | CI tool pins: ruff / ty; then C2: pin the hooks to match, widen their triggers, add `ask` rules | 2 commits (C, C2) |
 | D | Per-role effort, refusal handling, model fit | 2+ commits (D1, D2 separate) |
 | E | Multi-user deployment for one team: Postgres, per-user threads, sign-in | Several commits; the largest track |
 
@@ -100,8 +100,9 @@ uv lock --upgrade
 uv sync
 ```
 
-Use `uv` for this, never an edit: `uv.lock` is write-blocked for `Edit`/`Write`. These commands
-do not name the file, so the Bash guard lets them through.
+Use `uv` for this, never an edit: the `PreToolUse` hook blocks `Edit`/`Write` on `uv.lock`.
+There is no Bash guard on `uv.lock` (the only Bash guard covers `.env`), so these commands run
+unimpeded. For the same reason, they also run no `PostToolUse` hook, which is why step 2 exists.
 
 ### 2. Run the local gates by hand
 
@@ -242,6 +243,43 @@ Keep this as its own commit: it changes what gets published, not what runs.
 
 Keep this as its own commit too. It mixes badly with track A, because a reformat would bury the
 lock diff.
+
+### C2. Make the hooks match CI, and close their gaps (one commit, after C)
+
+On 2026-10-19 the hooks in `.claude/settings.json` ran `uvx ruff` and `uvx ty` **without a
+version**, so they resolved to the latest releases (ruff 0.17.1, ty 0.0.89) while CI pinned 0.16.4
+and 0.0.74. Checked then: **no divergence yet.** 0.17.1 reported "27 files already formatted" and
+"All checks passed", and both ty versions reported 2 diagnostics. That agreement was luck. The next
+ruff release can reformat a file during Track D or E, and CI's `format --check` then rejects what
+the hook wrote.
+
+1. **Pin the hooks to CI's versions.** Change `uvx ruff` → `uvx ruff@<ver>` and `uvx ty` →
+   `uvx ty@<ver>` in the format and ty hooks, using the same versions C just put in `ci.yml`. From
+   now on, a version bump touches **three** places in one commit: `ci.yml`, `.claude/settings.json`,
+   and `CLAUDE.md`'s Commands section. Rewrite the `CLAUDE.md` sentence that accepts the drift
+   ("pins … where the hooks run `uvx` unpinned") to describe the pinned state.
+2. **Widen the suite hook's trigger list.** It currently fires on `src/grant_writer/*.py`,
+   `tests/*.py`, `evals/*.py`, `streamlit_app.py`, `CLAUDE.md` and `.streamlit/config.toml`. Add
+   `pyproject.toml`, which Track B's `[build-system]` and Track E's dependencies edit. Consider
+   `.claude/settings.json` as well, so a hook edit is checked by the suite it gates. The suite
+   took 12.9s for 426 tests against the hook's 60s timeout. Track E's Postgres tests must be
+   opt-in (E6), or they eat into that.
+3. **Turn the plan's "ask first" into permission rules, not hooks.** Add `permissions.ask` entries
+   so Claude Code asks for confirmation before running these:
+   - live, billed runs: `uv run grant-writer draft …`, `uv run grant-writer discover …`,
+     `uv run grant-writer chat …`, `uv run python -m evals.run_scout …`,
+     `uv run python -m evals.evaluate_scout …`;
+   - checkpoint destruction: any `rm` or `mv` whose target is `.grant_writer/checkpoints*`. Track
+     A's rollback `mv` is exactly this.
+
+   An `ask` rule fits better than a blocking hook here. These commands are sometimes right, and
+   the plan wants a human to confirm them, not to forbid them. Write the rules with the
+   `/update-config` skill and check the matcher syntax against the current settings schema rather
+   than guessing it. A rule that silently never matches fails *open*.
+4. Validate: make a trivial `.py` edit and confirm the pinned ruff and ty run (the status messages
+   show it). Then try one guarded command and confirm the prompt appears.
+
+The hooks gate every later edit, so C2 lands before Track D's first Python change.
 
 ## Track D (after C): per-role effort, refusals, and model fit
 
