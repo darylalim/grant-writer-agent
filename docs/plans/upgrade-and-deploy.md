@@ -3,6 +3,119 @@
 Drafted 2026-10-19 against `main` @ `eb33a4c` (v0.2.1). Re-run the survey commands in step 0
 before starting, because the versions below go stale.
 
+## Start here
+
+This plan is long (about 1,350 lines). Read this section first, then only the step you are on.
+**The implementing session must not settle an open decision itself**: ask the user, using the
+table below. Update the progress checklist in the same commit that completes each step.
+
+### Order of work
+
+```
+A (0 → 6) → A2 → B → C → C2 → C3
+  → H1 → H2 (and run H2 on A's result)
+  → D1 steps 1–2 (plumbing only, no behaviour change) → H3 → D1 step 3 (effort values) → D3 → D4
+  → H4 → D2
+  → F → G1 → G2 → G3 → G4
+  → E0 → E1 → E2 → E3 → E3b → E4 → E7 → E6 (incl. the fake-model load test) → E5 (go-live)
+```
+
+| Step | Unblocks |
+|---|---|
+| A | everything: new libraries, checkpoint safety, cost/caching baseline |
+| C2 | every later Python edit, since the hooks then match CI |
+| H1, H2 | a fair D1 comparison; H2 also re-checks A for the delegation loss |
+| H3 | D1 step 3's drafting/grader effort change |
+| H4 | D2, with a measured refusal rate |
+| D2 | E, because a hosted user has no terminal to notice a refusal |
+| F, G | E5's UI and the accessibility gate on a stable layout |
+| E0 | E1's seeding (template vs. real profile) |
+| E2, E3b, E4 | E5: hosting is unsafe without them |
+| E7, E6 | E5 go-live: operations and capacity are known first |
+
+### Three priority tiers
+
+Stopping at the end of any tier still leaves a coherent result.
+
+| Tier | Steps | Result |
+|---|---|---|
+| **1. Upgrade safely** | A, A2, C, C2, H1, H2 | Latest dependencies, no known advisories, hooks match CI, and evals that can see a regression |
+| **2. Improve quality** | B, C3, D1–D4, H3, H4, F, G | Per-role effort, visible refusals, a drafting eval, a theme and layout fit for the app |
+| **3. Deploy for a team** | E0–E7 | Postgres, per-user isolation, sign-in, limits, operations. Start only once a team deployment is actually decided |
+
+### Live runs (they cost money; approve per tier, not per step)
+
+A "graph run" is one full `draft` or `discover` (many model calls); a "prompt call" is one model
+call. Estimate the dollar cost from 4b's measured baseline before each batch.
+
+| Step | Live runs |
+|---|---|
+| A0b | 1 partial `draft --approve` (to create a parked thread) |
+| A4 / 4b / 4c | `run_scout` (4 cases × scout + judge = 8 prompt calls); 1 `discover` + 1 `draft` on the old lock, and the same on the new lock (4c reuses one of them) |
+| H2 | 1 fixture × 3 graph runs |
+| H3 | about 4 cases × 3 repeats × 1–2 prompt calls ≈ 12–24 prompt calls per setting |
+| D4 | scout: 4 cases × 3 repeats × 2 settings × (scout + judge) ≈ 48 prompt calls; optional Haiku trial ≈ 24 more; 1 completed `draft` per D1 setting |
+| H4 | about 5 health-topic runs + 3 control runs, per role tested |
+| E6 | **none**: the load test uses a fake model |
+| B, C, F, G, E0–E5, E7 | none required |
+
+### Open decisions (the user's to make; ask at the step listed)
+
+| # | Decision | Options | Recommendation | Needed by |
+|---|---|---|---|---|
+| 1 | Release after Track A? | bump to 0.2.2 / wait | Bump, in its own commit, once A is green | A6 |
+| 2 | Dependabot | actions only / none | Actions only (Python stays manual and audited) | C3 |
+| 3 | How CI pins uv | `required-version` / `version:` inputs | `required-version`: one place, local and CI | C3 |
+| 4 | Effort per role | values | drafting, grader, compliance `high`; research, discovery `medium`, confirmed by D4 | D1 step 3 |
+| 5 | Scout model | Sonnet 5.5 / Haiku 5.5 | Keep Sonnet unless Haiku matches on citation and invention scores over 3 repeats | D4 |
+| 6 | Server-side refusal fallback | off / `fallbacks: "default"` | Decide from H4's measured rate; off if it's zero | D2 step 3 |
+| 7 | Input-border contrast | pass ≥3:1 / documented exception | Pass | F |
+| 8 | Serif headings | keep / drop | Keep, unless the screenshots look fussy at 14px | F |
+| 9 | CLI thread ids under E2 | unprefixed / fixed local user | Unprefixed: the CLI stays single-user | E2 |
+| 10 | Org-profile precedence on restart | files on disk / Store edits | Store edits win; disk only seeds what's missing | E0/E1 |
+| 11 | Upload handling | extract text at upload / object storage | Extract text at upload | E3 |
+| 12 | Org-memory writes when deployed | approval interrupt / read-only + admin path | Interrupt for drafting (keeps the feature), deny for discovery (it must never park) | E3b |
+| 13 | Spending and concurrent-run limits | values | Sized to the organisation's Anthropic rate-limit tier and budget | E4 |
+| 14 | Sign-in provider | open | Any OIDC provider whose sign-in page passes the accessibility check | E4/E5 |
+| 15 | Host | container platform + managed Postgres / LangSmith Deployment | Decide after A–D, from what E1–E4 needed | E5 |
+| 16 | Tracing in the deployment | off / full / content hidden | Content hidden: keeps timing, tokens and errors without proposal text | E5/E7 |
+| 17 | Retention and deletion | periods, per-user deletion | Organisation policy; the user decides | E5 |
+
+### Progress checklist
+
+Tick each box and fill in the commit hash in the same commit that completes the step.
+
+- [ ] A0 / A0b: re-survey; checkpoints backed up; parked thread created (no commit)
+- [ ] A1–A3: lock upgraded; gates green; `uv audit` clean; checkpoints resume; risky packages audited (commit: `       `)
+- [ ] A4 / 4b / 4c: smoke test, cost/caching baseline, live trace check, recorded in A's commit message
+- [ ] A5–A6: docs updated; optional release 0.2.2 (commit: `       `)
+- [ ] A2: `.gitignore`, description, topics, README intro (commit: `       `)
+- [ ] B: `uv_build` 0.13; archive contents checked (commit: `       `)
+- [ ] C: CI ruff/ty pins (commit: `       `)
+- [ ] C2: hooks pinned; triggers widened; `ask` rules (commit: `       `)
+- [ ] C3: setup-uv v10; uv pinned; `uv audit` in CI; Dependabot (commit: `       `)
+- [ ] H1: pinned judge, `--repeat`, eval labels (commit: `       `)
+- [ ] H2: delegation check; run on A's result (commit: `       `)
+- [ ] D1 steps 1–2: per-role effort plumbing, no behaviour change (commit: `       `)
+- [ ] H3: drafting eval (commit: `       `)
+- [ ] D1 step 3 + D3: effort values; forced-tool-choice test (commit: `       `)
+- [ ] D4: evals and cost per completed run recorded (no commit, or results only)
+- [ ] H4: false-refusal case (commit: `       `)
+- [ ] D2: refusals shown, labelled, accessible (commit: `       `)
+- [ ] F: theme: test loosened → config → re-pinned (commits: `       `)
+- [ ] G1–G4: layout (commits: `       `)
+- [ ] E0: org-profile template split (commit: `       `)
+- [ ] E1: Postgres checkpointer and Store (commit: `       `)
+- [ ] E2: per-user thread ids, new invariant (commit: `       `)
+- [ ] E3: uploads (commit: `       `)
+- [ ] E3b: org-memory write gate (commit: `       `)
+- [ ] E4: sign-in, limits, run table (commit: `       `)
+- [ ] E7: logging, audit, health checks, alerts (commit: `       `)
+- [ ] E6: Postgres CI job, load test (commit: `       `)
+- [ ] E5: deployed; checklist done; README Deployment section (commit: `       `)
+
+## Tracks at a glance
+
 | Track | What | Ships as |
 |---|---|---|
 | A | Lock upgrade to latest, plus checkpoint safety; A2: `.gitignore` additions | 2 commits (+ optional release) |
@@ -14,7 +127,7 @@ before starting, because the versions below go stale.
 | F | Streamlit theme designed for the app: warm paper neutrals, one indigo accent, serif headings; modes mirrored | 2–3 commits (test, config, re-pin) |
 | G | Adaptive layout: approval panel first, one tab per workflow, a pane-height control, readable prose width | 4 commits (G1–G4) |
 
-Do the tracks in order (A, B, C, **H**, D, E, with F and G placed as their sections say; H runs between C and D so D can be measured). Each one leaves the suite green and can ship on its own. E depends on A's
+The exact order is in **Start here** above. Each step leaves the suite green and can ship on its own. E depends on A's
 upgraded langgraph libraries and on D2, because a hosted user has no terminal to notice a refusal
 in.
 
