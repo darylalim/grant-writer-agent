@@ -7,9 +7,9 @@ which nobody is watching during a run -- and drops the value. The page still
 renders, one step smaller or one border short, and no test would otherwise
 notice. Three separate mistakes land there:
 
-- moving one of the ten top-level-only options (`base`, `baseFontSize`,
-  `baseFontWeight`, the three chart ramps, `fontFaces`, the two metric-value
-  options, `showSidebarBorder`) into a per-mode section, which a plausible
+- moving one of the top-level-only options (seven as of Streamlit 1.62: `base`,
+  `baseFontSize`, `baseFontWeight`, `fontFaces`, the two metric-value options,
+  `showSidebarBorder`) into a per-mode section, which a plausible
   tidy-up does while making the file look *more* consistent;
 - a typo in any key;
 - an upstream rename on a Streamlit upgrade.
@@ -103,7 +103,7 @@ def test_every_theme_key_is_a_real_config_option() -> None:
     unknown = sorted(k for k in _flatten(_theme()) if k not in valid)
     assert not unknown, (
         f"not valid Streamlit config options: {unknown}. Streamlit drops these "
-        "with only a server-log warning. Note ten options are valid ONLY in the "
+        "with only a server-log warning. Note some options are valid ONLY in the "
         "top-level [theme] section -- see the comment in .streamlit/config.toml."
     )
 
@@ -230,8 +230,10 @@ def test_dark_mirrors_the_light_half_s_surface_boundaries() -> None:
 def test_chart_ramp_clears_three_to_one_on_both_pages() -> None:
     """The reason the ramp deviates from the template at all.
 
-    `chartCategoricalColors` is top-level-only, so one ramp serves both modes and
-    every entry has to clear the non-text-graphics floor on each page. The
+    `chartCategoricalColors` is set once, in [theme], so one ramp serves both modes
+    and every entry has to clear the non-text-graphics floor on each page. (Since
+    Streamlit 1.62 it could be set per mode; the config's comment says why it
+    isn't.) The
     template's zinc-forward ramp does not, which is what this deviation buys.
     """
     ramp = _theme()["chartCategoricalColors"]

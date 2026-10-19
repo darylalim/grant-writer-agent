@@ -589,8 +589,9 @@ run the app once.
 `test_theme_config.py` is the one test file here with no agent in it, and its contract fails the
 same quiet way everything else in this section does. Streamlit does not reject an unknown theme
 key: it logs `"theme.light.baseFontSize" is not a valid config option` to the *server* log and
-drops the value, so the page renders one step smaller or one border short and nothing fails. Ten
-of the options are top-level-only, and moving one into a per-mode section is what a plausible
+drops the value, so the page renders one step smaller or one border short and nothing fails. Some
+of the options are top-level-only (seven as of Streamlit 1.62; the test derives the set from the
+installed Streamlit rather than listing it), and moving one into a per-mode section is what a plausible
 tidy-up does while making the file look *more* consistent. The app injects no CSS and must not
 start — theme tokens are the supported way to restyle Streamlit, and `unsafe_allow_html` styling
 breaks silently when the class names it targets change. Contrast figures are recomputed in the

@@ -66,9 +66,9 @@
 #
 # The template ramp opens on a zinc scale tuned for a white page: #18181B scores
 # 1.12:1 on the dark surface, and four of its seven entries fall under 3:1 on at
-# least one of the two page backgrounds. Being top-level-only, there is no
-# per-mode override to correct it with -- one ramp serves both surfaces, so it
-# has to clear both.
+# least one of the two page backgrounds. The ramp is defined once, in [theme]
+# (see the note above on why it isn't split per mode), so one ramp serves both
+# surfaces and has to clear both.
 #
 # The replacement is seven Tailwind steps -- the scale the semantic tokens above
 # already use -- searched rather than picked, then checked with the dataviz
