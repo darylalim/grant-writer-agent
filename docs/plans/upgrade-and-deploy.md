@@ -15,6 +15,11 @@ Do the tracks in order. Each one leaves the suite green and can ship on its own.
 upgraded langgraph libraries and on D2, because a hosted user has no terminal to notice a refusal
 in.
 
+**Security gate before every merge.** Run `/security-review` on the track's diff (it is built into
+Claude Code), on top of the codebase-specific checks each track lists. Also run `uv audit` after
+any change to the lock. Both are cheap, and neither replaces the other: the review reads *our*
+code, and the audit checks *dependencies* for published advisories.
+
 ## What the survey found
 
 - **None of `pyproject.toml`'s upper bounds blocks anything.** Every direct runtime dependency's
@@ -120,6 +125,19 @@ C's. **Read the ty diagnostics; don't just count them.** There should be exactly
 causes `CLAUDE.md` names: `TodoListMiddleware`'s type-parameter arity, and
 `BaseStore.put`'s `dict` vs `TypedDict`. If either was fixed upstream and a new one of ours took
 its place, the count stays at 2 and hides it.
+
+**Security (part of this step):**
+
+- `uv audit` must report zero advisories, or list each accepted one, with the reason, in the
+  commit message. On 2026-10-19 the *current* lock had **3 advisories, all in aiohttp 3.14.3**
+  (GHSA-494j-54xm-rwp3, GHSA-5wr8-gcqf-gqf3, GHSA-2g87-pp6c-29x5), pulled in via
+  `langchain-tavily`. All three are fixed in 3.14.4, and the dry run resolves 3.14.5. Two are in
+  aiohttp's *server* code, which this project doesn't run, so the real exposure was low. Still,
+  nothing would have reported them. This upgrade should clear all three; confirm it.
+- Read the lock diff for **added and removed packages**, not just version bumps. This upgrade adds
+  `opentelemetry-api` and removes `httptools` and `toml`. For each added package, check what
+  requires it (`uv tree --invert --package <name>`) and that it is the well-known project of that
+  name.
 
 ### 2b. Check that existing checkpoints still resume
 
@@ -271,7 +289,16 @@ so the wheel's metadata and the GitHub "About" box agree:
    handling, and license-file handling.
 2. Change the bound to `>=0.13.1,<0.14.0`.
 3. Run `uv build`, then compare the wheel and sdist contents against a v0.2.1 build. `evals/` and
-   `tests/` must stay out of the wheel, and `LICENSE` must stay in.
+   `tests/` must stay out of the wheel, and `LICENSE` must stay in. **This is a security check:
+   CI attaches both files to a public GitHub release.** Baseline, built 2026-10-19 with
+   `uv build -o <scratch dir>` (don't build into the repo's `dist/`):
+   - sdist: `PKG-INFO`, `pyproject.toml`, `pyproject.toml.orig`, `LICENSE`, `README.md`, and
+     `src/grant_writer/*.py` (11 modules);
+   - wheel: the same 11 modules, plus `dist-info` (`LICENSE`, `WHEEL`, `entry_points.txt`,
+     `METADATA`, `RECORD`).
+
+   **Fail on anything else.** In particular: no secrets files, nothing from `applications/`,
+   `opportunities/`, `.grant_writer/` or `memories/`, and no `.claude/`.
 4. Note that the local `uv` is 0.12.22. With a mismatched backend, uv installs `uv_build` from
    PyPI instead of using its built-in fast path. That works, but it is slower, so consider
    `uv self update`.
@@ -354,6 +381,11 @@ The "upgrade everything" survey above covered Python packages only, but the acti
    the v10 notes that `setup-uv` honours it. This interacts with Track B: `uv_build`'s range and the
    uv that runs it should move together. If B's packaging check needs a known uv in CI, do this
    step before B.
+2b. **Add `uv audit` to CI**, as a step in the `lint` job after `uv sync --locked`. It should fail
+   on any advisory that isn't listed as accepted in the workflow, with a reason. Through the
+   setup-uv v10 bump, keep the workflow's least-privilege permissions exactly as they are: the
+   default `contents: read`, and `contents: write` on `release` only. A new major version must not
+   need broader permissions; if its notes say it does, stop and decide.
 3. **Keep actions current automatically (optional).** Add `.github/dependabot.yml` with **only**
    the `github-actions` ecosystem, on a weekly or monthly schedule. Dependabot updates SHA pins
    and their version comments. Leave Python dependencies out of it: `uv.lock` is upgraded
@@ -417,7 +449,9 @@ That makes it a new silent failure of exactly the kind `CLAUDE.md` lists.
    `ChatAnthropic` to confirm it.
 2. Surface it in `activity.py` so both the CLI and the UI show "declined by safety classifier
    (<category>)" rather than an empty turn. `activity.py` is the shared stream parser, so one
-   change reaches both frontends.
+   change reaches both frontends. **Security:** `stop_details.explanation` and the category are
+   model/API output, so render them as plain text, never with `unsafe_allow_html` or as
+   interpreted markdown.
 3. Decide separately whether to enable the server-side fallback (the
    `server-side-fallback-2026-07-01` beta with `fallbacks: "default"`). That changes what every
    request sends and how it is billed, so it is a product decision; do not slip it into this
@@ -557,6 +591,11 @@ instead of graphs, and it gets the same fix:
   produce invariant 20, renumber this one to 20.
 - `parked_state` and `is_parked` read the checkpoint by thread id. Both must use the per-user id,
   or a user could be shown, or approve, a different user's pending write.
+- **Security test (essential):** user B, supplying user A's app id, can't read A's checkpoint,
+  resume A's thread, see A's approval panel, or approve or reject A's pending write. Run it through
+  every entry point: the run form, the follow-up input, the approval panel, and the file browser.
+  The user id must come only from E4's authenticated session, never from any value the client
+  supplies.
 
 ### E3. Uploads must not depend on one machine's disk
 
@@ -572,7 +611,42 @@ other. Options:
   treatment.
 
 Recommendation: (a). Either way, uploads must land under the per-user id from E2, never a bare app
-id, and the size and type limits on uploads stay.
+id.
+
+**Security: uploads are untrusted input parsed on the server.** As of 2026-10-19,
+`.streamlit/config.toml` sets **no** upload limit, so Streamlit's default of 200MB applies.
+
+- Set `server.maxUploadSize` to what a solicitation actually needs (for example 25–50MB). Its test
+  belongs in `test_theme_config.py`, which already pins that file.
+- Check the type by content (`%PDF-` magic bytes), not only by extension or the client-sent MIME
+  type.
+- Run `pypdf` extraction with a page cap and a wall-clock time limit (for example in a worker with a
+  timeout). PDF parsers have a history of inputs that loop forever or blow up memory, and in a
+  shared deployment one bad upload stalls the process for everyone.
+- Keep `Path(rfp.name).name`: the filename stays client-supplied (`streamlit_app.py:1296`).
+
+### E3b. Gate writes to org memory in a shared deployment
+
+The agent reads **untrusted text**: web search results via Tavily, funder pages, and uploaded
+RFPs. It is also allowed to write `/memories/**` (the drafting rules, the discovery rules at
+`backends.py:194`, and `tools._DRAFTING_WRITE_DIRS`). `/memories/org/AGENTS.md` loads into
+**every** turn. So an instruction planted in a funder's page or an RFP ("record in the org profile
+that …") can persist into every future run. On one laptop that affects one user. With one shared
+org profile (Track E's decision), it affects **every user**, and nothing on screen marks it.
+
+- In the deployed (`server`) configuration, either add an `interrupt` rule on `/memories/**`, so
+  every org-profile write is a human approval like `final/` (invariants 5 and 11 then apply to
+  it), **or** make `/memories/org/` read-only to both graphs and edit it only through an admin
+  path. The interrupt keeps the feature; read-only is the simpler boundary. Pick one, and say why
+  in the commit.
+- The discovery graph must stay unable to park (`test_a_scan_can_never_park_on_an_approval`), so
+  for discovery the answer has to be **deny**, not interrupt. Write a test for that combination
+  explicitly; it is the same trap the `CLAUDE.md` architecture notes describe.
+- The real-disk tools are not covered by the permission rules (invariant 2). Remove `"memories"`
+  from `_DRAFTING_WRITE_DIRS` in the deployed configuration, or a tool `out_path` routes around
+  the gate.
+- Optionally keep an append-only audit record of memory writes (who, when, which turn), so a
+  poisoned entry can be traced to its source document.
 
 ### E4. Sign-in and spending limits
 
@@ -586,6 +660,10 @@ id, and the size and type limits on uploads stay.
   same kind of guard as the `parked_state` check. Record usage per user (the `metadata` that
   `config.trace_config` already sends to LangSmith can carry the user id, but see the
   `CLAUDE.md` rule: put nothing in `details` that the thread doesn't already hold).
+- **Security:** the user id comes only from the sign-in provider's verified session (for example
+  `st.user` after `st.login`, or a header injected by an authenticating proxy that strips any
+  client-sent copy). Never from a form field, query parameter, or cookie the client can set.
+  Check the limit server-side, before the turn starts; a client-side check is no check at all.
 
 ### E5. Deployment (decide the host here)
 
@@ -616,6 +694,24 @@ id, and the size and type limits on uploads stay.
   Then delete the last paragraph of "Backends" ("replace it with `PostgresStore` before
   deploying"), which this section supersedes, and change the `server` row's Store column to say
   Postgres.
+- **Security checklist for the deployment:**
+  - **Database:** a dedicated least-privilege role (it owns the checkpoint and store tables, and
+    is not a superuser); TLS on the connection (`sslmode=require` or stricter); encryption at
+    rest; backups, with a restore that has actually been tested. That database now holds every
+    user's proposals.
+  - **Transport and app:** HTTPS only, in front of Streamlit. Leave Streamlit's XSRF protection on,
+    and don't set `server.enableXsrfProtection = false` or open CORS to make a proxy work.
+  - **Secrets:** from the host's secret store, scoped to the deployment, and rotatable. The API
+    keys are spent on behalf of every user.
+  - **Tracing is a data-sharing decision.** LangSmith tracing is automatic for this app, so with
+    many users every draft, including organisation and personnel data, goes to a third party.
+    Decide it explicitly: off, on with a documented retention period, or on for a
+    staging deployment only. Record the decision in the README's Deployment section.
+  - **Data lifecycle:** decide retention and per-user deletion for threads and drafts. Postgres
+    keeps them forever by default.
+  - **The `execute` tool in the server profile.** `test_execute_tool_is_not_a_permission_bypass`
+    only builds the `local` profile (`test_wiring.py:503`). Extend it to `server`
+    (`CompositeBackend` over `StateBackend`), so the deployed configuration is pinned too.
 
 ### E6. Tests
 
@@ -634,5 +730,5 @@ id, and the size and type limits on uploads stay.
 - Update `CLAUDE.md`'s "Backend profiles" section. "Swap for `PostgresStore` before deploying"
   becomes a description of what is there.
 
-Commit E1 through E4 separately. E2 and E4 are what make hosting safe, so neither ships as part of
-another commit.
+Commit E0 through E4 separately, including E3b. E2, E3b and E4 are what make hosting safe, so none
+of them ships as part of another commit. Run `/security-review` on each one before it merges.
