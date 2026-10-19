@@ -13,7 +13,9 @@ before starting, because the versions below go stale.
 - **The only caps that do bind are outside `[project]`.** They are tracks B and C below.
 
 **Decided order (2026-10-19):** Track A first, as its own commit. Then B and C, each as its own
-separate commit afterwards, in that order. Do not fold either into A's commit.
+separate commit afterwards, in that order. Do not fold either into A's commit. Track D (model
+configuration) comes last, because it changes what the agents do rather than what they are built
+from, and its checks depend on A's langchain-anthropic version.
 
 | Package | Locked | Latest | Notes |
 |---|---|---|---|
@@ -165,3 +167,88 @@ Keep this as its own commit: it changes what gets published, not what runs.
 
 Keep this as its own commit too. It mixes badly with track A, because a reformat would bury the
 lock diff.
+
+## Track D (after C): per-role effort, refusals, and model fit
+
+Added 2026-10-19 after a model-fit review. The conclusion of that review was **keep the current
+model split.** Opus 5.5 handles drafting and grading; Sonnet 5.5 handles research, compliance and
+discovery. Model choice is not where the gains are. They are in effort settings that are tuned to
+each role, and in a failure mode nothing handles yet.
+
+| Model | Input / output, $ per 1M tokens | Default effort | Note |
+|---|---|---|---|
+| Fable 5.1 | $10 / $50 | n/a | Needs 30-day retention (no zero-retention option). Not recommended here |
+| Opus 5.5 | $4 / $20 | `medium` | The project overrides this to `high` |
+| Sonnet 5.5 | $2 / $10 | `high` | Effort levels were recalibrated; `medium` is suggested for agentic work |
+| Haiku 5.5 | $0.10 / $0.50 | `medium` | No server-side refusal fallback |
+
+### D1. Per-role effort in `build_model` (one commit)
+
+At present `MODEL_EFFORT = "high"` is applied to every role (`config.py:74`). Make effort a
+per-role setting while keeping invariant 9's rule: send it explicitly on every `anthropic:` spec,
+and never inherit the provider's default.
+
+The hooks run the whole suite after every edit, so sequence the work so each edit passes on its own:
+
+1. Add a `DEFAULT_EFFORT` mapping keyed like `DEFAULT_MODELS`, with **every role set to `"high"`**,
+   plus `GRANT_WRITER_<ROLE>_EFFORT` overrides that work like the model overrides. `build_model`
+   takes the effort as a parameter. Callers in `agent.py`, `subagents.py` and `evals/run_scout.py`
+   pass their role's value. Nothing changes on the wire, so
+   `test_default_model_sends_an_explicit_effort` (`tests/test_wiring.py:673`) still passes.
+2. Change that test to assert each role's *own* effort on the outgoing payload, rather than the
+   single global value.
+3. Only then change the values. The starting point is drafting and grader at `high`, and research
+   and discovery at `medium`. Keep compliance at `high`: it judges an Opus drafter's work, so it
+   should not be made cheaper. Validate the change in step D4 before release.
+4. Update invariant 9 in `CLAUDE.md`. The rule ("set explicitly, never inherited") stays the same;
+   what changes is where it is set.
+
+### D2. Refusal handling (investigate first, then decide)
+
+Opus 5.5 and Sonnet 5.5 run broader safety classifiers, including a `bio` category. A
+biomedical or health grant can be **falsely declined**. When that happens the API still returns
+HTTP 200, with `stop_reason: "refusal"` and empty or partial content, and raises nothing. The
+word "refusal" appears nowhere in langchain-anthropic 1.7.5, so nothing in the stack surfaces it.
+That makes it a new silent failure of exactly the kind `CLAUDE.md` lists.
+
+1. Find where `stop_reason` and `stop_details` end up on the `AIMessage` (probably
+   `response_metadata`). Write an offline test that feeds a canned refusal response through
+   `ChatAnthropic` to confirm it.
+2. Surface it in `activity.py` so both the CLI and the UI show "declined by safety classifier
+   (<category>)" rather than an empty turn. `activity.py` is the shared stream parser, so one
+   change reaches both frontends.
+3. Decide separately whether to enable the server-side fallback (the
+   `server-side-fallback-2026-07-01` beta with `fallbacks: "default"`). That changes what every
+   request sends and how it is billed, so it is a product decision; do not slip it into this
+   commit.
+4. If D2.2 lands, add it as **invariant 20** with a test that claims it (`Pins invariant 20.`).
+
+### D3. Forced `tool_choice`: verify it, then pin it with a test
+
+Opus 5.5, Sonnet 5.5 and Fable 5.1 reject a forced `tool_choice` (`any` or `tool`) with a 400. This
+was checked on 2026-10-19 and **is already handled upstream for the shipped ids**:
+
+- langchain-anthropic 1.7.5's `_supports_forced_tool_choice` (`chat_models.py:1161`) excludes ids
+  starting with `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-fable-5-1`.
+- `RubricMiddleware` chooses `ProviderStrategy` (native structured output) when the model profile
+  declares `structured_output`, so it never needs a forced tool call.
+
+The remaining risk is how this is decided. Both checks match on the model id, so a
+`GRANT_WRITER_*_MODEL` override to a future id would fail on the first grader call. Add an
+offline test that builds the grader with each shipped spec and asserts the outgoing payload has
+no forced `tool_choice`. After Track A's upgrade, re-check that the line above still exists.
+
+### D4. Validate with evals (live; costs money; ask first)
+
+1. Run `uv run python -m evals.run_scout` at the D1 discovery effort and compare it against a run at
+   `high`. The scout's citation-accuracy and invention scorers are the bar.
+2. **Optional: try Haiku 5.5 as the scout.** Run
+   `GRANT_WRITER_DISCOVERY_MODEL=anthropic:claude-haiku-5-5 uv run python -m evals.run_scout`.
+   It is 20× cheaper than Sonnet. Switch `DEFAULT_MODELS["discovery"]` only if the citation and
+   invention scores hold. The judge stays on `GRADER_MODEL` (Opus), so it still differs from the
+   scout.
+3. For drafting, run one real `draft` at the new settings and read the output. No offline test can
+   judge prose quality.
+
+Commit D1 and D2 separately. Each one changes what a live run does, so each should be revertible
+on its own.
