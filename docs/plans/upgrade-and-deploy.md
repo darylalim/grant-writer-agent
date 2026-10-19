@@ -5,11 +5,11 @@ before starting, because the versions below go stale.
 
 | Track | What | Ships as |
 |---|---|---|
-| A | Lock upgrade to latest, plus checkpoint safety | 1 commit (+ optional release) |
+| A | Lock upgrade to latest, plus checkpoint safety; A2: `.gitignore` additions | 2 commits (+ optional release) |
 | B | `uv_build` 0.12 → 0.13 | 1 commit |
 | C | CI tool pins: ruff / ty; C2: pin the hooks to match, widen their triggers, add `ask` rules; C3: `setup-uv` v10, pin uv, Dependabot for actions | 3 commits (C, C2, C3) |
 | D | Per-role effort, refusal handling, model fit | 2+ commits (D1, D2 separate) |
-| E | Multi-user deployment for one team: Postgres, per-user threads, sign-in | Several commits; the largest track |
+| E | Multi-user deployment for one team: E0 org-profile template split, then Postgres, per-user threads, sign-in | Several commits; the largest track |
 
 Do the tracks in order. Each one leaves the suite green and can ship on its own. E depends on A's
 upgraded langgraph libraries and on D2, because a hosted user has no terminal to notice a refusal
@@ -214,6 +214,24 @@ rm -f .grant_writer/checkpoints.sqlite-wal .grant_writer/checkpoints.sqlite-shm
 Any conversation that happened after the upgrade is lost by doing this, so say so before doing
 it. Keep the backup until the upgrade has been in use for a while.
 
+### A2. `.gitignore` additions (own small commit, after A)
+
+The current `.gitignore` is hand-written and commented, and it beats GitHub's Python template for
+this repo, so keep it and extend it. Match the existing style: each entry gets a comment saying
+*why*.
+
+- `.env.*` followed by `!.env.example`. Only the exact name `.env` is ignored today, and Track E's
+  deployment work tends to create `.env.production` / `.env.local`. The `PreToolUse` hooks already
+  treat `.env.*` as secret, so the two should agree. Make this edit with `Edit`, not a shell
+  command. The `.env` Bash guard matches the name anywhere in a command, including inside a
+  heredoc of prose; it blocked a plan edit on 2026-10-19 for exactly that reason.
+- `evals/out/`, as the conventional `--out` target for `run_scout` and `push_dataset`. Their
+  records carry raw model output. Mention the convention in `evals/README.md`.
+- Optional: drop `.mypy_cache/`, since the project uses ty, not mypy. It is harmless either way.
+
+Check: `git status --short --ignored` before and after. No tracked file may become ignored, and
+`.env.example` must still show as tracked.
+
 ---
 
 ## Track B (separate commit, after A): `uv_build` 0.12 → 0.13
@@ -410,6 +428,39 @@ so skills and memories are lost on every restart. Checkpoints still go to local 
 allows one writer at a time and lives on one machine. `StateBackend` keeps drafts *in graph
 state*, so in that profile the checkpointer database holds the proposals themselves, not just
 chat history.
+
+### E0. Separate the org-profile template from the real profile (before E1)
+
+`memories/org/AGENTS.md` is **tracked** because it ships as a template, and its own header
+invites the agent to append durable organisation facts to it. The drafting graph may write
+`/memories/**`, the discovery rules allow it too (`backends.py:194`), and so do the real-disk
+tools (`tools._DRAFTING_WRITE_DIRS`). So the first real run writes organisation and possibly
+personnel data into a tracked file, and `git commit -a` publishes it. That is the data
+`.gitignore` keeps out of `applications/`, arriving by another path. As of 2026-10-19 the file was
+unmodified (clean `git status`). Adding it to `.gitignore` alone does nothing, because git keeps
+tracking files it already tracks.
+
+1. `git mv memories/org/AGENTS.md memories/org/AGENTS.example.md`.
+2. In `Settings.ensure_dirs()` (`config.py:182`), copy the template to `memory_path` **only if
+   `memory_path` does not exist**. Never overwrite: that file is the organisation's accumulated
+   profile. Add a `memory_template_path` property beside `memory_path`.
+3. Add `memories/org/AGENTS.md` to `.gitignore`, with a comment in the existing style.
+4. `seed_store_from_disk` (the `server` profile, and E1's Postgres seeding) must read the real
+   file if it exists and fall back to the template, and must never seed the template *over* an
+   edited Store entry. That is E1's idempotency rule, settled here first.
+5. `ensure_dirs` only runs in the `local` profile's `build_backend`. Check that a fresh checkout
+   in the `server` profile still gets a profile to read, and that `discover` doesn't score against
+   a missing file. The scout's first instruction is to read it.
+6. Tests (offline): the copy happens when the file is missing; it never overwrites an existing
+   file; the template is what ships (it exists and is tracked). Consider a `Pins invariant N.`
+   test that `memories/org/AGENTS.md` is *not* tracked. This is the kind of silent leak the
+   invariant list exists for.
+7. **Warn everyone else before this lands.** When a clone pulls a commit that deletes a tracked
+   file, git deletes its copy too. If their copy holds real data (modified), the pull refuses
+   instead, and the obvious fix, `git stash` or `git checkout --`, can throw that data away.
+   Write it in the commit message and the README: *back up `memories/org/AGENTS.md` before
+   pulling this commit.* For this repo alone, the `git mv` in step 1 leaves the real file to be
+   recreated from the template; anyone with real data in it must copy it aside first.
 
 ### E1. Postgres for the checkpointer and the Store
 
