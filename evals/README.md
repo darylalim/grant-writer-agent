@@ -11,7 +11,8 @@ That is what this directory is for.
 uv run python -m evals.run_scout                  # all cases, with the judge
 uv run python -m evals.run_scout --no-judge       # programmatic scorers only
 uv run python -m evals.run_scout --case leaky-brief
-uv run python -m evals.run_scout --out results.json
+uv run python -m evals.run_scout --out evals/out/results.json
+uv run python -m evals.run_scout --repeat 3       # pass rate per check; compare at N >= 3
 
 uv run python -m evals.push_dataset --dry-run     # the plan only; creates nothing
 uv run python -m evals.push_dataset               # push it, then verify the push
@@ -110,6 +111,22 @@ a scoring harness that has already been shown to work.
 could reasonably answer two ways, the case asserts nothing (`expect_eligibility
 = None`). Over-specifying turns an eval into a test of one person's taste, and
 the first failure on a defensible answer is the last time anyone reads it.
+
+## Comparing two runs
+
+One run is a reading, not a measurement: model output varies, so a check that
+flips between two single runs may have moved for no reason at all. Compare at
+`--repeat 3` or more, which prints a pass rate per case and check under the
+per-row table (`evaluate_scout --repeat N` does the same, as LangSmith
+repetitions). A repeat whose model call raised is a harness error, counted on
+its own line and never averaged into a rate: a rate limit is not a regression.
+
+The judge is pinned -- `run_scout.JUDGE_MODEL` and `JUDGE_EFFORT` -- rather than
+borrowed from the grader role, and both are recorded on every run. A judge that
+moved with `GRANT_WRITER_GRADER_MODEL`, or with the grader's effort, would score
+the two halves of a comparison differently. Every eval run also records
+`frontend: eval`, the key real runs fill with `cli` or `ui`, so measurement and
+use can be told apart in the same project.
 
 ## Tracing
 

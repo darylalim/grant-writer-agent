@@ -53,6 +53,7 @@ from evals.scorers import (
     Score,
     build_judge_payload,
     feedback_fields,
+    pass_rates,
     posting_scores,
     read_judge_verdict,
     score_programmatically,
@@ -443,6 +444,7 @@ def test_each_model_call_is_labelled_with_the_case_it_came_from():
         "case": case.key,
         "role": "scout",
         "model": "anthropic:claude-sonnet-5",
+        "frontend": "eval",
     }
 
 
@@ -475,10 +477,9 @@ def test_the_shipped_judge_is_not_the_scouts_own_model():
     pass or fail. `evaluate_scout` must record the model `run_scout` calls, not
     a second import that can be pointed elsewhere.
     """
-    from grant_writer.config import DEFAULT_MODELS, GRADER_MODEL
+    from grant_writer.config import DEFAULT_MODELS
 
-    assert run_scout.JUDGE_MODEL is GRADER_MODEL
-    assert DEFAULT_MODELS["grader"] != DEFAULT_MODELS["discovery"]
+    assert DEFAULT_MODELS["discovery"] != run_scout.JUDGE_MODEL
     assert evaluate_scout.JUDGE_MODEL is run_scout.JUDGE_MODEL
 
 
@@ -2042,6 +2043,7 @@ def test_the_experiment_records_which_prompt_it_measured():
     )
     assert unjudged["judge"] is False
     assert unjudged["judge_model"] is None and unjudged["judge_prompt_sha"] is None
+    assert unjudged["judge_effort"] is None
     assert unjudged["scout_prompt_sha"] == labelled["scout_prompt_sha"]
     assert unjudged["dataset"] == push_dataset.DATASET_NAME
 
@@ -2159,3 +2161,119 @@ def test_the_harness_builds_no_client_and_calls_no_loader_of_its_own(monkeypatch
         # module that never finished re-executing.
         monkeypatch.undo()
         importlib.reload(evaluate_scout)
+
+
+# ---- H1: a pinned judge, repeats, and eval labels ----------------------------
+
+
+def test_the_judge_is_pinned_rather_than_borrowed_from_the_grader_role(monkeypatch):
+    """The ruler must not move with the thing it measures.
+
+    It used to be `GRADER_MODEL`, built through `build_model` at the product's
+    effort -- so a grader override, or a change to that role's effort, would
+    re-score the "after" half of a comparison with a different judge. Pinned to
+    literals here, and checked on the outgoing request rather than the module.
+    """
+    from grant_writer import config
+
+    assert run_scout.JUDGE_MODEL == "anthropic:claude-opus-5-5"
+    assert run_scout.JUDGE_EFFORT == "high"
+    # Not the grader constant: an override of that must not reach the judge.
+    assert not hasattr(run_scout, "GRADER_MODEL")
+
+    seen = {}
+
+    def fake_build(spec, *, effort=config.MODEL_EFFORT):
+        seen["spec"], seen["effort"] = spec, effort
+        raise RuntimeError("stop before the network")
+
+    monkeypatch.setattr(run_scout, "build_model", fake_build)
+    with pytest.raises(RuntimeError, match="stop before"):
+        run_scout.ask_judge(_case("genuine-fit"), "anything")
+    assert seen == {"spec": run_scout.JUDGE_MODEL, "effort": run_scout.JUDGE_EFFORT}
+
+
+def test_eval_runs_say_they_are_evals_under_the_key_real_runs_use():
+    """`frontend` is `cli` or `ui` on a real run; an eval must not look like one.
+
+    Same key, not a new one, so one filter separates measurement from use.
+    """
+    case = _case("genuine-fit")
+    for role in ("scout", "judge"):
+        assert run_scout.call_config(role, case, "m")["metadata"]["frontend"] == "eval"
+    labelled = evaluate_scout.experiment_metadata(dataset="d", judge=True, repeat=3)
+    assert labelled["frontend"] == "eval"
+    assert labelled["judge_model"] == run_scout.JUDGE_MODEL
+    assert labelled["judge_effort"] == run_scout.JUDGE_EFFORT
+    assert labelled["repeat"] == 3
+
+
+def test_pass_rates_count_each_repeat_per_case_and_check():
+    rates = pass_rates(
+        [
+            ("a", "parses", True),
+            ("a", "parses", True),
+            ("a", "parses", False),
+            ("a", "citations", True),
+            ("b", "parses", False),
+        ]
+    )
+    assert [(r.case, r.check, r.label()) for r in rates] == [
+        ("a", "parses", "2/3"),
+        ("a", "citations", "1/1"),
+        ("b", "parses", "0/1"),
+    ]
+
+
+def test_a_harness_error_is_never_averaged_into_a_pass_rate(monkeypatch):
+    """Three repeats, one of which the API refused: the rate is over two.
+
+    Counted as a failure, a 529 would read as a check the scout passes a third
+    less often -- the "three numbers, not one" collapse, arriving through the
+    repeat axis.
+    """
+    case = _case("genuine-fit")
+    calls = iter([GOOD, RuntimeError("overloaded"), GOOD])
+
+    def fake_scout(**_kwargs):
+        reply = next(calls)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(run_scout, "ask_scout", fake_scout)
+    records = [run_scout.attempt(case, judge=False, repeat=n) for n in range(3)]
+
+    assert [("error" in r) for r in records] == [False, True, False]
+    assert "RuntimeError: overloaded" in records[1]["error"]
+    rates = pass_rates(run_scout.outcomes(records))
+    assert rates and all(rate.runs == 2 for rate in rates)
+
+
+def test_skipped_scores_do_not_enter_a_pass_rate():
+    records = [
+        {
+            "case": "a",
+            "repeat": 0,
+            "scores": [
+                {"name": "parses", "passed": True, "skipped": False},
+                {"name": "eligibility", "passed": True, "skipped": True},
+            ],
+        }
+    ]
+    assert run_scout.outcomes(records) == [("a", "parses", True)]
+
+
+def test_the_experiment_tally_carries_rates_without_harness_errors():
+    example = SimpleNamespace(metadata={"key": "a"}, id="x")
+
+    def row(results):
+        return {"example": example, "evaluation_results": {"results": results}}
+
+    ok = SimpleNamespace(key="parses", score=1.0, comment=None)
+    bad = SimpleNamespace(key="parses", score=0.0, comment=None)
+    broke = SimpleNamespace(key="harness-error-judge", score=0.0, comment="529")
+    tally = evaluate_scout.render([row([ok]), row([bad, broke]), row([ok])])
+
+    assert (tally.checked, tally.failed, tally.broken) == (3, 1, 1)
+    assert [(r.check, r.label()) for r in tally.rates] == [("parses", "2/3")]

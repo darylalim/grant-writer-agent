@@ -74,15 +74,19 @@ MAX_OUTPUT_TOKENS = 64000
 MODEL_EFFORT = "high"
 
 
-def build_model(spec: str) -> BaseChatModel:
+def build_model(spec: str, *, effort: str = MODEL_EFFORT) -> BaseChatModel:
     """Resolve a `provider:model` spec into a chat model with a real ceiling.
 
     Called lazily from `build_agent`/`build_subagents` rather than at import, so
     importing this module stays cheap and the CLI's `require_api_keys` check
     still reports missing credentials before any client is constructed.
+
+    `effort` exists for the one caller that must not move with the product's
+    setting: the eval judge, which pins its own so a before/after comparison of
+    an effort change is scored by the same judge on both sides.
     """
     if spec.startswith("anthropic:"):
-        return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS, effort=MODEL_EFFORT)
+        return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS, effort=effort)
     return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS)
 
 

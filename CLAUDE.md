@@ -285,6 +285,9 @@ runs, and still produces plausible output.
    think less, with nothing raised. `build_model` sends `MODEL_EFFORT` on every `anthropic:`
    spec, and the test asserts it on the outgoing request payload rather than the constructor,
    since an accepted-but-unserialised kwarg is precisely how it would go missing.
+   `MODEL_EFFORT` is the *default* of `build_model(spec, effort=...)`. The one caller that
+   passes its own is the eval judge (`evals/run_scout.JUDGE_EFFORT`), pinned so that changing
+   the product's effort cannot also change the ruler measuring it.
 10. **The application id input must stay outside `st.form`.** `st.form` batches its
     widgets and sends them only when Submit is pressed. `streamlit_app.py` reads that
     id back to decide which application the file browser shows, so inside the form the

@@ -684,6 +684,23 @@ def test_default_model_sends_an_explicit_effort(role, spec):
     )
 
 
+def test_an_explicit_effort_reaches_the_request_and_the_default_does_not_move():
+    """The eval judge pins its own effort through the same construction path.
+
+    On the payload for the same reason as the case above. And the default is
+    re-checked here because adding a keyword is exactly how a default gets
+    changed by accident, which would move every role at once.
+    """
+    spec = DEFAULT_MODELS["grader"]
+    pinned = build_model(spec, effort="low")
+    payload = pinned._get_request_payload([("user", "hi")])  # ty: ignore[unresolved-attribute]
+    assert payload["output_config"]["effort"] == "low"
+    assert payload["max_tokens"] == MAX_OUTPUT_TOKENS
+
+    default = build_model(spec)._get_request_payload([("user", "hi")])  # ty: ignore[unresolved-attribute]
+    assert default["output_config"]["effort"] == MODEL_EFFORT
+
+
 # ---- the discovery graph ----------------------------------------------------
 
 

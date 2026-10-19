@@ -360,3 +360,55 @@ def score_programmatically(case: ScoutCase, output: str) -> list[Score]:
     """Run every non-model scorer over one scout output."""
     parsed = parse_scored_markdown(output, key=case.key)
     return [scorer(case, output, parsed) for scorer in PROGRAMMATIC]
+
+
+@dataclass(frozen=True)
+class CheckRate:
+    """How often one check passed on one case, over repeated runs.
+
+    `passed` and `failed` only. A harness error is not a third outcome here:
+    the eval broke, and nothing was learned about the scout, so the caller's
+    error count stays beside the rates rather than inside them. Averaged in, a
+    judge that 529'd on two of three repeats would read as a check the scout
+    passes a third of the time -- the "three numbers, not one" collapse,
+    arriving through the repeat axis instead of the row axis.
+    """
+
+    case: str
+    check: str
+    passed: int = 0
+    failed: int = 0
+
+    @property
+    def runs(self) -> int:
+        return self.passed + self.failed
+
+    def label(self) -> str:
+        return f"{self.passed}/{self.runs}"
+
+
+def pass_rates(outcomes: list[tuple[str, str, bool]]) -> list[CheckRate]:
+    """Fold `(case, check, passed)` triples into one rate per case and check.
+
+    Pure, and fed by both runners, so the two cannot disagree about what a
+    repeat counts as. Callers pass only real verdicts: a skipped score has
+    already left through `posting_scores`, and a harness error never becomes a
+    triple. Ordered by first appearance, which is fixture order, so the table
+    reads in the same order as the per-row output above it.
+    """
+    tallies: dict[tuple[str, str], list[int]] = {}
+    for case, check, passed in outcomes:
+        counts = tallies.setdefault((case, check), [0, 0])
+        counts[0 if passed else 1] += 1
+    return [
+        CheckRate(case=case, check=check, passed=counts[0], failed=counts[1])
+        for (case, check), counts in tallies.items()
+    ]
+
+
+def render_rates(rates: list[CheckRate]) -> None:
+    """Print the per-check pass rates. Only worth reading when N > 1."""
+    print(f"\n{'=' * 78}\npass rate per check, over repeats\n{'-' * 78}")
+    for rate in rates:
+        mark = "  ✓" if rate.failed == 0 else "  ~" if rate.passed else "  ✗"
+        print(f"{mark} {rate.case:<22} {rate.check:<24} {rate.label()}")
