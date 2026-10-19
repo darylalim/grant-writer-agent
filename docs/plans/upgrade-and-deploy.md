@@ -55,7 +55,7 @@ The full transitive diff also adds `opentelemetry-api`, and removes `httptools` 
 ### 0. Re-survey, then branch
 
 ```bash
-git switch upgrade-deps   # already exists; it carries this plan
+git switch upgrade-and-deploy   # already exists; it carries this plan
 uv tree --outdated --depth 1
 uv lock --upgrade --dry-run
 ```
