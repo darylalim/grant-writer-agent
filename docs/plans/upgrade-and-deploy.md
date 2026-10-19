@@ -1,7 +1,19 @@
-# Plan: upgrade all dependencies to latest
+# Plan: upgrade dependencies, then deploy for a multi-user team
 
 Drafted 2026-10-19 against `main` @ `eb33a4c` (v0.2.1). Re-run the survey commands in step 0
 before starting, because the versions below go stale.
+
+| Track | What | Ships as |
+|---|---|---|
+| A | Lock upgrade to latest, plus checkpoint safety | 1 commit (+ optional release) |
+| B | `uv_build` 0.12 → 0.13 | 1 commit |
+| C | CI tool pins: ruff / ty | 1 commit |
+| D | Per-role effort, refusal handling, model fit | 2+ commits (D1, D2 separate) |
+| E | Multi-user deployment for one team: Postgres, per-user threads, sign-in | Several commits; the largest track |
+
+Do the tracks in order. Each one leaves the suite green and can ship on its own. E depends on A's
+upgraded langgraph libraries and on D2, because a hosted user has no terminal to notice a refusal
+in.
 
 ## What the survey found
 
@@ -315,3 +327,118 @@ no forced `tool_choice`. After Track A's upgrade, re-check that the line above s
 
 Commit D1 and D2 separately. Each one changes what a live run does, so each should be revertible
 on its own.
+
+## Track E (after D): multi-user deployment for one team
+
+Decided 2026-10-19: **one organisation, a team of users.** Everyone shares one org profile
+(`/memories/org/AGENTS.md`) and one set of `/skills/`, and each user's applications and threads
+are kept separate. **The host and the sign-in provider are deliberately left open.** Write E so
+it depends only on a `DATABASE_URL` and an authenticated user id. Choosing the host is E5's
+decision, made after A–D ship.
+
+Today the `server` profile is not deployable. `agent.py:71` and `:149` build an `InMemoryStore`,
+so skills and memories are lost on every restart. Checkpoints still go to local SQLite, which
+allows one writer at a time and lives on one machine. `StateBackend` keeps drafts *in graph
+state*, so in that profile the checkpointer database holds the proposals themselves, not just
+chat history.
+
+### E1. Postgres for the checkpointer and the Store
+
+- Add `langgraph-checkpoint-postgres` (3.2.0 on 2026-10-19; it brings `psycopg` 3) with
+  `uv add`. Re-check its version against Track A's `langgraph-checkpoint`.
+- In `config.py`, the only module that reads env vars, add an optional `DATABASE_URL` to
+  `Settings`. It goes in `.env.example` too, never in the secrets file itself.
+- In `_build_checkpointer` (`agent.py:39`), add a branch that returns a `PostgresSaver` when the
+  URL is set; SQLite and in-memory stay as they are. The Store gets the same treatment:
+  `PostgresStore` when the URL is set, `InMemoryStore` otherwise. Build both from one connection
+  pool. They are built in two places (`build_agent` and `build_discovery_agent`), so factor out
+  one `_build_store`. Two copies is the shape invariant 2's history warns against.
+- Call `.setup()` for both once (it creates the tables). Do it from a deploy step or an explicit
+  `grant-writer db-setup` subcommand, not on every request.
+- `seed_store_from_disk` currently re-seeds an in-memory store on every start. Against Postgres it
+  must be **idempotent** (upsert by key), or every restart duplicates or overwrites edited
+  memories. Decide which wins on a restart: the files on disk or the edits in the Store.
+- **Existing SQLite threads do not migrate.** I'm not aware of an official SQLite → Postgres
+  checkpoint copier. Treat local and hosted history as separate, and say so in the README.
+
+### E2. Per-user thread ids (new invariant)
+
+Today `--app-id` *is* the `thread_id` (`cli.py:155`, `:189`; `streamlit_app.py:325`, `:1537`). With
+many users, two people who name an application `nsf-2027` would resume **each other's**
+conversation and drafts, and nothing would raise. That is invariant 12's collision, between users
+instead of graphs, and it gets the same fix:
+
+- Add a `config.user_thread_id(user_id, app_id)` that every caller uses, never a literal, exactly
+  as `discovery_thread_id` is used today. It composes with the discovery prefix. Use a separator
+  `_SAFE_ID` forbids (it already forbids `:`), so a crafted app id cannot impersonate another
+  user's thread *by construction*.
+- `_active_thread_id` (`streamlit_app.py:282`) is the UI's single owner of thread ids, so route
+  it through the new function. The CLI stays single-user and keeps unprefixed ids, or uses a
+  fixed local user. Pick one and pin it with a test.
+- In the `server` profile, scope the Store namespaces for anything per-user. `/skills/` and
+  `/memories/org/` stay shared, because there is one organisation. If per-user memories are ever
+  added, they need their own namespace (invariant 6's reason, one level down).
+- Add this as **invariant 21**, with a claiming test (`Pins invariant 21.`) that two users with the
+  same app id get different thread ids and cannot read each other's checkpoints. If D2 did not
+  produce invariant 20, renumber this one to 20.
+- `parked_state` and `is_parked` read the checkpoint by thread id. Both must use the per-user id,
+  or a user could be shown, or approve, a different user's pending write.
+
+### E3. Uploads must not depend on one machine's disk
+
+`streamlit_app.py:1300` writes the uploaded RFP to real disk under `application_dir`, and the agent
+reads it with `extract_pdf_text`, which also reads real disk. That works with one server process
+and breaks as soon as there are two replicas: the upload lands on one and the agent runs on the
+other. Options:
+
+- (a) **Extract the text at upload time** and put the text, not the file, into the backend or the
+  opening message. This is simplest, and nothing is shared on disk.
+- (b) Use shared object storage (for example S3 or GCS), read by a tool. This is more
+  infrastructure, and that tool is a new real-disk-style writer, so it needs invariant 2's
+  treatment.
+
+Recommendation: (a). Either way, uploads must land under the per-user id from E2, never a bare app
+id, and the size and type limits on uploads stay.
+
+### E4. Sign-in and spending limits
+
+- Sign-in: left open, as decided above. The requirement is one stable user id per request,
+  available before any thread id is built. If Streamlit stays as the front end, its built-in OIDC
+  sign-in (`st.login` / `st.user`) provides that. A gateway in front (for example an
+  authenticating proxy) works too, provided the id it supplies cannot be spoofed by a client.
+- **No sign-in, no deployment.** The app spends API credit on every turn. Without sign-in, anyone
+  with the URL can spend it, and E2 has no user to separate by.
+- Spending limits: a per-user cap on turns or tokens per day, checked before a turn starts, as the
+  same kind of guard as the `parked_state` check. Record usage per user (the `metadata` that
+  `config.trace_config` already sends to LangSmith can carry the user id, but see the
+  `CLAUDE.md` rule: put nothing in `details` that the thread doesn't already hold).
+
+### E5. Deployment (decide the host here)
+
+- The host is open: a container platform with managed Postgres, or LangSmith Deployment, which
+  provides Postgres, threads and auth hooks, with Streamlit becoming a client. Decide after A–D,
+  using what E1–E4 turned out to need.
+- `backend_profile` must be `server` in any web deployment. Today that is a sidebar choice
+  (`streamlit_app.py:894`). For a deployment, force it from config and hide the choice, so that
+  nobody can select `local` inside a web server (the `CLAUDE.md` rule, enforced rather than
+  documented).
+- Secrets (`ANTHROPIC_API_KEY`, `TAVILY_API_KEY`, `DATABASE_URL`, LangSmith) come from the host's
+  secret store, never from a committed file. `config.py`'s `load_dotenv()` only skips names that
+  are already set, so a host-set value wins.
+- `get_agent` is `st.cache_resource`, shared across sessions (`streamlit_app.py:237`). That is
+  safe only while the graph holds no per-user state: user identity must travel in the run config
+  or thread id, never in a cached object. Pin that with a test.
+
+### E6. Tests
+
+- The suite stays offline by contract. Postgres tests are opt-in: mark them and skip unless a
+  `TEST_DATABASE_URL` is set, in the same spirit as `pytest.importorskip("streamlit")`. CI can add
+  a Postgres service job for them later.
+- Offline cases to add: `_build_checkpointer` picks Postgres only when the URL is set; the
+  `user_thread_id` collision and escape cases (parametrized like §⑨); the deployed UI cannot
+  select `local`; `parked_state` uses the per-user id.
+- Update `CLAUDE.md`'s "Backend profiles" section. "Swap for `PostgresStore` before deploying"
+  becomes a description of what is there.
+
+Commit E1 through E4 separately. E2 and E4 are what make hosting safe, so neither ships as part of
+another commit.
