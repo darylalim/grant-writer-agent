@@ -22,6 +22,13 @@ Claude Code), on top of the codebase-specific checks each track lists. Also run 
 any change to the lock. Both are cheap, and neither replaces the other: the review reads *our*
 code, and the audit checks *dependencies* for published advisories.
 
+**Accessibility gate before merging any track that changes the UI (D2, F, G, E4).** Run an
+automated scan (inject axe-core into the running app through the Chrome tools' JavaScript
+runner, or run Lighthouse's accessibility audit) in **both theme modes**, at 390px and 1366px
+wide. Then do a **VoiceOver** pass (built into macOS) over the approval flow, end to end. Record
+the results in the PR. Treat a new axe "serious" or "critical" finding as blocking, and fix or
+document the existing ones.
+
 ## What the survey found
 
 - **None of `pyproject.toml`'s upper bounds blocks anything.** Every direct runtime dependency's
@@ -463,6 +470,9 @@ That makes it a new silent failure of exactly the kind `CLAUDE.md` lists.
    shown as declined, with its category, and not as an empty reply. Say that health and biomedical
    topics can trigger false refusals, and what to do about one (rephrase, or retry later). If the
    fallback was enabled, say which model it falls back to.
+6. **Accessibility:** the declined message states the outcome and category **in text**, not
+   only through colour or an icon. Use `st.warning`/`st.error` with a sentence, so it is announced
+   the same as other alerts.
 
 ### D3. Forced `tool_choice`: verify it, then pin it with a test
 
@@ -666,6 +676,9 @@ org profile (Track E's decision), it affects **every user**, and nothing on scre
   `st.user` after `st.login`, or a header injected by an authenticating proxy that strips any
   client-sent copy). Never from a form field, query parameter, or cookie the client can set.
   Check the limit server-side, before the turn starts; a client-side check is no check at all.
+- **Accessibility:** the sign-in page belongs to the provider, so check that it meets WCAG 2.2 AA
+  (keyboard operable, labelled fields, no inaccessible CAPTCHA) before choosing a provider in E5.
+  A user who can't sign in can't use anything else.
 
 ### E5. Deployment (decide the host here)
 
@@ -908,6 +921,38 @@ both. Check specifically:
 If the serif reads as fussy at 14px, drop `headingFont` and keep the rest. The palette stands
 without it.
 
+### Accessibility (part of Track F)
+
+**Input borders fail WCAG 1.4.11 today, and Track F's values keep the failure.** Text inputs,
+selects and text areas are identified by their outline, which needs 3:1 against the page.
+Measured 2026-10-19:
+
+| `borderColor` | Light (on white) | Dark (on page) |
+|---|---|---|
+| Current zinc-200 / zinc-700 | 1.27 | 1.91 |
+| Track F stone-200 / stone-700 | 1.26 | 1.92 |
+| stone-400 / stone-600 | 2.52 | 2.59 |
+| stone-500 / stone-500 | **4.80** | **4.12** |
+
+Streamlit uses this one token for **both** input outlines and decorative
+`st.container(border=True)` borders, and the app is built from bordered containers, so raising
+it to pass makes every box visibly heavier. There's no theme-only way to style inputs separately,
+and this project rules out CSS. **Decide one way, and test it:**
+
+- (a) **Pass:** search the stone scale between 400 and 500 for the lightest value at ≥3:1 on both
+  pages (and on the sidebar surfaces), and pin it in `test_theme_config.py` like the text
+  contrast. Then re-check the "mirrored boundaries" test and the screenshots, because heavier
+  container borders change the look.
+- (b) **Documented exception:** keep the light borders, and write the decision and the measured
+  ratios into the config comments and the README. Add a test that pins the *current* ratios, so
+  any change to them is deliberate.
+
+Recommendation: (a). The inputs are where users type facts the agent must not invent, so finding
+the field matters more than lighter boxes.
+
+**Focus ring.** Assumed to follow `primaryColor`. Confirm that by tabbing through the running
+app. Measured: light 7.90, dark 4.09, dark sidebar 3.62, all ≥3:1. Add these as a test.
+
 ## Track G (after F, before E5): a layout that adapts to the display
 
 Designed 2026-10-19 from a read of `streamlit_app.py` against the bundled Streamlit layout
@@ -1024,3 +1069,29 @@ each **in both theme modes** (Track F). At each width check:
 - nothing scrolls sideways at 390px.
 
 Record the screenshots in the PR. They are the only evidence for this track.
+
+### Accessibility (part of Track G)
+
+- **Reflow (WCAG 1.4.10):** add **320px** wide to the screenshot sizes, which is what a 1280px screen
+  zoomed to 400% gives. Nothing may scroll sideways except code blocks and tables. Also check
+  200% browser zoom at 1366px.
+- **Keyboard only**, with no mouse. After G1, tab order follows the visual order, so the approval
+  panel is reached first when present. The tabs (arrow keys), the pane-height popover, the
+  Source/Rendered control and Approve/Reject all work from the keyboard. There is no keyboard
+  trap inside the scroll boxes (feed, file content, PDF). The focus ring is visible on every
+  surface.
+- **Names for controls:** the pane-height popover gets a **text label** (for example "Display",
+  with the icon), not an icon alone. The controls with collapsed labels (`:699`, `:819`, and the
+  file picker) must still announce their label in VoiceOver. Fix any that don't by giving them
+  meaningful label text, which stays hidden visually.
+- **Heading levels:** the page goes from `st.title` (level 1) straight to `st.subheader`
+  (level 3). Make the section titles `st.header` (level 2), with `st.subheader` (level 3) for the
+  sub-sections inside a tab. Heading navigation is how screen-reader users skim a page.
+- **Icons:** status and feed icons are Material Symbols rendered from icon-font text. Check in
+  VoiceOver whether they are read aloud as names ("check_circle"). If they are, keep the icon but
+  make sure the visible text beside it carries the meaning ("done", "in progress"), so nothing
+  depends on the icon's name.
+- **Target size (WCAG 2.5.8):** icon buttons and the popover trigger are at least 24×24px.
+- **Status announcements:** check whether a run finishing, or the approval panel appearing, is
+  announced to a screen reader. If not, document it. This needs no new UI, because the approval
+  panel moving to the top (G1) is the main fix: it is the first thing reached.
