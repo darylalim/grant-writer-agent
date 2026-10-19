@@ -195,6 +195,11 @@ On the draft run, look for: the orchestrator delegating via `task` (instead of d
   the Streamlit notes). The hook runs the suite on `CLAUDE.md` edits, because
   `test_invariants.py` parses it.
 
+**README (same commit).** In "Where state lives", add the missing row for the checkpoints, which
+is the state this track has to protect: `.grant_writer/checkpoints.sqlite` | Until deleted |
+Conversation state, todos, and writes awaiting approval. Back it up before upgrading
+dependencies. Point the row at step 0b's backup command.
+
 ### 6. Commit (and optionally release)
 
 Model the message on `02b1f96`: say what moved, which bumps matter and why, what broke and how it
@@ -252,8 +257,9 @@ so the wheel's metadata and the GitHub "About" box agree:
    ```
    That's 17 topics. Hold back `postgresql` until Track E ships, and `grants-gov` unless that tool
    is meant to be a headline feature.
-3. Check the README's opening line against the description. They don't need to match word for word,
-   but they shouldn't contradict each other.
+3. **README:** change the intro line ("A grant writing agent built on Deep Agents") so it agrees
+   with the description, keeping the Deep Agents link. The two bullets under it (`discover`,
+   `draft`) can stay. Mention the `evals/out/` convention in `evals/README.md` (see above).
 
 ---
 
@@ -319,6 +325,9 @@ the hook wrote.
    than guessing it. A rule that silently never matches fails *open*.
 4. Validate: make a trivial `.py` edit and confirm the pinned ruff and ty run (the status messages
    show it). Then try one guarded command and confirm the prompt appears.
+5. **README:** in "Development", pin the `uvx ruff …` commands to the same version (`uvx ruff@<ver>`),
+   so the README, the hooks, CI and `CLAUDE.md` show one version. Add one line saying that billed
+   commands ask for confirmation in Claude Code.
 
 The hooks gate every later edit, so C2 lands before Track D's first Python change.
 
@@ -352,6 +361,9 @@ The "upgrade everything" survey above covered Python packages only, but the acti
 4. Validate: the PR's own CI run *is* the test. Both matrix legs, `lint`, and the `--help` smoke
    step must pass. `release` does not run on a PR. It is checked on the first push to `main` after
    merge, so read that run's "Decide whether to release" output.
+5. **README:** if step 2 adds `required-version`, state the required uv version in Quick start
+   (where `uv sync` is the first command) and in "Development". A user with an older uv then
+   learns why `uv sync` refuses to run.
 
 ## Track D (after C): per-role effort, refusals, and model fit
 
@@ -387,6 +399,10 @@ The hooks run the whole suite after every edit, so sequence the work so each edi
    should not be made cheaper. Validate the change in step D4 before release.
 4. Update invariant 9 in `CLAUDE.md`. The rule ("set explicitly, never inherited") stays the same;
    what changes is where it is set.
+5. **README:** in "Configuration", add a `GRANT_WRITER_*_EFFORT` row next to the model row, and show
+   each role's default model and effort (a small table: role → model → effort). The README
+   currently names the override variables but not the defaults, so a reader can't tell what they
+   are overriding.
 
 ### D2. Refusal handling (investigate first, then decide)
 
@@ -407,6 +423,10 @@ That makes it a new silent failure of exactly the kind `CLAUDE.md` lists.
    request sends and how it is billed, so it is a product decision; do not slip it into this
    commit.
 4. If D2.2 lands, add it as **invariant 20** with a test that claims it (`Pins invariant 20.`).
+5. **README:** add a "Guardrails" bullet saying that a turn declined by a safety classifier is
+   shown as declined, with its category, and not as an empty reply. Say that health and biomedical
+   topics can trigger false refusals, and what to do about one (rephrase, or retry later). If the
+   fallback was enabled, say which model it falls back to.
 
 ### D3. Forced `tool_choice`: verify it, then pin it with a test
 
@@ -484,6 +504,15 @@ tracking files it already tracks.
    Write it in the commit message and the README: *back up `memories/org/AGENTS.md` before
    pulling this commit.* For this repo alone, the `git mv` in step 1 leaves the real file to be
    recreated from the template; anyone with real data in it must copy it aside first.
+8. **README:**
+   - Quick start: `$EDITOR memories/org/AGENTS.md` still works, because the first run creates the
+     file. To edit before any run, `cp memories/org/AGENTS.example.md memories/org/AGENTS.md`
+     first, the same pattern as the `.env.example` line just above it.
+   - "Where state lives": the `AGENTS.md` row becomes *not tracked; created from
+     `AGENTS.example.md` on first run; holds your organisation's data*. Add a row for the
+     template.
+   - The pull warning from step 7, as a short note under Quick start, since that's what an existing
+     user rereads.
 
 ### E1. Postgres for the checkpointer and the Store
 
@@ -503,6 +532,8 @@ tracking files it already tracks.
   memories. Decide which wins on a restart: the files on disk or the edits in the Store.
 - **Existing SQLite threads do not migrate.** I'm not aware of an official SQLite → Postgres
   checkpoint copier. Treat local and hosted history as separate, and say so in the README.
+- **README:** add a `DATABASE_URL` row to "Configuration" (required only for a deployment;
+  unset means SQLite). The rest belongs in the new Deployment section (E5).
 
 ### E2. Per-user thread ids (new invariant)
 
@@ -571,6 +602,20 @@ id, and the size and type limits on uploads stay.
 - `get_agent` is `st.cache_resource`, shared across sessions (`streamlit_app.py:237`). That is
   safe only while the graph holds no per-user state: user identity must travel in the run config
   or thread id, never in a cached object. Pin that with a test.
+- **README: a new `## Deployment` section**, placed after "Web UI" and before "Architecture". A
+  deployer has just read how the app is used and doesn't need the internals yet. Keep the README's
+  existing structure everywhere else. It should cover:
+  - who it's for (one team sharing one organisation profile) and what it needs: Postgres, a
+    sign-in provider, and the host's secret store;
+  - the `server` profile is forced in a deployment; never `local` inside a web server;
+  - one-time setup (`.setup()` / the `db-setup` command from E1), and the variables needed;
+  - **SQLite history does not migrate** to Postgres;
+  - the per-user spending limit and how to change it;
+  - a pointer to E0's note (back up `AGENTS.md` before pulling).
+
+  Then delete the last paragraph of "Backends" ("replace it with `PostgresStore` before
+  deploying"), which this section supersedes, and change the `server` row's Store column to say
+  Postgres.
 
 ### E6. Tests
 
