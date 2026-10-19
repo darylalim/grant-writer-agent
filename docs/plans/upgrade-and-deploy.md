@@ -7,7 +7,7 @@ before starting, because the versions below go stale.
 |---|---|---|
 | A | Lock upgrade to latest, plus checkpoint safety | 1 commit (+ optional release) |
 | B | `uv_build` 0.12 → 0.13 | 1 commit |
-| C | CI tool pins: ruff / ty; then C2: pin the hooks to match, widen their triggers, add `ask` rules | 2 commits (C, C2) |
+| C | CI tool pins: ruff / ty; C2: pin the hooks to match, widen their triggers, add `ask` rules; C3: `setup-uv` v10, pin uv, Dependabot for actions | 3 commits (C, C2, C3) |
 | D | Per-role effort, refusal handling, model fit | 2+ commits (D1, D2 separate) |
 | E | Multi-user deployment for one team: Postgres, per-user threads, sign-in | Several commits; the largest track |
 
@@ -281,6 +281,37 @@ the hook wrote.
 
 The hooks gate every later edit, so C2 lands before Track D's first Python change.
 
+### C3. GitHub Actions: bump, pin uv, keep current (one commit, after C2)
+
+The "upgrade everything" survey above covered Python packages only, but the actions in
+`ci.yml` are dependencies too. As of 2026-10-19 (both SHAs verified against their tags with
+`gh api repos/<repo>/git/ref/tags/<tag>`):
+
+| Action | Pinned | Latest | |
+|---|---|---|---|
+| `actions/checkout` | `3d3c42e…` = v7.0.1 | v7.0.1 | Current |
+| `astral-sh/setup-uv` | `c771a70…` = v9.0.0 | **v10.3.0** | One major behind |
+
+1. **Bump `setup-uv` to v10.** Read its v10.0.0 release notes first. A major version can change
+   defaults that this workflow relies on: `enable-cache`, how `python-version` sets `UV_PYTHON`
+   (the `test` job's matrix depends on that), and cache keys. Pin the new **SHA**, with the tag in a
+   trailing comment, as the file already does. Resolve the SHA with `gh api`; don't copy it from a
+   web page. Update all three `uses:` lines (`test`, `lint`, `release`).
+2. **Pin CI's uv version.** None of the three jobs passes `version:` to `setup-uv`, and
+   `pyproject.toml` has no `[tool.uv] required-version`, so CI runs whichever uv `setup-uv` picks,
+   independent of the local 0.12.22. Prefer `required-version` in `pyproject.toml`, which pins it
+   for local `uv` *and* CI from one place, over a `version:` input repeated three times. Check in
+   the v10 notes that `setup-uv` honours it. This interacts with Track B: `uv_build`'s range and the
+   uv that runs it should move together. If B's packaging check needs a known uv in CI, do this
+   step before B.
+3. **Keep actions current automatically (optional).** Add `.github/dependabot.yml` with **only**
+   the `github-actions` ecosystem, on a weekly or monthly schedule. Dependabot updates SHA pins
+   and their version comments. Leave Python dependencies out of it: `uv.lock` is upgraded
+   deliberately, with the audit in Track A, and a bot PR per package would bypass that audit.
+4. Validate: the PR's own CI run *is* the test. Both matrix legs, `lint`, and the `--help` smoke
+   step must pass. `release` does not run on a PR. It is checked on the first push to `main` after
+   merge, so read that run's "Decide whether to release" output.
+
 ## Track D (after C): per-role effort, refusals, and model fit
 
 Added 2026-10-19 after a model-fit review. The conclusion of that review was **keep the current
@@ -470,8 +501,14 @@ id, and the size and type limits on uploads stay.
 ### E6. Tests
 
 - The suite stays offline by contract. Postgres tests are opt-in: mark them and skip unless a
-  `TEST_DATABASE_URL` is set, in the same spirit as `pytest.importorskip("streamlit")`. CI can add
-  a Postgres service job for them later.
+  `TEST_DATABASE_URL` is set, in the same spirit as `pytest.importorskip("streamlit")`.
+- **CI: add a separate `postgres` job** to `ci.yml`, rather than adding the database to `test`.
+  Give it a `services: postgres:` container with a health check, set `TEST_DATABASE_URL` to that
+  container, run `uv sync --locked`, then run only the Postgres-marked tests. Pin the image to a
+  specific major version (and ideally a digest), on the same principle as the SHA-pinned actions.
+  Keep the existing `test` job exactly as it is: it is the proof that the suite needs no database.
+  Add `postgres` to `release`'s `needs:` only once it is stable, because a flaky service container
+  there blocks every release.
 - Offline cases to add: `_build_checkpointer` picks Postgres only when the URL is set; the
   `user_thread_id` collision and escape cases (parametrized like §⑨); the deployed UI cannot
   select `local`; `parked_state` uses the per-user id.
