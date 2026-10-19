@@ -53,6 +53,34 @@ If a direct dependency now shows a latest version *outside* its bound (for examp
 comment says why: 0.6 → 0.7 removed the todo middleware, added the `delete` tool, and dropped
 about 5.6k characters of system prompt.
 
+### 0b. Back up the checkpoints, and have a parked thread to test
+
+`.grant_writer/checkpoints.sqlite` is the only state this upgrade can damage. The workspace is
+plain files, and the `server` Store is rebuilt at every start. The checkpoint file holds
+in-progress conversations, including writes parked for human approval (invariant 11). It was
+written by langgraph-checkpoint 4.2.0 / sqlite 3.1.1, and after the upgrade 4.3.0 / 3.1.2 will
+read it.
+
+Close every `grant-writer chat` and Streamlit process first. Then:
+
+```bash
+sqlite3 .grant_writer/checkpoints.sqlite ".backup .grant_writer/checkpoints.pre-upgrade.sqlite"
+sqlite3 "file:$PWD/.grant_writer/checkpoints.sqlite?immutable=1" \
+  "select thread_id, count(*) from checkpoints group by thread_id;
+   select distinct thread_id from writes where channel='__interrupt__';"
+```
+
+Use `.backup`, not `cp`. `SqliteSaver` opens the database in WAL mode, so a plain copy of the
+main file can miss committed rows still held in `-wal`. The `immutable=1` URI is how the database
+is read without locking it. A plain `-readonly` open failed here with "unable to open database
+file", because WAL mode needs the `-shm` side file.
+
+As of 2026-10-19 there were four threads (`X`, `discover:smoke-2026q3`, `probe-eoc-2`, `smoke`)
+and **no parked thread**. The parked case matters most, so create one *before* upgrading. Run
+`grant-writer draft --app-id upgrade-parked --approve ...` until it stops at the approval prompt,
+then answer `quit`. This is a live run that costs money, so ask first. The `__interrupt__` query is
+a quick check; the authority is `activity.is_parked(agent, {"configurable": {"thread_id": ...}})`.
+
 ### 1. Upgrade and sync
 
 ```bash
@@ -80,6 +108,24 @@ causes `CLAUDE.md` names: `TodoListMiddleware`'s type-parameter arity, and
 `BaseStore.put`'s `dict` vs `TypedDict`. If either was fixed upstream and a new one of ours took
 its place, the count stays at 2 and hides it.
 
+### 2b. Check that existing checkpoints still resume
+
+The suite uses `InMemorySaver` and fresh threads, so it never reads a checkpoint written by the
+*previous* version. Do it by hand against the real file:
+
+1. Run `uv run grant-writer chat --app-id smoke` (or any existing thread). It must continue the
+   earlier conversation. If it answers as if starting fresh, the old rows were not read, even
+   though nothing raised.
+2. For the parked thread from 0b, `activity.is_parked` must return `True`, and
+   `pending_action_requests` must list the same write as before the upgrade. Then **approve or
+   reject it**: the resume must complete. That is invariant 11 checked across a version boundary.
+   A parked thread that loads as unparked means the pending write has been discarded.
+3. Optionally, open the parked thread in the Streamlit app after a reload. `parked_state` must
+   put the approval panel back on screen.
+
+If any of these fail, stop and restore the backup (see step 6). Do not continue with a checkpoint
+format you can't read.
+
 ### 3. Audit each risky package, even if the tests pass
 
 A green suite is necessary but not sufficient here: most invariants fail silently. Read each
@@ -103,7 +149,12 @@ package's release notes for the range and check them against these points.
   the names `test_review_fixes.py` §⑪ derives from `langsmith` changed. Also check that
   `Client.create_feedback` still takes `session_id` by name (the reason for the `>=0.6.7` floor).
 - **langgraph-checkpoint 4.3.0**: does `get_checkpoint_metadata` still copy scalars from
-  `metadata` and `configurable` the same way (§⑫, and the `config.trace_config` notes)?
+  `metadata` and `configurable` the same way (§⑫, and the `config.trace_config` notes)? Also
+  check the release notes for a serialisation or schema change; step 2b checks the result by hand.
+- **The `server` profile's Store**: no test builds it against a real `Store`. Check whether
+  deepagents' `StoreBackend` or `CompositeBackend` prefix stripping changed (invariant 6:
+  `/skills/` and `/memories/` must stay in separate namespaces). Then start the `server` profile
+  once and run `ls /skills/` to confirm no memory files appear in it.
 - **streamlit 1.66** (`AppTest`, `test_theme_config.py`): check whether any theme key was added,
   renamed, or moved between top-level and per-mode sections. Check whether `AppTest`'s handling of
   forms, selectbox serialisation, or rerun queues changed; `CLAUDE.md` documents each of those.
@@ -137,6 +188,18 @@ Model the message on `02b1f96`: say what moved, which bumps matter and why, what
 was fixed, and confirm the ty baseline was read rather than counted. A release is a *separate*
 commit bumping `version` to `0.2.2`, because bumping the version is the release: CI tags and
 publishes it on a green push to `main`.
+
+**Rolling back is two steps, not one.** `git revert` brings back the old lock, but the checkpoint
+file may now contain rows written by the new version, and reading new rows with the old version
+is the direction that tends to break. Restore the backup too:
+
+```bash
+mv .grant_writer/checkpoints.pre-upgrade.sqlite .grant_writer/checkpoints.sqlite
+rm -f .grant_writer/checkpoints.sqlite-wal .grant_writer/checkpoints.sqlite-shm
+```
+
+Any conversation that happened after the upgrade is lost by doing this, so say so before doing
+it. Keep the backup until the upgrade has been in use for a while.
 
 ---
 
