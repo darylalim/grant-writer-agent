@@ -42,7 +42,7 @@ command merely *mentioning* it in prose is refused too; edit through `Edit`/`Wri
 bites.
 
 CI adds what the local loop cannot. It runs the suite on **3.14** as well as `.python-version`'s
-3.13, and pins `ruff@0.16.4` / `ty@0.0.74` where the hooks run `uvx` unpinned, so a newer local
+3.13, and pins `ruff@0.17.1` / `ty@0.0.89` where the hooks run `uvx` unpinned, so a newer local
 ruff can reformat code that CI's `format --check` then rejects — bump the pins deliberately, and
 re-check the ty baseline when you do. Releases need no separate step: a green push to `main`
 whose `version` in `pyproject.toml` has no `v<version>` tag gets tagged and released with the
