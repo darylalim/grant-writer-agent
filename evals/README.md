@@ -22,6 +22,10 @@ uv run python -m evals.evaluate_scout --no-judge
 uv run python -m evals.evaluate_scout --prefix opus-scout
 ```
 
+Point `--out` at `evals/out/`, which is gitignored: the records hold raw model
+output, and the graph-level runs write whole drafts. The fixed inputs every live
+comparison uses are in `fixtures/`, with their sources.
+
 **`run_scout` calls a real model and costs real money; `push_dataset` writes to
 a real workspace; `evaluate_scout` does both.** None of the three is collected
 by `pytest tests/` and none runs in CI — deliberately, and the reason is the

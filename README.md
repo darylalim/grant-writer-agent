@@ -2,7 +2,11 @@
 
 [![CI](https://github.com/darylalim/grant-writer-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/grant-writer-agent/actions/workflows/ci.yml)
 
-A grant writing agent built on [Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview).
+An AI grant-writing agent built on LangChain
+[Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview). It finds
+funding opportunities, fit-scores them with quoted evidence, and drafts proposals
+with human approval of final files. Where a fact is unknown, it marks the gap for
+you to fill instead of inventing data.
 
 - **`discover`** searches grants.gov and the web for funding opportunities and
   scores how well each one fits your organization.

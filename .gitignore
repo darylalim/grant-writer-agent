@@ -1,5 +1,10 @@
 # Secrets
 .env
+# Variants a deployment tends to create (.env.local, .env.production) hold the
+# same keys. The PreToolUse hooks already treat these names as secret, and the
+# two should agree. The example file holds only names, and is tracked.
+.env.*
+!.env.example
 # `.streamlit/` is tracked for config.toml (the theme). secrets.toml is the
 # conventional home for API keys in a Streamlit app, sits in that same now-
 # tracked directory, and `git add .streamlit` would take it along.
@@ -40,7 +45,6 @@ dist/
 # Tooling
 .ruff_cache/
 .pytest_cache/
-.mypy_cache/
 
 # OS
 .DS_Store
