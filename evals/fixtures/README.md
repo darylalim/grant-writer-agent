@@ -30,8 +30,10 @@ A US federal government work, so in the public domain.
 ## The standard runs
 
 The org profile reaches the agent as `/memories/org/AGENTS.md`, so a run uses
-its own root rather than the repo's: copy this profile there and link `skills/`
-in. That also keeps the run's checkpoints out of the real
+its own root rather than the repo's: copy this profile there, and copy `skills/`
+in too. Don't symlink it: the local backend refuses any path that resolves
+outside its root, and a refused `/skills/` stops the run before the first model
+call. A separate root also keeps the run's checkpoints out of the real
 `.grant_writer/checkpoints.sqlite`.
 
 - **draft:** `--rfp evals/fixtures/scmp-2026-nofo-excerpt.pdf --funder "USDA AMS" --no-search`

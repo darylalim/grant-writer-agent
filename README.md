@@ -179,6 +179,16 @@ judges the drafts without seeing the drafter's reasoning.
 | `skills/*/SKILL.md` | Permanent | Section drafting guides, loaded on demand |
 | `opportunities/<scan-id>/` | One scan | Candidate texts and scores |
 | `applications/<app-id>/` | One application | RFP, requirements, research, drafts, reviews |
+| `.grant_writer/checkpoints.sqlite` | Until deleted | Conversation state, plans, and writes awaiting approval |
+
+Back up the checkpoint file before upgrading dependencies. It is the one piece
+of state a library upgrade can make unreadable. Close the CLI and the UI first,
+and use SQLite's own backup rather than `cp`, which can miss rows still in the
+write-ahead log:
+
+```bash
+sqlite3 .grant_writer/checkpoints.sqlite ".backup .grant_writer/checkpoints.pre-upgrade.sqlite"
+```
 
 ### Backends
 
