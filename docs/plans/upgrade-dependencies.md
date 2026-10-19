@@ -10,7 +10,10 @@ before starting, because the versions below go stale.
   `langchain*<2.0`, `langsmith<1.0`). A single `uv lock --upgrade` reaches the latest version of
   everything, with no change to `pyproject.toml`. That is the same shape as the last upgrade
   (`02b1f96`).
-- **The only caps that do bind are outside `[project]`.** They are optional tracks B and C below.
+- **The only caps that do bind are outside `[project]`.** They are tracks B and C below.
+
+**Decided order (2026-10-19):** Track A first, as its own commit. Then B and C, each as its own
+separate commit afterwards, in that order. Do not fold either into A's commit.
 
 | Package | Locked | Latest | Notes |
 |---|---|---|---|
@@ -135,7 +138,7 @@ publishes it on a green push to `main`.
 
 ---
 
-## Track B (optional): `uv_build` 0.12 → 0.13
+## Track B (separate commit, after A): `uv_build` 0.12 → 0.13
 
 `[build-system] requires = ["uv_build>=0.12.5,<0.13.0"]` blocks 0.13.1.
 
@@ -150,7 +153,7 @@ publishes it on a green push to `main`.
 
 Keep this as its own commit: it changes what gets published, not what runs.
 
-## Track C (optional): CI tool pins ruff 0.17.1 / ty 0.0.89
+## Track C (separate commit, after B): CI tool pins ruff 0.17.1 / ty 0.0.89
 
 1. Run `uvx ruff@0.17.1 format --check` and `check`. A new minor version can reformat code or
    enable new rules within the selected families.
