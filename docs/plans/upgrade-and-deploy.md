@@ -10,7 +10,7 @@ before starting, because the versions below go stale.
 | C | CI tool pins: ruff / ty; C2: pin the hooks to match, widen their triggers, add `ask` rules; C3: `setup-uv` v10, pin uv, Dependabot for actions | 3 commits (C, C2, C3) |
 | H | Evaluation: pinned judge and repeats, a delegation check on the full graph, a drafting eval, a false-refusal case | 4 steps (H1–H4); runs between C and D |
 | D | Per-role effort, refusal handling, model fit | 2+ commits (D1, D2 separate) |
-| E | Multi-user deployment for one team: E0 org-profile template split, then Postgres, per-user threads, sign-in | Several commits; the largest track |
+| E | Multi-user deployment for one team: E0 org-profile template split, then Postgres, per-user threads, sign-in, E7 operations (logging, run table, audit, alerts) | Several commits; the largest track |
 | F | Streamlit theme designed for the app: warm paper neutrals, one indigo accent, serif headings; modes mirrored | 2–3 commits (test, config, re-pin) |
 | G | Adaptive layout: approval panel first, one tab per workflow, a pane-height control, readable prose width | 4 commits (G1–G4) |
 
@@ -238,6 +238,21 @@ prompts (deepagents), request shapes (langchain-anthropic) and the SDK (anthropi
 Baseline already measured offline on 2026-10-19 (no API calls): `grant-writer --help` 0.86s warm
 (1.25s cold); `import grant_writer.agent` 0.74s, almost all of it `deepagents.graph`; the suite
 12.9s for 426 tests. Re-measure after the upgrade, and explain any jump of more than about 25%.
+
+### 4c. Tracing still works (live; one of step 4's runs, with tracing on)
+
+`test_frontends.py` §⑥ checks the trace labels offline against `CONFIG_KEYS` and a real
+`ensure_config` round-trip, but only a live run shows that langsmith 0.14.11 *accepts* them.
+With tracing on for one `draft`, check that:
+
+- the trace appears, with `run_name`, the tags, and the metadata (`frontend`, `command`, `app_id`,
+  `funder`, `rubric`);
+- it can be **found by filtering**: `langsmith trace list --tags …` returns it;
+- the upgrade's new `opentelemetry-api` dependency doesn't change where traces go. Read
+  langsmith's notes for any OpenTelemetry export that turns on by default.
+
+Turn tracing back off afterwards if it isn't normally on. Invariant 19's kill-switch only governs
+tests and CI.
 
 ### 5. Update docs where a fact changed
 
@@ -475,6 +490,10 @@ The hooks run the whole suite after every edit, so sequence the work so each edi
    each role's default model and effort (a small table: role → model → effort). The README
    currently names the override variables but not the defaults, so a reader can't tell what they
    are overriding.
+6. **Observability:** check in one trace that each model call shows its model and the *effort
+   actually sent*. When D4's cost comparison looks odd, the trace is where to check which effort
+   ran. If langchain-anthropic doesn't surface effort in the run's metadata, add it to the per-call
+   labels.
 
 ### D2. Refusal handling (investigate first, then decide)
 
@@ -504,6 +523,10 @@ That makes it a new silent failure of exactly the kind `CLAUDE.md` lists.
 6. **Accessibility:** the declined message states the outcome and category **in text**, not
    only through colour or an icon. Use `st.warning`/`st.error` with a sentence, so it is announced
    the same as other alerts.
+7. **Observability:** put `stop_reason` and the refusal category into the turn's trace metadata,
+   so refused runs can be filtered and counted in LangSmith. That's allowed under `CLAUDE.md`'s
+   rule for `metadata` (nothing that isn't already in the thread), because both come from the
+   turn's own response. Without it, the real-use refusal rate H4 estimates is never observed.
 
 ### D3. Forced `tool_choice`: verify it, then pin it with a test
 
@@ -731,6 +754,9 @@ org profile (Track E's decision), it affects **every user**, and nothing on scre
 - **Accessibility:** the sign-in page belongs to the provider, so check that it meets WCAG 2.2 AA
   (keyboard operable, labelled fields, no inaccessible CAPTCHA) before choosing a provider in E5.
   A user who can't sign in can't use anything else.
+- **One run table for spending and observability.** The spending limit needs tokens and cost per
+  user per run, recorded server-side. Build that record as E7's run table (below), not a separate
+  counter, so limits, dashboards and alerts all read one source.
 - **Performance: API rate limits.** With many users, Anthropic returns HTTP 429. The SDK retries
   twice, then the run fails part-way through. Add a **limit on simultaneous runs per
   organisation**, checked before a turn starts like the spending limit. When it's reached, show
@@ -807,7 +833,48 @@ org profile (Track E's decision), it affects **every user**, and nothing on scre
   and errors. This tests the deployment's capacity with no model cost. Keep it out of the default
   suite (opt-in, like the Postgres tests), and run it before E5's go-live.
 
-Commit E0 through E4 separately, including E3b. E2, E3b and E4 are what make hosting safe, so none
+### E7. Operations: logging, run records, audit, health checks and alerts
+
+Today, observability is LangSmith tracing alone, with careful labels (`config.trace_config`;
+§⑥, §⑫). There is **no server-side logging** in `src/` or `streamlit_app.py` (checked
+2026-10-19). The three broad handlers (`streamlit_app.py:326`, `:1546`, `:1607`) show errors to
+the *user*, and nothing else records them. On one laptop the user is the operator. In a team
+deployment they aren't, and E5 may turn tracing off for privacy, which would leave nothing.
+
+1. **Server-side logging.** Standard `logging`, configured once at app start, to the host's log
+   collector. Each broad `except` logs the exception, user id, thread id, phase and frontend,
+   **never proposal content**: no messages, no file text, no profile text. Logs then stay out of
+   E5's tracing/privacy decision and can stay on whatever it decides. Add an offline test that the
+   handlers log, and that a log record carries no message content (feed a run with a sentinel
+   string and assert it's absent).
+2. **A content-free run table** in Postgres, shared with E4's spending limit: user, thread id, kind
+   (draft or discover), start and end times, outcome (`completed` / `parked` / `failed` /
+   `refused` / `stopped`), model calls, input, output and cache-read tokens, and cost. Written
+   from usage metadata at the end of each turn. It works with tracing off. This answers "how much,
+   how often, how well" without any content.
+3. **Tracing, three options rather than two.** For E5's decision: off; on with full content; or
+   **on with inputs and outputs hidden**. The last keeps timing, token counts, errors and the call
+   tree without sending proposal text. The LangSmith SDK has settings for hiding inputs and
+   outputs; confirm their exact names in the installed version before relying on them, and test
+   that the setting reaches the client.
+4. **Audit records:** who approved or rejected each pending `final/` write, and when (user, thread,
+   file path, decision). Also E3b's memory-write record. Append-only, separate from the run
+   table. A write bound for submission to a funder deserves a record of who approved it.
+5. **Health checks:** a liveness probe on Streamlit's built-in health endpoint, plus a readiness
+   check that Postgres answers. Configure both on the host in E5.
+6. **Alerts:** failed-run rate, refusal rate (D2), rate-limit (429) errors, connection-pool
+   timeouts (E1), spending-limit hits, and **threads parked on an approval for more than N days**,
+   found by querying the checkpoint writes for interrupts. The approval design keeps a paused
+   write safe indefinitely (invariant 11); in a team, the same property lets an unanswered approval
+   sit unnoticed.
+7. **One correlation id:** the per-user `thread_id` (E2) plus the LangSmith run id, present in log
+   lines, the run table and the audit record, so a user's report leads straight to the trace and
+   the logs.
+
+**README:** document what is collected, where it is stored, and how long it is kept, in the
+Deployment section. Users of a shared deployment should know what's recorded about their runs.
+
+Commit E0 through E4 separately, including E3b, then E7. E2, E3b and E4 are what make hosting safe, so none
 of them ships as part of another commit. Run `/security-review` on each one before it merges.
 
 ## Track F (independent; any time after C2): a theme designed for this app
@@ -1214,6 +1281,12 @@ Track A doesn't wait for H; it uses the existing `run_scout` plus 4b's baseline.
   stays the "read it closely" mode.
 - Offline tests of the new aggregation: repeats are counted per check, and a harness error is
   never averaged into a pass rate. That keeps the existing "three numbers, not one" guarantee.
+
+**H1 also: label eval runs.** Every eval runner (the existing two and H2/H3/H4's) labels its runs
+as evals, for example `frontend="eval"` plus the case key (`run_scout.call_config` already sets
+case/role/model metadata), or sends them to a separate LangSmith project. Otherwise repeated eval
+runs mix with real usage in the traces E7's dashboards read. Pin the label offline, the way §⑥
+pins the frontends'.
 
 ### H2. The delegation (trajectory) check, on the full graph
 
