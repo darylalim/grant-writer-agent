@@ -213,6 +213,31 @@ uv run grant-writer draft --app-id upgrade-smoke --rfp <a small RFP> --funder NS
 On the draft run, look for: the orchestrator delegating via `task` (instead of drafting inline),
 `[NEEDS INPUT]` markers, and no output cut off mid-sentence.
 
+### 4b. Performance baseline, before and after (live; ask first; reuse step 4's runs)
+
+Nothing else in this plan would notice a cost or speed regression from the upgrade, which changes
+prompts (deepagents), request shapes (langchain-anthropic) and the SDK (anthropic 1.10 → 1.15).
+
+1. **Before `uv lock --upgrade`**, on the old lock, run one `discover` and one `draft` on a
+   **fixed, small** RFP and focus, and keep the inputs in `evals/out/perf/`. Record, per run:
+   input tokens, output tokens, **cache-read and cache-creation input tokens**, number of model
+   calls, wall-clock time, and cost at the current prices (Opus 5.5 $4/$20, Sonnet 5.5 $2/$10
+   per M tokens). Take the figures from each response's usage metadata (or from LangSmith, if
+   tracing is on).
+2. **After the upgrade**, run the same two with the same inputs. Flag anything over about +15% on
+   cost or time, and explain it before merging. Model output varies from run to run, so treat
+   one run as a smoke signal, not a benchmark. Repeat a run before concluding anything.
+3. **Prompt caching must work.** deepagents installs Anthropic's caching middleware
+   unconditionally, and `MemoryMiddleware` marks the org profile for caching. Across one run's
+   turns, `cache_read_input_tokens` must be above zero, and most of the stable prefix (system
+   prompt, tool list, memory) should be read from cache after the first call. If it is zero,
+   something in the prefix changes between requests (a timestamp, an unstable tool order, memory
+   rewritten each turn). Find and fix it before Track D, which assumes caching works.
+
+Baseline already measured offline on 2026-10-19 (no API calls): `grant-writer --help` 0.86s warm
+(1.25s cold); `import grant_writer.agent` 0.74s, almost all of it `deepagents.graph`; the suite
+12.9s for 426 tests. Re-measure after the upgrade, and explain any jump of more than about 25%.
+
 ### 5. Update docs where a fact changed
 
 - Leave `pyproject.toml` floors alone unless a fix *requires* a newer version. The last upgrade
@@ -367,6 +392,11 @@ the hook wrote.
 
 The hooks gate every later edit, so C2 lands before Track D's first Python change.
 
+**Suite-time budget.** The suite hook has a 60s timeout, and the suite took 12.9s (426 tests) on
+2026-10-19. Keep it **under about 30s**, half the timeout, and put the suite time in each
+track's PR. If a track pushes it past that, mark slow cases opt-in (the Postgres and load tests
+already are) instead of raising the hook timeout. A slow hook adds a wait to every Python edit.
+
 ### C3. GitHub Actions: bump, pin uv, keep current (one commit, after C2)
 
 The "upgrade everything" survey above covered Python packages only, but the actions in
@@ -501,6 +531,13 @@ no forced `tool_choice`. After Track A's upgrade, re-check that the line above s
 3. For drafting, run one real `draft` at the new settings and read the output. No offline test can
    judge prose quality.
 
+4. **Cost per completed run, not per request.** For the D1 settings against the old all-`high`
+   settings, on the same inputs: total tokens, cache-read tokens, model calls, rubric rounds
+   (`max_rubric_iterations` is 3), wall-clock time and cost, **for one finished run**, next to
+   the eval scores. A lower effort that needs more turns or more rubric rounds is not a saving.
+   Also confirm cache reads stay above zero. Each role's effort is fixed, which shouldn't affect
+   caching, but changing effort partway through a conversation would throw the cache away.
+
 Commit D1 and D2 separately. Each one changes what a live run does, so each should be revertible
 on its own.
 
@@ -580,6 +617,17 @@ tracking files it already tracks.
   checkpoint copier. Treat local and hosted history as separate, and say so in the README.
 - **README:** add a `DATABASE_URL` row to "Configuration" (required only for a deployment;
   unset means SQLite). The rest belongs in the new Deployment section (E5).
+- **Performance: checkpoint growth.** In the `server` profile, drafts live *in graph state*, so
+  every checkpoint saves them again. Today's threads are tiny smoke tests (at most 7KB per
+  checkpoint, 82KB per thread, measured 2026-10-19) and show nothing. Run one real `draft` in the
+  `server` profile, then measure rows, bytes per checkpoint and total bytes per thread, in SQLite
+  first and Postgres after E1. Size E5's storage, backups and retention from that figure, not
+  from a guess.
+- **Performance: connection pool.** Streamlit runs one script thread per session, and an agent
+  run holds it, and its checkpoint connection, for minutes. Size the `psycopg` pool for the
+  number of simultaneous runs E4 allows, plus headroom for the UI's checkpoint reads
+  (`parked_state`, the approval panel), and set a pool timeout that shows a clear message
+  instead of hanging.
 
 ### E2. Per-user thread ids (new invariant)
 
@@ -679,6 +727,11 @@ org profile (Track E's decision), it affects **every user**, and nothing on scre
 - **Accessibility:** the sign-in page belongs to the provider, so check that it meets WCAG 2.2 AA
   (keyboard operable, labelled fields, no inaccessible CAPTCHA) before choosing a provider in E5.
   A user who can't sign in can't use anything else.
+- **Performance: API rate limits.** With many users, Anthropic returns HTTP 429. The SDK retries
+  twice, then the run fails part-way through. Add a **limit on simultaneous runs per
+  organisation**, checked before a turn starts like the spending limit. When it's reached, show
+  "N runs in progress, try again shortly" instead of starting a run that will fail. Size it to the
+  organisation's rate-limit tier.
 
 ### E5. Deployment (decide the host here)
 
@@ -744,6 +797,11 @@ org profile (Track E's decision), it affects **every user**, and nothing on scre
   select `local`; `parked_state` uses the per-user id.
 - Update `CLAUDE.md`'s "Backend profiles" section. "Swap for `PostgresStore` before deploying"
   becomes a description of what is there.
+- **Load test with a fake model (offline, costs nothing).** Build the agents with a stub chat
+  model (the suite already fakes models), then drive N simultaneous sessions (for example 5, 10
+  and 25) against Postgres. Measure checkpoint write latency, pool waits, memory per session,
+  and errors. This tests the deployment's capacity with no model cost. Keep it out of the default
+  suite (opt-in, like the Postgres tests), and run it before E5's go-live.
 
 Commit E0 through E4 separately, including E3b. E2, E3b and E4 are what make hosting safe, so none
 of them ships as part of another commit. Run `/security-review` on each one before it merges.
@@ -1095,3 +1153,16 @@ Record the screenshots in the PR. They are the only evidence for this track.
 - **Status announcements:** check whether a run finishing, or the approval panel appearing, is
   announced to a screen reader. If not, document it. This needs no new UI, because the approval
   panel moving to the top (G1) is the main fix: it is the first thing reached.
+
+### Performance (part of Track G)
+
+- **Rerun time.** Every click reruns the script, and `st.tabs` builds **both** tabs on every
+  pass (the shortlist parse, citation checks and file listing included). Before G3 and after it,
+  with a realistic `applications/` and `opportunities/` (copy real scans and a finished draft in),
+  time one full rerun (a `perf_counter` around the script body, or `AppTest` timing). A clearly
+  slower rerun after G3 means moving the disk reads behind `st.cache_data`, keyed on the
+  directory's modification time, or into the existing `@st.fragment` functions. It doesn't mean
+  reverting the tabs.
+- **Heavy content.** A 50+ page RFP in `st.pdf` and a long draft in the Markdown view must render
+  without stalling the page, at every pane height. If the PDF view is slow, rendering it only
+  when selected is already how the file browser works; check that it stays that way.
