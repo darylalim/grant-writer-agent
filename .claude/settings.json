@@ -3,6 +3,15 @@
   "permissions": {
     "deny": [
       "Read(./.env)"
+    ],
+    "ask": [
+      "Bash(uv run grant-writer draft *)",
+      "Bash(uv run grant-writer discover *)",
+      "Bash(uv run grant-writer chat *)",
+      "Bash(uv run python -m evals.run_scout *)",
+      "Bash(uv run python -m evals.evaluate_scout *)",
+      "Bash(rm *.grant_writer/checkpoints*)",
+      "Bash(mv *.grant_writer/checkpoints*)"
     ]
   },
   "hooks": {
@@ -35,19 +44,19 @@
           {
             "type": "command",
             "statusMessage": "Formatting with ruff",
-            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) uvx ruff format -q \"$f\"; uvx ruff check -q --fix \"$f\" || true;; esac; exit 0"
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) uvx ruff@0.17.1 format -q \"$f\"; uvx ruff@0.17.1 check -q --fix \"$f\" || true;; esac; exit 0"
           },
           {
             "type": "command",
             "timeout": 60,
             "statusMessage": "Running wiring tests",
-            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in \"$CLAUDE_PROJECT_DIR\"/src/grant_writer/*.py|\"$CLAUDE_PROJECT_DIR\"/tests/*.py|\"$CLAUDE_PROJECT_DIR\"/evals/*.py|\"$CLAUDE_PROJECT_DIR\"/streamlit_app.py|\"$CLAUDE_PROJECT_DIR\"/CLAUDE.md|\"$CLAUDE_PROJECT_DIR\"/.streamlit/config.toml) ;; *) exit 0;; esac; out=$(cd \"$CLAUDE_PROJECT_DIR\" && uv run pytest tests/ -q --no-header -p no:warnings 2>&1) || { printf '%s\\n' \"$out\" | tail -25 >&2; exit 2; }"
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in \"$CLAUDE_PROJECT_DIR\"/src/grant_writer/*.py|\"$CLAUDE_PROJECT_DIR\"/tests/*.py|\"$CLAUDE_PROJECT_DIR\"/evals/*.py|\"$CLAUDE_PROJECT_DIR\"/streamlit_app.py|\"$CLAUDE_PROJECT_DIR\"/CLAUDE.md|\"$CLAUDE_PROJECT_DIR\"/.streamlit/config.toml|\"$CLAUDE_PROJECT_DIR\"/pyproject.toml|\"$CLAUDE_PROJECT_DIR\"/.claude/settings.json) ;; *) exit 0;; esac; out=$(cd \"$CLAUDE_PROJECT_DIR\" && uv run pytest tests/ -q --no-header -p no:warnings 2>&1) || { printf '%s\\n' \"$out\" | tail -25 >&2; exit 2; }"
           },
           {
             "type": "command",
             "timeout": 30,
             "statusMessage": "Type-checking with ty",
-            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) ;; *) exit 0;; esac; n=$(cd \"$CLAUDE_PROJECT_DIR\" && uvx ty check src/ tests/ evals/ streamlit_app.py 2>&1 | grep -cE '^(error|warning)\\['); [ \"$n\" -gt 1 ] && { echo \"ty: $n diagnostics vs baseline 1 (upstream in langchain, deliberately unsuppressed). You introduced $((n - 1)).\" >&2; exit 2; }; exit 0"
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) ;; *) exit 0;; esac; n=$(cd \"$CLAUDE_PROJECT_DIR\" && uvx ty@0.0.89 check src/ tests/ evals/ streamlit_app.py 2>&1 | grep -cE '^(error|warning)\\['); [ \"$n\" -gt 1 ] && { echo \"ty: $n diagnostics vs baseline 1 (upstream in langchain, deliberately unsuppressed). You introduced $((n - 1)).\" >&2; exit 2; }; exit 0"
           }
         ]
       }

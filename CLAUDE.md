@@ -9,8 +9,8 @@ uv sync                                       # install (Python >=3.13, uv_build
 uv run pytest tests/ -q                       # full suite: offline, no API calls
 uv run pytest tests/test_wiring.py::test_subagent_roster -q   # single test
 uv run pytest tests/ -q -k permission         # by keyword
-uvx ruff check src/ tests/ evals/ streamlit_app.py   # lint (select list in [tool.ruff.lint])
-uvx ruff format --check src/ tests/ evals/ streamlit_app.py   # ruff's default 88-col
+uvx ruff@0.17.1 check src/ tests/ evals/ streamlit_app.py   # lint (select list in [tool.ruff.lint])
+uvx ruff@0.17.1 format --check src/ tests/ evals/ streamlit_app.py   # ruff's default 88-col
 
 uv run python -m evals.run_scout              # prompt eval: LIVE model, costs money
 uv run python -m evals.push_dataset --dry-run # dataset mirror: plan only; drop the flag to write
@@ -42,16 +42,19 @@ command merely *mentioning* it in prose is refused too; edit through `Edit`/`Wri
 bites.
 
 CI adds what the local loop cannot. It runs the suite on **3.14** as well as `.python-version`'s
-3.13, and pins `ruff@0.17.1` / `ty@0.0.89` where the hooks run `uvx` unpinned, so a newer local
-ruff can reformat code that CI's `format --check` then rejects — bump the pins deliberately, and
-re-check the ty baseline when you do. Releases need no separate step: a green push to `main`
+3.13, and pins `ruff@0.17.1` / `ty@0.0.89`. The hooks pin the same versions, so a local edit is
+formatted exactly as CI's `format --check` reads it. **A version bump touches three places in one
+commit:** `ci.yml`, the hooks in `.claude/settings.json`, and this paragraph. Bump deliberately, and
+re-check the ty baseline when you do. Billed commands (`grant-writer draft`/`discover`/`chat`,
+`evals.run_scout`, `evals.evaluate_scout`) and any `rm`/`mv` of `.grant_writer/checkpoints*` are
+`permissions.ask` rules there: confirmed by a human, never forbidden. Releases need no separate step: a green push to `main`
 whose `version` in `pyproject.toml` has no `v<version>` tag gets tagged and released with the
 wheel and sdist attached, so **bumping the version is the release**.
 
 When working with Python, invoke the relevant `/astral:<skill>` — `/astral:uv`, `/astral:ruff`,
 `/astral:ty` — to ensure best practices are followed rather than guessed at. uv is the only
 supported package manager: never `pip`, never a hand-rolled venv. There is deliberately no
-`[tool.ty]` config; `uvx ty check src/ tests/` reports one diagnostic, upstream and not worth
+`[tool.ty]` config; `uvx ty@0.0.89 check src/ tests/ evals/ streamlit_app.py` reports one diagnostic, upstream and not worth
 suppressing — leave it. That tolerance is encoded as a threshold in two places, the ty hook in
 `.claude/settings.json` and the type-check step in `.github/workflows/ci.yml`; lower both when
 upstream fixes theirs. The one left: `langchain` types `TodoListMiddleware` with two type

@@ -239,8 +239,9 @@ citation.
 ```bash
 uv sync                                              # includes the dev group (streamlit)
 uv run pytest tests/ -q                              # offline, no API calls
-uvx ruff check src/ tests/ evals/ streamlit_app.py
-uvx ruff format --check src/ tests/ evals/ streamlit_app.py
+uvx ruff@0.17.1 check src/ tests/ evals/ streamlit_app.py
+uvx ruff@0.17.1 format --check src/ tests/ evals/ streamlit_app.py
+uvx ty@0.0.89 check src/ tests/ evals/ streamlit_app.py   # 1 upstream diagnostic expected
 uv run python -m evals.run_scout                     # prompt eval: live model, costs money
 ```
 
@@ -252,6 +253,11 @@ uv run python -m evals.run_scout                     # prompt eval: live model, 
 - **Evals** in `evals/` are not part of the suite. The tests can't check prompt
   quality, so run the evals by hand after editing a prompt. See `evals/README.md`.
 - **CI** runs on Python 3.13 and 3.14, with pinned `ruff` and `ty` versions.
+  The Claude Code hooks pin the same versions, so a local edit is formatted
+  exactly as CI checks it.
+- **Billed commands ask first in Claude Code.** `draft`, `discover`, `chat` and
+  the live evals, plus any `rm` or `mv` of the checkpoint file, need a
+  confirmation before they run.
 - **Releases** are automatic: when a green push to `main` has a `version` in
   `pyproject.toml` with no `v<version>` tag yet, CI tags it and publishes the
   wheel and sdist. Bumping the version is all a release takes.
