@@ -43,6 +43,7 @@ suite.
 | `run_scout.py` | The runner. Calls a model; needs `ANTHROPIC_API_KEY`. |
 | `push_dataset.py` | Mirrors the fixtures into a LangSmith dataset. One direction, verified. Needs `LANGSMITH_API_KEY`, which it loads from the environment file itself. |
 | `evaluate_scout.py` | The same eval as a LangSmith *experiment* over that dataset, so two runs are a table rather than two readings. Needs both keys. |
+| `run_draft_trajectory.py` | The delegation check: one real `draft` on `fixtures/`, its stream read with `activity.py`, and four code checks on who wrote the sections. Needs `ANTHROPIC_API_KEY`; each run is a full draft. |
 | `../tests/test_evals.py` | Offline tests **of the scorers, the mirror, and the harness** — run on every push, and the only cover any of this gets. |
 
 That last row is the load-bearing one. An eval whose scoring is wrong reports a
@@ -99,6 +100,21 @@ is what makes a failure readable: run through the full graph, a bad verdict
 could come from the prompt, a missed `read_file`, a truncated context, or the
 orchestrator's summary — and the run would tell you only that something was
 wrong. Running the real graph is the natural next version, once this one passes.
+
+The graph's delegation now has its own check, `run_draft_trajectory`, which
+is the one thing here that builds a graph:
+
+```bash
+uv run python -m evals.run_draft_trajectory --repeat 3 --out evals/out/trajectory.json
+```
+
+It needs no judge. The top-level `updates` stream carries only the
+orchestrator's own calls, because a subagent's calls run inside the `task` tool
+and never reach it, so a `write_file` under `sections/` that does show up there is
+the orchestrator drafting inline. It checks four things: one `section-drafter`
+call per section file, no inline section writes, `compliance-checker` called,
+and `write_todos` used. Each run's draft is kept under `evals/out/trajectory/`
+to read afterwards.
 
 **The drafting side is not covered at all.** `SCOUT_PROMPT` was first because it
 is the cheapest component (sonnet, no tools, two reads and a write) and the one

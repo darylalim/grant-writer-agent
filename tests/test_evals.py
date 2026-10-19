@@ -47,7 +47,7 @@ from langsmith.evaluation.evaluator import run_evaluator
 from langsmith.run_trees import RunTree
 from langsmith.utils import LangSmithConflictError, LangSmithNotFoundError
 
-from evals import evaluate_scout, push_dataset, run_scout
+from evals import evaluate_scout, push_dataset, run_draft_trajectory, run_scout
 from evals.scorers import (
     JUDGE_PROMPT,
     Score,
@@ -2277,3 +2277,138 @@ def test_the_experiment_tally_carries_rates_without_harness_errors():
 
     assert (tally.checked, tally.failed, tally.broken) == (3, 1, 1)
     assert [(r.check, r.label()) for r in tally.rates] == [("parses", "2/3")]
+
+
+# ---- H2: the delegation check, on recorded stream chunks ----------------------
+
+
+def _ai(*calls: tuple[str, dict]) -> dict:
+    """One orchestrator `model` update carrying the given tool calls."""
+    from langchain_core.messages import AIMessage
+
+    tool_calls = [
+        {"name": name, "args": args, "id": f"c{i}"}
+        for i, (name, args) in enumerate(calls)
+    ]
+    return {"model": {"messages": [AIMessage(content="", tool_calls=tool_calls)]}}
+
+
+def _delegate(target: str) -> tuple[str, dict]:
+    return ("task", {"subagent_type": target, "description": "do it"})
+
+
+_PLAN = ("write_todos", {"todos": [{"status": "pending", "content": "need"}]})
+
+DELEGATING = [
+    _ai(_PLAN),
+    _ai(("extract_pdf_text", {"pdf_path": "/x.pdf"})),
+    _ai(_delegate("section-drafter")),
+    _ai(_delegate("section-drafter")),
+    _ai(_delegate("compliance-checker")),
+    _ai(("write_file", {"file_path": "/applications/a/final/proposal.md"})),
+]
+
+INLINE = [
+    _ai(_PLAN),
+    _ai(("write_file", {"file_path": "/applications/a/sections/need.md"})),
+    _ai(("edit_file", {"file_path": "/applications/a/sections/design.md"})),
+    _ai(_delegate("compliance-checker")),
+]
+
+
+def _verdicts(chunks, sections):
+    seen = run_draft_trajectory.read_trajectory(chunks, sections)
+    return {s.name: s.passed for s in run_draft_trajectory.check_trajectory(seen)}
+
+
+def test_a_delegating_run_passes_every_check():
+    assert _verdicts(DELEGATING, ["need.md", "design.md"]) == {
+        "delegates-sections": True,
+        "no-inline-drafting": True,
+        "compliance-checked": True,
+        "plans": True,
+    }
+
+
+def test_a_run_that_drafts_inline_fails():
+    """The regression this exists for: the orchestrator writing sections itself.
+
+    The final draft still arrives, so nothing else in the repo would notice.
+    """
+    verdicts = _verdicts(INLINE, ["need.md", "design.md"])
+    assert verdicts["no-inline-drafting"] is False
+    assert verdicts["delegates-sections"] is False
+    seen = run_draft_trajectory.read_trajectory(INLINE, [])
+    assert seen.inline_section_writes == [
+        "/applications/a/sections/need.md",
+        "/applications/a/sections/design.md",
+    ]
+
+
+def test_fewer_drafter_calls_than_sections_fails():
+    """One section per `section-drafter` call is what the prompt asks for."""
+    one_call = [_ai(_delegate("section-drafter")), _ai(_delegate("compliance-checker"))]
+    assert _verdicts(one_call, ["a.md", "b.md"])["delegates-sections"] is False
+    assert _verdicts(one_call, ["a.md"])["delegates-sections"] is True
+
+
+def test_a_run_with_no_sections_and_no_drafter_does_not_pass_vacuously():
+    assert _verdicts([_ai(_PLAN)], [])["delegates-sections"] is False
+
+
+def test_writes_outside_sections_are_not_inline_drafting():
+    """`final/` is the orchestrator's to assemble; only `sections/` is the drafter's."""
+    seen = run_draft_trajectory.read_trajectory(DELEGATING, [])
+    assert seen.inline_section_writes == []
+
+
+def test_run_once_redirects_the_real_disk_root_and_puts_it_back(tmp_path, monkeypatch):
+    """The real-disk tools resolve against `config.PROJECT_ROOT`, not the root
+    the graph was built on, so the run must point it at its own root -- and a
+    second repeat must find it restored, or it inherits the first one's.
+    """
+    from grant_writer import config
+
+    original = config.PROJECT_ROOT
+    seen_roots = []
+
+    class _Recorded:
+        def stream(self, *_args, **_kwargs):
+            seen_roots.append(config.PROJECT_ROOT)
+            sections = tmp_path / "run" / "applications" / "trajectory" / "sections"
+            sections.mkdir(parents=True)
+            (sections / "need.md").write_text("x")
+            (sections / "design.md").write_text("x")
+            return iter(DELEGATING)
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: _Recorded())
+    record = run_draft_trajectory.run_once(
+        tmp_path / "run", repeat=0, recursion_limit=5
+    )
+
+    assert seen_roots == [tmp_path / "run"]
+    assert original == config.PROJECT_ROOT
+    assert "error" not in record
+    assert all(score["passed"] for score in record["scores"])
+    assert (tmp_path / "run" / "memories" / "org" / "AGENTS.md").is_file()
+    assert (tmp_path / "run" / "skills").is_dir()
+    assert not (tmp_path / "run" / "skills").is_symlink()
+
+
+def test_run_once_keeps_a_raised_run_out_of_the_verdicts(tmp_path, monkeypatch):
+    from grant_writer import config
+
+    original = config.PROJECT_ROOT
+
+    class _Broken:
+        def stream(self, *_args, **_kwargs):
+            raise RuntimeError("overloaded")
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: _Broken())
+    record = run_draft_trajectory.run_once(
+        tmp_path / "run", repeat=1, recursion_limit=5
+    )
+
+    assert record["error"] == "RuntimeError: overloaded"
+    assert "scores" not in record
+    assert original == config.PROJECT_ROOT

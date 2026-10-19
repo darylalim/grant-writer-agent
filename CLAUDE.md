@@ -183,7 +183,10 @@ was duplicated logic waiting to happen:
   doing the work inline* was the single largest thing removed, and this project depends on it: the
   orchestrator is supposed to `task` out to `section-drafter` rather than draft in its own context.
   No test can see any of this, and `evals/run_scout` cannot either — it calls the model directly and
-  never builds a graph. If tool discipline regresses, write the guidance into the prompts here,
+  never builds a graph. `evals/run_draft_trajectory` is the one thing that can: it runs the real
+  drafting graph on the fixtures and checks, in code, that sections went through `section-drafter`
+  and not the orchestrator's own `write_file`. Live and billed, so run by hand. If tool discipline
+  regresses, write the guidance into the prompts here,
   where it is product surface; do not reach for `deepagents.graph.BASE_AGENT_PROMPT`, which is
   deprecated and gone in 0.9.
 
