@@ -8,12 +8,13 @@ before starting, because the versions below go stale.
 | A | Lock upgrade to latest, plus checkpoint safety; A2: `.gitignore` additions | 2 commits (+ optional release) |
 | B | `uv_build` 0.12 → 0.13 | 1 commit |
 | C | CI tool pins: ruff / ty; C2: pin the hooks to match, widen their triggers, add `ask` rules; C3: `setup-uv` v10, pin uv, Dependabot for actions | 3 commits (C, C2, C3) |
+| H | Evaluation: pinned judge and repeats, a delegation check on the full graph, a drafting eval, a false-refusal case | 4 steps (H1–H4); runs between C and D |
 | D | Per-role effort, refusal handling, model fit | 2+ commits (D1, D2 separate) |
 | E | Multi-user deployment for one team: E0 org-profile template split, then Postgres, per-user threads, sign-in | Several commits; the largest track |
 | F | Streamlit theme designed for the app: warm paper neutrals, one indigo accent, serif headings; modes mirrored | 2–3 commits (test, config, re-pin) |
 | G | Adaptive layout: approval panel first, one tab per workflow, a pane-height control, readable prose width | 4 commits (G1–G4) |
 
-Do the tracks in order. Each one leaves the suite green and can ship on its own. E depends on A's
+Do the tracks in order (A, B, C, **H**, D, E, with F and G placed as their sections say; H runs between C and D so D can be measured). Each one leaves the suite green and can ship on its own. E depends on A's
 upgraded langgraph libraries and on D2, because a hosted user has no terminal to notice a refusal
 in.
 
@@ -520,6 +521,9 @@ offline test that builds the grader with each shipped spec and asserts the outgo
 no forced `tool_choice`. After Track A's upgrade, re-check that the line above still exists.
 
 ### D4. Validate with evals (live; costs money; ask first)
+
+Use Track H's pinned judge and `--repeat 3` for every comparison below, plus H3's drafting eval
+and H4's refusal rate, not single runs.
 
 1. Run `uv run python -m evals.run_scout` at the D1 discovery effort and compare it against a run at
    `high`. The scout's citation-accuracy and invention scorers are the bar.
@@ -1166,3 +1170,108 @@ Record the screenshots in the PR. They are the only evidence for this track.
 - **Heavy content.** A 50+ page RFP in `st.pdf` and a long draft in the Markdown view must render
   without stalling the page, at every pane height. If the PDF view is slow, rendering it only
   when selected is already how the file browser works; check that it stays that way.
+
+## Track H (runs between C and D): evaluation that can see what A and D change
+
+Added 2026-10-19. The existing eval (`evals/`) is well designed: mostly programmatic scoring, a
+positive control for every refusal case, only indefensible verdicts asserted, its scorers tested
+offline in `tests/test_evals.py`, and separate pass, fail and harness-error counts. But it covers
+**the scout prompt only**. Tracks A (deepagents prompts, the anthropic SDK), D1 (drafting and
+grader effort), D2 (refusals) and E3b (memory gating) change **drafting** behaviour, which the
+plan otherwise checks by reading one draft. Track H extends the existing harness rather than
+replacing it, and keeps its rules:
+
+- **programmatic checks first, a judge only where code can't decide**;
+- every refusal-shaped case gets a **positive twin**;
+- assert only what is indefensible;
+- the scorers get offline tests in `tests/test_evals.py`;
+- nothing in `evals/` is ever collected by `pytest tests/`, and nothing live runs in CI;
+- outputs go to `evals/out/` (A2).
+
+**Every live run costs money: estimate the run's cost and ask before each one.**
+
+### Order relative to the other tracks
+
+| Step | Must land before | Because |
+|---|---|---|
+| H1 judge pin + repeats | D1 | D1's comparison is meaningless with a moving judge and single runs |
+| H2 delegation check | D1 (ideally right after A) | It is the only check that can see the deepagents 0.7 delegation loss `CLAUDE.md` warns about |
+| H3 drafting eval | D1's drafting/grader effort change | Otherwise D1's drafting change is judged by one read-through |
+| H4 false-refusal case | D2 | D2 needs a case that actually triggers a refusal |
+
+Track A doesn't wait for H; it uses the existing `run_scout` plus 4b's baseline. Then run H2
+**retroactively on A's result**, and treat an H2 failure as an A regression.
+
+### H1. Pin the judge, and repeat runs before comparing
+
+- `run_scout.JUDGE_MODEL = GRADER_MODEL` (`run_scout.py:68`), and the judge is built through
+  `build_model`. After D1 that means **the judge's effort moves with the grader role's effort**,
+  so a before/after D1 comparison would be scored by two different judges. Give the eval its own
+  **pinned judge** (an explicit model *and* effort, recorded in each run's metadata, next to the
+  existing `judge_model`). Keep the rule that the judge differs from the scout's model.
+- Add `--repeat N` (default 1) to `run_scout` / `evaluate_scout`. Report **pass rates per check
+  over N** next to the existing three counts. Comparisons in D4 and H3 use N ≥ 3. A single run
+  stays the "read it closely" mode.
+- Offline tests of the new aggregation: repeats are counted per check, and a harness error is
+  never averaged into a pass rate. That keeps the existing "three numbers, not one" guarantee.
+
+### H2. The delegation (trajectory) check, on the full graph
+
+The README's "known limitation": the scout eval tests the prompt, not the graph. Delegation can
+only be seen on the graph. `CLAUDE.md`: since deepagents 0.7 the `task`-usage guidance is gone, and
+"no test can see any of this, and `evals/run_scout` cannot either."
+
+- New `evals/run_draft_trajectory.py`: build the **real** drafting graph (`build_agent`,
+  local profile, a temporary `GRANT_WRITER_ROOT`, a small fixture RFP and profile), stream one
+  run, and parse the stream with `activity.py`. It is the same parser both frontends use, so the
+  check reads exactly what a user would see.
+- **Programmatic checks only:** a `task` call to `section-drafter` happens for each drafted
+  section; the orchestrator itself makes **no** `write_file`/`edit_file` under
+  `/applications/*/sections/`; `compliance-checker` is called; `write_todos` is used (the Plan
+  panel depends on it). Report the counts, not just pass/fail.
+- Offline tests: feed recorded stream chunks (fixtures) through the checks. A recorded trajectory
+  that drafts inline must fail.
+- Cheapest useful form: one fixture, N = 3. It needs a live key, so it's run by hand like
+  `run_scout`.
+
+### H3. The drafting eval
+
+Build it with `/claude-api build-eval` (it interviews for inputs, grading method and measured
+cost, and wants sign-off before producing anything). Mirror the scout's case design:
+
+| Case | Shape | Checks in code | Judge |
+|---|---|---|---|
+| `genuine-section` | **Positive control.** Full profile; an RFP section the profile can answer | No `[NEEDS INPUT]` for facts the profile holds; length within the limit (from `measure_text`, never estimated) | Claims grounded in the inputs |
+| `stripped-profile` | Budget and personnel facts deleted | Each withheld fact becomes `[NEEDS INPUT: …]` and appears in `review/gaps.md`; **no invented numbers** (every number in the output traces to an input) | none needed |
+| `leaky-delegation` | The orchestrator's brief carries an unsourced budget figure | That figure does not appear in the section | Whether it was relied on, versus named and set aside (same logic as the scout's `leaky-brief`) |
+| `tight-limit` | A page or word limit the natural answer exceeds | Final length ≤ limit, measured with the same `measure_text` | none |
+
+- Start at the **section-drafter prompt level** (cheapest, readable, like the scout), then
+  re-run `genuine-section` through the full graph once H2 exists.
+- "Every number traces to an input" is the drafting equivalent of `citations_traceable`. Reuse
+  `untraceable_citations`' whitespace-insensitive matching (invariant 16's lesson: false
+  positives teach people to ignore the flag).
+- Scorer tests in `tests/test_evals.py`, including the false-positive cases (wrapped lines,
+  thousands separators, currency formatting) pinned as *not* reportable.
+- Optional, later: a LangSmith dataset mirror via `push_dataset`, as for the scout.
+
+### H4. A false-refusal case (for D2)
+
+- A realistic **biomedical or health** RFP section (for example a community health program
+  evaluation). That is the category Opus 5.5 and Sonnet 5.5's `bio` classifier can falsely
+  decline.
+- Measure the **refusal rate over N runs**, per role. After D2, check that each refusal is
+  *shown* (category included), not an empty turn. The scorer reads the same `activity.py` events
+  as H2.
+- Its positive twin is `genuine-section` from H3: a non-medical section that must never be
+  refused.
+- If the rate isn't zero, it feeds D2's separate decision on enabling the server-side fallback,
+  with numbers rather than a guess.
+
+### What H does not do
+
+- No eval in CI and no live key in the suite. That rule stays.
+- No single combined score. H keeps the three-count reporting, and each check is reported
+  separately.
+- No judge where code can decide. The ratio of code checks to judged checks is the design (see
+  `evals/README.md`, "Why the scoring is mostly not a model").
