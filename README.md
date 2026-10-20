@@ -2,7 +2,11 @@
 
 [![CI](https://github.com/darylalim/grant-writer-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/grant-writer-agent/actions/workflows/ci.yml)
 
-A grant writing agent built on [Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview).
+An AI grant-writing agent built on LangChain
+[Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview). It finds
+funding opportunities, fit-scores them with quoted evidence, and drafts proposals
+with human approval of final files. Where a fact is unknown, it marks the gap for
+you to fill instead of inventing data.
 
 - **`discover`** searches grants.gov and the web for funding opportunities and
   scores how well each one fits your organization.
@@ -179,6 +183,16 @@ judges the drafts without seeing the drafter's reasoning.
 | `skills/*/SKILL.md` | Permanent | Section drafting guides, loaded on demand |
 | `opportunities/<scan-id>/` | One scan | Candidate texts and scores |
 | `applications/<app-id>/` | One application | RFP, requirements, research, drafts, reviews |
+| `.grant_writer/checkpoints.sqlite` | Until deleted | Conversation state, plans, and writes awaiting approval |
+
+Back up the checkpoint file before upgrading dependencies. It is the one piece
+of state a library upgrade can make unreadable. Close the CLI and the UI first,
+and use SQLite's own backup rather than `cp`, which can miss rows still in the
+write-ahead log:
+
+```bash
+sqlite3 .grant_writer/checkpoints.sqlite ".backup .grant_writer/checkpoints.pre-upgrade.sqlite"
+```
 
 ### Backends
 

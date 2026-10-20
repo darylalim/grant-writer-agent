@@ -1,5 +1,10 @@
 # Secrets
 .env
+# Variants a deployment tends to create (.env.local, .env.production) hold the
+# same keys. The PreToolUse hooks already treat these names as secret, and the
+# two should agree. The example file holds only names, and is tracked.
+.env.*
+!.env.example
 # `.streamlit/` is tracked for config.toml (the theme). secrets.toml is the
 # conventional home for API keys in a Streamlit app, sits in that same now-
 # tracked directory, and `git add .streamlit` would take it along.
@@ -16,6 +21,10 @@ opportunities/
 
 # Persisted checkpoint (conversation/todo state) written by the CLI.
 .grant_writer/
+
+# Eval and performance-run output. It carries raw model output, and the
+# graph-level runs write whole drafts built from the fixtures.
+evals/out/
 
 # Per-developer Claude Code context. `.claude/settings.json` is tracked on
 # purpose -- its hooks and ty baseline are project rules everyone gets. These
@@ -36,7 +45,6 @@ dist/
 # Tooling
 .ruff_cache/
 .pytest_cache/
-.mypy_cache/
 
 # OS
 .DS_Store

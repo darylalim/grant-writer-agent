@@ -51,15 +51,17 @@ wheel and sdist attached, so **bumping the version is the release**.
 When working with Python, invoke the relevant `/astral:<skill>` — `/astral:uv`, `/astral:ruff`,
 `/astral:ty` — to ensure best practices are followed rather than guessed at. uv is the only
 supported package manager: never `pip`, never a hand-rolled venv. There is deliberately no
-`[tool.ty]` config; `uvx ty check src/ tests/` reports two diagnostics, both upstream and neither
-worth suppressing — leave them. That tolerance is encoded as a threshold in two places, the ty
-hook in `.claude/settings.json` and the type-check step in `.github/workflows/ci.yml`; lower both
-when upstream fixes theirs. **The count has held at two across the deepagents 0.7 upgrade while
-both causes changed underneath it**, so read what they currently are rather than trusting the
-number: `langchain` types `TodoListMiddleware` with two type parameters where `deepagents`'
-`AgentMiddleware` alias takes three, and `langgraph`'s `BaseStore.put` asks for a `dict` where
-`deepagents` hands it a `TypedDict`. A steady baseline is not evidence of a steady cause, and a
-new diagnostic of ours arriving as an old upstream one departs would net to zero.
+`[tool.ty]` config; `uvx ty check src/ tests/` reports one diagnostic, upstream and not worth
+suppressing — leave it. That tolerance is encoded as a threshold in two places, the ty hook in
+`.claude/settings.json` and the type-check step in `.github/workflows/ci.yml`; lower both when
+upstream fixes theirs. The one left: `langchain` types `TodoListMiddleware` with two type
+parameters where `deepagents`' `AgentMiddleware` alias takes three. **Read what it currently is
+rather than trusting the number.** The count held at two across the deepagents 0.7 upgrade
+while both causes then changed underneath it, and it dropped to one in the October 2026 lock
+upgrade only because langgraph 1.2.16's `BaseStore.put` started accepting a `Mapping` — found by
+running both locks' ty side by side, not by the count. A steady baseline is not evidence of a
+steady cause, and a new diagnostic of ours arriving as an old upstream one departs would net to
+zero.
 
 Common flags (`--profile`, `--approve`, `--no-search`, `--recursion-limit`) live on a shared
 parent parser and must be passed **after** the subcommand. `--app-id` is also the LangGraph
@@ -204,6 +206,10 @@ runs, and still produces plausible output.
 1. **Permission rules are first-match-wins, and no match means allow.** In
    `backends.py::build_permissions`, specific allows must precede the catch-all
    `paths=["/**"], mode="deny"`. Reordering the list silently opens or closes the whole tree.
+   Since deepagents 0.7.28 a rule is checked against a symlink's target as well as the path
+   asked for, and a deny on either refuses the call. That only tightens the rules: a symlink
+   is not a way round them. The local backend also refuses outright any path that resolves
+   outside its root, so a symlinked `skills/` stops a run before its first model call.
 2. **Anything writing to the real filesystem bypasses `FilesystemPermission` entirely** — the
    permission rules only cover writes that go through the backend. Two mechanisms do not, and each
    enforces the boundary its own way: `tools.py::_resolve_output_path` for the virtual paths
@@ -552,13 +558,16 @@ per-`AppTest`: without it a case that patches `build_agent` is handed whichever 
 case cached under the same `(profile, approve, search)` key, and the suite passes or fails on
 test order.
 
-**`AppTest` does not model `st.form`, and this is the one place its green tick means less
-than it looks like.** `ElementTree.get_widget_states` walks every widget and serialises it
-regardless of `form_id`, so `set_value(...).run()` publishes a form widget immediately —
-which a browser never does. An assertion about a form widget's effect on the rest of the
-page is therefore only meaningful if the case also clicks the submit button; otherwise pin
-structure (`widget.form_id`) rather than behaviour, as invariant 10's test does. Four
-file-browser cases once passed against a browser where the pane stayed permanently empty.
+**Since Streamlit 1.66 `AppTest` models `st.form`, so set a form widget and click its submit
+in the same run.** `get_widget_states` now holds an uncommitted form value until that form's
+submit button is clicked, as a browser does, so `set_value("NSF").run()` followed by a
+separate `click().run()` throws the value away and submits the default. Write
+`_text_input(app, "Funder").set_value("NSF")` with no `.run()`, then
+`_button(app, "Draft proposal").click().run()`. Two cases written the old way failed on the
+upgrade, which is the direction worth having. Before 1.66 it was the reverse: form widgets
+were published immediately regardless of `form_id`, and four file-browser cases passed
+against a browser where the pane stayed permanently empty. That is why invariant 10's test
+pins structure (`widget.form_id`) and not behaviour, which is still the more direct check.
 **Select widgets by label, never by index.** `_button(app, "Draft proposal")` exists because
 `app.button[0]` addresses whichever button the script emits first — a fact about page layout,
 not about the button a case means. Adding the discovery form above the drafting one silently

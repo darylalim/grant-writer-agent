@@ -1331,12 +1331,13 @@ def test_neither_id_input_is_inside_a_form():
     submitted this session -- reading an earlier application meant starting a
     fresh billed run on it.
 
-    AppTest cannot catch that by behaviour. `ElementTree.get_widget_states`
-    walks every widget and serialises it regardless of `form_id`, so
-    `set_value(...).run()` publishes a form widget immediately and the cases
-    below pass either way. They did, against a browser where the pane stayed
-    empty. So pin the structural fact the harness does model -- `form_id` is on
-    the proto -- rather than the behaviour it fakes.
+    Before Streamlit 1.66, AppTest could not catch that by behaviour:
+    `ElementTree.get_widget_states` serialised every widget regardless of
+    `form_id`, so `set_value(...).run()` published a form widget immediately
+    and the cases below passed either way. They did, against a browser where
+    the pane stayed empty. 1.66 holds a form widget's value until its submit
+    button is clicked, as a browser does, but the structural fact -- `form_id`
+    is on the proto -- is still the cheaper and more direct thing to pin.
 
     Pins invariant 10.
     """
@@ -2610,7 +2611,7 @@ def test_the_ui_records_the_same_facets_the_cli_does(monkeypatch):
     app = _app_test(monkeypatch)
     app.run()
     app.text_input(key="app_id_input").set_value("zz-pytest-facets").run()
-    _text_input(app, "Funder").set_value("NSF").run()
+    _text_input(app, "Funder").set_value("NSF")
     _button(app, "Draft proposal").click().run()
 
     assert not app.exception
@@ -2676,7 +2677,7 @@ def test_a_recovered_draft_is_not_labelled_with_the_last_scans_facets(monkeypatc
     # The draft has to run FIRST and on the same id, or the id guard above the
     # clear fires anyway and the case passes without exercising anything.
     app.text_input(key="app_id_input").set_value("zz-pytest-leak").run()
-    _text_input(app, "Funder").set_value("NSF").run()
+    _text_input(app, "Funder").set_value("NSF")
     _button(app, "Draft proposal").click().run()
     assert app.session_state["active_details"] == {"funder": "NSF", "rubric": ""}
 

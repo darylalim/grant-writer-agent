@@ -120,15 +120,15 @@ jobs:
       - name: Format
         run: uvx ruff@0.16.4 format --check src/ tests/ evals/ streamlit_app.py
 
-      # A ratchet, not a gate. ty reports two diagnostics today, both upstream
-      # and neither worth suppressing (CLAUDE.md says which). Failing on any
+      # A ratchet, not a gate. ty reports one diagnostic today, upstream and
+      # not worth suppressing (CLAUDE.md says which). Failing on any
       # would keep CI permanently red and teach everyone to ignore this job;
       # skipping ty would let a real diagnostic of ours land unnoticed. The same
       # baseline is enforced at edit time by the ty hook in .claude/settings.json
       # -- keep the two in step, and re-check both when bumping the pin below.
       - name: Type check
         env:
-          TY_BASELINE: 2
+          TY_BASELINE: 1
         run: |
           uvx ty@0.0.74 check src/ tests/ evals/ streamlit_app.py > ty.log 2>&1 || true
           cat ty.log
