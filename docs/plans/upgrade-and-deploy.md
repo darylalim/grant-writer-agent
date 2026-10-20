@@ -126,7 +126,8 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
   - A4: `run_scout` 26/26 on the new lock.
   - 4b, one fixture run each. Draft: before 1641.5 s, 151 calls, $11.22; after 1300.2 s, 155 calls, $10.44 (LangSmith `total_cost`). Discover: before 42.6 s, $0.23 (2 scouts); after 93.8 s, $0.35 (3 scouts), so per candidate it is flat at about $0.115. Opus cache-hit rate about 92.5% on both. No `max_tokens` stop on either. **Neither draft reached `final/`**: before ended by assembling into `sections/00-assembled-draft.md`, and after hit the 150-step limit before assembly.
   - 4c: traces carry `run_name`, `tags` and `metadata` as designed, and can be found by `app_id` and tag through both the SDK and `langsmith trace list`. OTel spans are inactive: no tracer provider is registered.
-- [ ] A5–A6: docs updated; A committed, no release (commit: `       `)
+- [x] A5–A6: docs updated; A committed, no release (commit: `c06e8b1`)
+  - The docs landed in the lock commit itself: `CLAUDE.md`, the README's checkpoints row and its backup command.
 - [x] A2: `.gitignore`, description, topics, README intro (commit: `160f25f`)
   - `gh repo edit` run 2026-10-19 with the user's confirmation. The description is the one in `pyproject.toml`. Topics are exactly the 17 above: the repo already had 12, and four the plan never listed (`deepagents`, `fundraising`, `grants-gov`, `proposal-writing`) were removed at the user's choice, since keeping them would have gone over GitHub's 20-topic limit.
 - [ ] B: `uv_build` 0.13; archive contents checked (commit: `       `)
@@ -136,16 +137,17 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
   - Security review of `main...track-h` (2026-10-19): no findings.
 - [ ] C3: setup-uv v10; uv pinned; `uv audit` in CI; Dependabot (commit: `       `)
 - [x] H1: pinned judge, `--repeat`, eval labels (commit: `84215b3`)
-- [ ] H2: delegation check; run on A's result (commit: `c2d9ce4` code and offline tests)
+- [x] H2: delegation check; run on A's result (commit: `c2d9ce4` code and offline tests)
   - Live on A's result, `--repeat 3`: **8/12**. `compliance-checked` 3/3, `plans` 3/3, `delegates-sections` 2/3 (one run had 6 section files for 5 drafter calls), `no-inline-drafting` **0/3**. All three runs hit the 150-step limit, about 1190 s each, and none reached `final/`.
   - This is **not an A regression**. The before run on the old lock shows the same pattern in LangSmith: about 38 orchestrator `edit_file` calls on `sections/`. Most flagged writes are `edit_file` revisions after the drafter's pass (34–50 per run, against 2–4 `write_file`), which `ORCHESTRATOR_PROMPT` step 5 permits ("Do all revision and tightening in `sections/`"). As written, the check counts revising as drafting.
   - **Decided by the user (2026-10-19):** H2 has passed as the *regression* gate, because delegation behaves the same on both locks. The 0.2.2 release is not blocked. The quality problem moves to H2b and D0 below.
-- [ ] **Release 0.2.2 (end of Tier 1):** its own PR, only `version` bumped in `pyproject.toml`, merged
+- [x] **Release 0.2.2 (end of Tier 1):** its own PR, only `version` bumped in `pyproject.toml`, merged
   after A, A2, C, C2, H1 and H2 are all on `main` and H2 passed on A's result. Release notes: the
   dependency changes; the three cleared aiohttp advisories (GHSA-494j-54xm-rwp3,
   GHSA-5wr8-gcqf-gqf3, GHSA-2g87-pp6c-29x5); and the caveat that the wheel doesn't *enforce*
   the fix, because aiohttp is indirect and has no minimum version here, so only `uv.lock` pins
-  it. Then check the CI run's "Decide whether to release" step tagged `v0.2.2` (commit: `       `)
+  it. Then check the CI run's "Decide whether to release" step tagged `v0.2.2` (commit: `8691fe2`, merged as `626ea77`)
+  - Tagged `v0.2.2` with the wheel and sdist attached: https://github.com/darylalim/grant-writer-agent/releases/tag/v0.2.2. The release notes were edited by hand to add the required items, including the aiohttp caveat.
 - [ ] H2b: narrow `no-inline-drafting` to sections the orchestrator *creates* (`write_file`), and report its `edit_file` revisions as a count without gating on them. This is a redefinition made after seeing the results, so the commit says so. Rescore the three `trajectory-after` runs from their LangSmith traces, which needs no new billed run. Expected **2/3, not 3/3**: run 2's `00-project-frame.md` was a genuine inline write (commit: `       `)
 - [ ] D0: step budget. Every draft, on both locks, spends roughly 35–50 orchestrator edits revising `sections/` and hits the 150-step limit before `final/`. Fix it in the prompt rather than by raising the limit: after compliance, hand each section's revision back to `section-drafter` with the findings, and edit directly only for one-line fixes. Measure with H2 (`--repeat 3`); success means `final/` is reached. **Billed: ask first** (commit: `       `)
 - [ ] Root fix: `tools._resolve_output_path` reads `config.PROJECT_ROOT` (`tools.py:86`), not `Settings.root`, so a graph built on another root archives into this repo's `applications/`. It stays inside a content directory, so it is not a boundary escape. Build the two disk-writing tools from a factory that takes `settings.root`, following `build_search_tool`. Test where an extracted PDF lands for a graph on a temp root, then drop the `PROJECT_ROOT` reassignment in `run_draft_trajectory` (commit: `       `)
