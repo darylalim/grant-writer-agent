@@ -34,9 +34,9 @@ from grant_writer.config import (
 from grant_writer.prompts import DISCOVERY_PROMPT, ORCHESTRATOR_PROMPT
 from grant_writer.subagents import build_discovery_subagents, build_subagents
 from grant_writer.tools import (
+    build_extract_pdf_tool,
+    build_fetch_opportunity_tool,
     build_search_tool,
-    extract_pdf_text,
-    fetch_grants_gov_opportunity,
     measure_text,
     search_grants_gov,
 )
@@ -100,7 +100,7 @@ def build_agent(settings: Settings | None = None):
     """
     settings = settings or Settings()
 
-    tools = [extract_pdf_text, measure_text]
+    tools = [build_extract_pdf_tool(settings.root), measure_text]
     if (search := build_search_tool(enabled=settings.enable_search)) is not None:
         tools.append(search)
 
@@ -175,7 +175,7 @@ def build_discovery_agent(settings: Settings | None = None):
     """
     settings = settings or Settings()
 
-    tools = [search_grants_gov, fetch_grants_gov_opportunity]
+    tools = [search_grants_gov, build_fetch_opportunity_tool(settings.root)]
     # Web search covers what grants.gov does not index -- private foundations,
     # state agencies, non-US funders -- so `--no-search` narrows a scan to US
     # federal rather than disabling it.

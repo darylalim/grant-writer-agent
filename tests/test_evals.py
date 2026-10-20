@@ -2411,10 +2411,10 @@ def test_writes_outside_sections_are_not_inline_drafting():
     assert seen.inline_section_writes == []
 
 
-def test_run_once_redirects_the_real_disk_root_and_puts_it_back(tmp_path, monkeypatch):
-    """The real-disk tools resolve against `config.PROJECT_ROOT`, not the root
-    the graph was built on, so the run must point it at its own root -- and a
-    second repeat must find it restored, or it inherits the first one's.
+def test_run_once_builds_its_graph_on_the_run_root(tmp_path, monkeypatch):
+    """The run's root reaches the graph through `Settings`, and nothing global
+    is touched: the real-disk tools take their root from `Settings.root`, so the
+    `PROJECT_ROOT` swap this used to need is gone.
     """
     from grant_writer import config
 
@@ -2430,12 +2430,19 @@ def test_run_once_redirects_the_real_disk_root_and_puts_it_back(tmp_path, monkey
             (sections / "design.md").write_text("x")
             return iter(DELEGATING)
 
-    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: _Recorded())
+    built_on = []
+
+    def _build(settings):
+        built_on.append(settings.root)
+        return _Recorded()
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", _build)
     record = run_draft_trajectory.run_once(
         tmp_path / "run", repeat=0, recursion_limit=5
     )
 
-    assert seen_roots == [tmp_path / "run"]
+    assert built_on == [tmp_path / "run"]
+    assert seen_roots == [original]
     assert original == config.PROJECT_ROOT
     assert "error" not in record
     assert all(score["passed"] for score in record["scores"])

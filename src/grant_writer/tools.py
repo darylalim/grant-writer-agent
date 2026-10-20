@@ -18,9 +18,13 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from langchain.tools import tool
+
+if TYPE_CHECKING:
+    from langchain_core.tools import BaseTool
 
 # Rough conversions used for page-limit estimates. Funders specify limits in
 # pages but drafts exist as plain text, so these are the bridge -- always
@@ -37,6 +41,14 @@ WORDS_PER_PAGE_DOUBLE = 250
 # `fetch_grants_gov_opportunity` belongs to discovery and has no reason to touch
 # an application at all -- least of all `final/`, where a write would bypass the
 # approval interrupt entirely. See `_resolve_output_path`.
+#
+# The *root* those directories sit under is the caller's too, which is why the
+# two writers are built by `build_extract_pdf_tool` / `build_fetch_opportunity_tool`
+# from `Settings.root` rather than defined at module level. A module-level tool
+# can only resolve against `config.PROJECT_ROOT`, so a graph built on any other
+# root archived its solicitation into this checkout's `applications/` and then
+# read it back from its own, finding nothing. Inside a content directory, so no
+# boundary escape -- but the wrong tree, silently.
 _DRAFTING_WRITE_DIRS: tuple[str, ...] = ("applications", "memories")
 _DISCOVERY_WRITE_DIRS: tuple[str, ...] = ("opportunities",)
 
@@ -59,8 +71,11 @@ def _parse_page_spec(spec: str, n_pages: int) -> list[int]:
     return [p for p in wanted if 0 <= p < n_pages]
 
 
-def _resolve_output_path(out_path: str, allowed_dirs: tuple[str, ...]) -> Path:
-    """Map a virtual write path onto disk, refusing anything outside `allowed_dirs`.
+def _resolve_output_path(
+    out_path: str, allowed_dirs: tuple[str, ...], root: Path
+) -> Path:
+    """Map a virtual write path onto disk under `root`, refusing anything
+    outside `allowed_dirs`.
 
     The tools below write to the real filesystem rather than through the
     backend, so they do not inherit the FilesystemPermission rules and have to
@@ -82,10 +97,12 @@ def _resolve_output_path(out_path: str, allowed_dirs: tuple[str, ...]) -> Path:
     states its own set. `CONTENT_DIRS` remains the union `build_permissions`
     needs -- the permission rules really do cover all three -- but no writer
     should inherit the union just because it exists.
-    """
-    from grant_writer.config import PROJECT_ROOT
 
-    root = PROJECT_ROOT.resolve()
+    `root` is required for the same reason: it is the graph's `Settings.root`,
+    and a default would be `PROJECT_ROOT`, which is right only for a graph that
+    happens to be built on this checkout.
+    """
+    root = root.resolve()
     allowed = tuple(root / name for name in allowed_dirs)
 
     # Resolve BEFORE checking. Validating the raw string first lets
@@ -104,29 +121,41 @@ def _resolve_output_path(out_path: str, allowed_dirs: tuple[str, ...]) -> Path:
     return resolved
 
 
-@tool
-def extract_pdf_text(
-    pdf_path: str, pages: str = "", max_chars: int = 20000, out_path: str = ""
+def build_extract_pdf_tool(root: Path) -> BaseTool:
+    """Return `extract_pdf_text`, writing under `root` (the graph's `Settings.root`)."""
+
+    @tool
+    def extract_pdf_text(
+        pdf_path: str, pages: str = "", max_chars: int = 20000, out_path: str = ""
+    ) -> str:
+        """Extract text from a PDF solicitation, RFP, or funder guideline document.
+
+        Args:
+            pdf_path: Path to the PDF on the local machine.
+            pages: Optional 1-based page selection such as "1-4,9". Empty means
+                all pages. Use this to page through a long RFP when reading it.
+            max_chars: Truncation limit when returning text to you. Ignored
+                when `out_path` is set.
+            out_path: If set (e.g. "/applications/nsf-26/rfp.md"), the COMPLETE
+                extracted text is written straight to that file and you get back
+                only a short receipt. Always use this to archive a solicitation.
+                Never read a long PDF and copy it into `write_file` yourself --
+                the text gets silently abridged in transit and downstream
+                compliance checks then run against an incomplete document.
+
+        Returns:
+            A write receipt when `out_path` is set, otherwise the extracted text
+            with an explicit notice if it was truncated.
+        """
+        return _extract_pdf_text(root, pdf_path, pages, max_chars, out_path)
+
+    return extract_pdf_text
+
+
+def _extract_pdf_text(
+    root: Path, pdf_path: str, pages: str, max_chars: int, out_path: str
 ) -> str:
-    """Extract text from a PDF solicitation, RFP, or funder guideline document.
-
-    Args:
-        pdf_path: Path to the PDF on the local machine.
-        pages: Optional 1-based page selection such as "1-4,9". Empty means all
-            pages. Use this to page through a long RFP when reading it.
-        max_chars: Truncation limit when returning text to you. Ignored when
-            `out_path` is set.
-        out_path: If set (e.g. "/applications/nsf-26/rfp.md"), the COMPLETE
-            extracted text is written straight to that file and you get back
-            only a short receipt. Always use this to archive a solicitation.
-            Never read a long PDF and copy it into `write_file` yourself -- the
-            text gets silently abridged in transit and downstream compliance
-            checks then run against an incomplete document.
-
-    Returns:
-        A write receipt when `out_path` is set, otherwise the extracted text
-        with an explicit notice if it was truncated.
-    """
+    """The body of `extract_pdf_text`; its docstring is the model's, above."""
     path = Path(pdf_path).expanduser()
     if not path.is_file():
         return f"Error: no such file: {path}"
@@ -161,7 +190,7 @@ def extract_pdf_text(
 
     if out_path:
         try:
-            target = _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS)
+            target = _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS, root)
         except ValueError as exc:
             return f"Error: {exc}"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -444,31 +473,45 @@ def search_grants_gov(
     return _format_search_hits(data)
 
 
-@tool
-def fetch_grants_gov_opportunity(
-    opportunity_id: str, max_chars: int = 12000, out_path: str = ""
+def build_fetch_opportunity_tool(root: Path) -> BaseTool:
+    """Return `fetch_grants_gov_opportunity`, writing under `root`
+    (the graph's `Settings.root`)."""
+
+    @tool
+    def fetch_grants_gov_opportunity(
+        opportunity_id: str, max_chars: int = 12000, out_path: str = ""
+    ) -> str:
+        """Read one grants.gov opportunity in full: eligibility, award size,
+        deadline, and synopsis. No API key needed.
+
+        Args:
+            opportunity_id: The numeric `id` from a `search_grants_gov` result
+                -- NOT the public opportunity number like "PD-24-1340". They are
+                different fields and only the numeric one works here.
+            max_chars: Truncation limit when the text comes back to you.
+                Ignored when `out_path` is set.
+            out_path: If set (e.g.
+                "/opportunities/rural-2026/candidates/353201.md"), the COMPLETE
+                text is written straight to that file and you get back a short
+                receipt. Use this for anything you intend to score. A citation
+                has to quote the real document, and text relayed through your
+                own context gets silently abridged -- the same hazard
+                `extract_pdf_text` warns about for a solicitation PDF.
+
+        Returns:
+            A write receipt when `out_path` is set, otherwise the formatted
+            text with an explicit notice if it was truncated. Starts with
+            "Error: " on failure.
+        """
+        return _fetch_grants_gov_opportunity(root, opportunity_id, max_chars, out_path)
+
+    return fetch_grants_gov_opportunity
+
+
+def _fetch_grants_gov_opportunity(
+    root: Path, opportunity_id: str, max_chars: int, out_path: str
 ) -> str:
-    """Read one grants.gov opportunity in full: eligibility, award size,
-    deadline, and synopsis. No API key needed.
-
-    Args:
-        opportunity_id: The numeric `id` from a `search_grants_gov` result --
-            NOT the public opportunity number like "PD-24-1340". They are
-            different fields and only the numeric one works here.
-        max_chars: Truncation limit when the text comes back to you. Ignored
-            when `out_path` is set.
-        out_path: If set (e.g. "/opportunities/rural-2026/candidates/353201.md"),
-            the COMPLETE text is written straight to that file and you get back
-            a short receipt. Use this for anything you intend to score. A
-            citation has to quote the real document, and text relayed through
-            your own context gets silently abridged -- the same hazard
-            `extract_pdf_text` warns about for a solicitation PDF.
-
-    Returns:
-        A write receipt when `out_path` is set, otherwise the formatted text
-        with an explicit notice if it was truncated. Starts with "Error: " on
-        failure.
-    """
+    """The body of `fetch_grants_gov_opportunity`; its docstring is above."""
     identifier = str(opportunity_id).strip()
     # `isdecimal`, not `isdigit`: the latter admits superscripts and other
     # non-decimal Unicode digits ("²".isdigit() is True) that `int()` then
@@ -490,7 +533,7 @@ def fetch_grants_gov_opportunity(
 
     if out_path:
         try:
-            target = _resolve_output_path(out_path, _DISCOVERY_WRITE_DIRS)
+            target = _resolve_output_path(out_path, _DISCOVERY_WRITE_DIRS, root)
         except ValueError as exc:
             return f"Error: {exc}"
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -57,7 +57,8 @@ from grant_writer.tools import (
     _format_search_hits,
     _parse_page_spec,
     _resolve_output_path,
-    extract_pdf_text,
+    build_extract_pdf_tool,
+    build_fetch_opportunity_tool,
     measure_text,
 )
 
@@ -511,10 +512,62 @@ def test_measure_text_counts_accurately():
     assert "est_pages_single_spaced" in out
 
 
-def test_extract_pdf_text_reports_missing_file():
-    assert extract_pdf_text.invoke({"pdf_path": "/nope/missing.pdf"}).startswith(
+def test_extract_pdf_text_reports_missing_file(tmp_path):
+    tool = build_extract_pdf_tool(tmp_path)
+    assert tool.invoke({"pdf_path": "/nope/missing.pdf"}).startswith(
         "Error: no such file"
     )
+
+
+_RFP = Path(PROJECT_ROOT, "evals", "fixtures", "scmp-2026-nofo-excerpt.pdf")
+
+
+def _graph_tool(graph, name):
+    return graph.nodes["tools"].bound.tools_by_name[name]
+
+
+def test_a_graph_on_another_root_archives_its_solicitation_there(tmp_path):
+    """The real-disk writers resolve against the graph's root, not this checkout's.
+
+    Before the tools were built from `Settings.root`, `_resolve_output_path`
+    read `config.PROJECT_ROOT`, so a graph on any other root -- the trajectory
+    eval's, a test's, a second deployment's -- archived its solicitation into
+    this repository's `applications/` and then looked for it under its own.
+    Inside a content directory, so nothing refused it; the wrong tree, silently.
+    """
+    app_id = "root-fix-probe"
+    repo_copy = Path(PROJECT_ROOT, "applications", app_id)
+    assert not repo_copy.exists()
+
+    tool = _graph_tool(build_agent(Settings(root=tmp_path)), "extract_pdf_text")
+    receipt = tool.invoke(
+        {"pdf_path": str(_RFP), "out_path": f"/applications/{app_id}/rfp.md"}
+    )
+
+    assert receipt.startswith("Wrote ")
+    assert (tmp_path / "applications" / app_id / "rfp.md").is_file()
+    assert not repo_copy.exists()
+
+
+def test_a_discovery_graph_on_another_root_archives_candidates_there(
+    tmp_path, monkeypatch
+):
+    """The same, for the discovery graph's writer."""
+    monkeypatch.setattr(
+        "grant_writer.tools._grants_gov_post", lambda *_a, **_k: {"synopsis": {}}
+    )
+    scan = "root-fix-probe"
+    repo_copy = Path(PROJECT_ROOT, "opportunities", scan)
+    assert not repo_copy.exists()
+
+    graph = build_discovery_agent(Settings(root=tmp_path))
+    tool = _graph_tool(graph, "fetch_grants_gov_opportunity")
+    out_path = f"/opportunities/{scan}/candidates/1.md"
+    receipt = tool.invoke({"opportunity_id": "1", "out_path": out_path})
+
+    assert receipt.startswith("Wrote ")
+    assert (tmp_path / "opportunities" / scan / "candidates" / "1.md").is_file()
+    assert not repo_copy.exists()
 
 
 @pytest.mark.parametrize(
@@ -527,8 +580,9 @@ def test_extract_pdf_text_reports_missing_file():
         ("opportunities/rural-2026/scored/353201.md", _DISCOVERY_WRITE_DIRS),
     ],
 )
-def test_output_paths_inside_a_tools_own_dirs_are_allowed(out_path, allowed):
-    assert _resolve_output_path(out_path, allowed).is_relative_to(PROJECT_ROOT)
+def test_output_paths_inside_a_tools_own_dirs_are_allowed(out_path, allowed, tmp_path):
+    resolved = _resolve_output_path(out_path, allowed, tmp_path)
+    assert resolved.is_relative_to(tmp_path.resolve())
 
 
 @pytest.mark.parametrize(
@@ -554,7 +608,7 @@ def test_the_discovery_tool_cannot_write_into_an_application(out_path):
     A tool gets its own graph's directories, not the union of everyone's.
     """
     with pytest.raises(ValueError, match=re.escape("refusing to write outside")):
-        _resolve_output_path(out_path, _DISCOVERY_WRITE_DIRS)
+        _resolve_output_path(out_path, _DISCOVERY_WRITE_DIRS, PROJECT_ROOT)
 
 
 def test_the_drafting_tool_cannot_write_into_a_scan():
@@ -565,7 +619,9 @@ def test_the_drafting_tool_cannot_write_into_a_scan():
     the discovery graph does not carry into the tree that graph owns.
     """
     with pytest.raises(ValueError, match=re.escape("refusing to write outside")):
-        _resolve_output_path("/opportunities/s/candidates/x.md", _DRAFTING_WRITE_DIRS)
+        _resolve_output_path(
+            "/opportunities/s/candidates/x.md", _DRAFTING_WRITE_DIRS, PROJECT_ROOT
+        )
 
 
 @pytest.mark.parametrize(
@@ -604,7 +660,7 @@ def test_output_paths_outside_content_dirs_are_refused(out_path):
         ValueError,
         match=re.escape("refusing to write outside /applications/ or /memories/"),
     ):
-        _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS)
+        _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS, PROJECT_ROOT)
 
 
 def test_content_dirs_agrees_with_the_settings_paths():
@@ -1065,9 +1121,8 @@ def test_a_non_decimal_opportunity_id_is_refused_not_raised(bad_id):
     conversion raised -- handing the model a framework-level traceback in place
     of the message this branch exists to give it.
     """
-    from grant_writer.tools import fetch_grants_gov_opportunity
-
-    result = fetch_grants_gov_opportunity.invoke({"opportunity_id": bad_id})
+    tool = build_fetch_opportunity_tool(PROJECT_ROOT)
+    result = tool.invoke({"opportunity_id": bad_id})
     assert result.startswith("Error: opportunity_id must be the numeric id")
 
 

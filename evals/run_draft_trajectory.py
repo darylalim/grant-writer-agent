@@ -195,21 +195,14 @@ def _prepare_root(root: Path) -> None:
 def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]:
     """One full drafting run on `root`. Returns a JSON-serialisable record.
 
-    `config.PROJECT_ROOT` is pointed at `root` for the run, and that is not
-    optional. The tools that write to real disk (`extract_pdf_text` above all)
-    resolve their output against it rather than against `Settings.root`, so a
-    graph built on another root would archive the solicitation into this
-    repository's `applications/` and then fail to find it. Restored afterwards
-    so a second repeat starts clean.
+    The graph is built on `root`, and that alone keeps the run inside it: the
+    real-disk tools take their root from `Settings.root`.
     """
-    from grant_writer import config
     from grant_writer.agent import build_agent
     from grant_writer.config import Settings
     from grant_writer.prompts import draft_request
 
     _prepare_root(root)
-    previous_root = config.PROJECT_ROOT
-    config.PROJECT_ROOT = root
 
     chunks: list[dict[str, Any]] = []
     started = time.monotonic()
@@ -238,8 +231,6 @@ def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]
         stopped = f"recursion limit ({recursion_limit}) reached"
     except Exception as exc:  # noqa: BLE001 - a broken run is not a verdict
         error = f"{type(exc).__name__}: {exc}"
-    finally:
-        config.PROJECT_ROOT = previous_root
 
     sections_dir = root / "applications" / APP_ID / "sections"
     sections = (
@@ -321,8 +312,8 @@ def main() -> int:
         for n in range(args.repeat)
     ]
     if not existed and repo_app.exists():
-        # The PROJECT_ROOT redirect above failed: a real-disk tool wrote into
-        # this repository instead of the run's root. Say so loudly.
+        # A real-disk tool wrote into this repository instead of the run's
+        # root -- the bug building the tools from `Settings.root` fixed, back.
         print(f"WARNING: a run wrote into {repo_app}", file=sys.stderr)
 
     checked, failed, broken = _render(records)
