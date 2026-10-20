@@ -1086,3 +1086,57 @@ def test_subagents_get_an_explicit_output_ceiling():
     for sub in build_subagents(Settings()):
         max_tokens = getattr(sub["model"], "max_tokens", None)
         assert max_tokens == MAX_OUTPUT_TOKENS, sub["name"]
+
+
+# ---- the system prompt as the API receives it ---------------------------------
+
+
+@pytest.mark.parametrize("graph", ["draft", "discover"])
+def test_no_system_block_is_whitespace_only(graph, monkeypatch):
+    """The API refuses a system text block that holds only whitespace.
+
+    `TodoListMiddleware(system_prompt="")` produced exactly that -- it appends
+    `"\\n\\n" + prompt` as a block of its own -- and every draft and scan then
+    died on its first model call with a 400. Nothing offline sent a real
+    request, so the suite stayed green while both graphs were unusable. Asserted
+    on the system message a model is actually handed, for both graphs.
+    """
+    from langchain.agents.middleware.todo import WRITE_TODOS_SYSTEM_PROMPT
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from grant_writer import agent as agent_module
+
+    seen: list = []
+
+    class _Recording(GenericFakeChatModel):
+        def bind_tools(self, tools, **_kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **_kwargs):
+            seen.append(messages)
+            return ChatResult(generations=[ChatGeneration(message=AIMessage("done"))])
+
+    def _fake(*_args, **_kwargs):
+        return _Recording(messages=iter([]))
+
+    monkeypatch.setattr(agent_module, "build_model", _fake)
+    build = build_agent if graph == "draft" else build_discovery_agent
+    build(Settings(enable_search=False)).invoke(
+        {"messages": [{"role": "user", "content": "hi"}]},
+        config={"configurable": {"thread_id": "t"}},
+    )
+
+    system = seen[0][0]
+    assert system.type == "system"
+    blocks = system.content if isinstance(system.content, list) else [system.content]
+    for block in blocks:
+        text = block if isinstance(block, str) else block.get("text", "x")
+        assert text.strip(), f"whitespace-only system block: {text!r}"
+    # The plain middleware leaves langchain's prose out, as the blank prompt meant to.
+    joined = " ".join(b if isinstance(b, str) else b.get("text", "") for b in blocks)
+    assert WRITE_TODOS_SYSTEM_PROMPT.strip()[:60] not in joined
+    # ...and the tool itself is still there.
+    tools = build(Settings(enable_search=False)).nodes["tools"].bound.tools_by_name
+    assert "write_todos" in tools

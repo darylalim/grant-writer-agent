@@ -58,7 +58,8 @@ supported package manager: never `pip`, never a hand-rolled venv. There is delib
 suppressing — leave it. That tolerance is encoded as a threshold in two places, the ty hook in
 `.claude/settings.json` and the type-check step in `.github/workflows/ci.yml`; lower both when
 upstream fixes theirs. The one left: `langchain` types `TodoListMiddleware` with two type
-parameters where `deepagents`' `AgentMiddleware` alias takes three. **Read what it currently is
+parameters where `deepagents`' `AgentMiddleware` alias takes three (ty reports it against
+`agent.PlainTodoListMiddleware`, which inherits that arity). **Read what it currently is
 rather than trusting the number.** The count held at two across the deepagents 0.7 upgrade
 while both causes then changed underneath it, and it dropped to one in the October 2026 lock
 upgrade only because langgraph 1.2.16's `BaseStore.put` started accepting a `Mapping` — found by
