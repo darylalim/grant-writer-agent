@@ -48,8 +48,10 @@ Four checks, all code, and the counts beside them rather than only a verdict:
 The first version failed any orchestrator `write_file` or `edit_file` under
 `sections/`, and scored 0/3 on the first live runs. Almost all of that was
 revision -- 34 to 50 `edit_file` calls per run after the drafters' pass, which
-`ORCHESTRATOR_PROMPT` step 5 asks for ("Do all revision and tightening in
-`sections/`"). Counting it measured the step budget (D0), not delegation.
+`ORCHESTRATOR_PROMPT` step 5 then asked for ("Do all revision and tightening
+in `sections/`"). Counting it measured the step budget (D0), not delegation.
+D0 now sends revision back to `section-drafter`, and the revision count is
+how that is measured.
 
 So this was narrowed *after* seeing those results, and the narrowing is a
 definition, not a discovery. A section counts as drafted inline when the
