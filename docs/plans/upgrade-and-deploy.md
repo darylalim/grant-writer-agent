@@ -127,8 +127,8 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
   - 4b, one fixture run each. Draft: before 1641.5 s, 151 calls, $11.22; after 1300.2 s, 155 calls, $10.44 (LangSmith `total_cost`). Discover: before 42.6 s, $0.23 (2 scouts); after 93.8 s, $0.35 (3 scouts), so per candidate it is flat at about $0.115. Opus cache-hit rate about 92.5% on both. No `max_tokens` stop on either. **Neither draft reached `final/`**: before ended by assembling into `sections/00-assembled-draft.md`, and after hit the 150-step limit before assembly.
   - 4c: traces carry `run_name`, `tags` and `metadata` as designed, and can be found by `app_id` and tag through both the SDK and `langsmith trace list`. OTel spans are inactive: no tracer provider is registered.
 - [ ] A5–A6: docs updated; A committed, no release (commit: `       `)
-- [ ] A2: `.gitignore`, description, topics, README intro (commit: `160f25f`)
-  - Done except `gh repo edit` (description and topics), which is outward-facing and waits for the user.
+- [x] A2: `.gitignore`, description, topics, README intro (commit: `160f25f`)
+  - `gh repo edit` run 2026-10-19 with the user's confirmation. The description is the one in `pyproject.toml`. Topics are exactly the 17 above: the repo already had 12, and four the plan never listed (`deepagents`, `fundraising`, `grants-gov`, `proposal-writing`) were removed at the user's choice, since keeping them would have gone over GitHub's 20-topic limit.
 - [ ] B: `uv_build` 0.13; archive contents checked (commit: `       `)
 - [x] C: CI ruff/ty pins (commit: `6ef0929`)
 - [ ] C2: hooks pinned; triggers widened; `ask` rules (commit: `a334939`)
