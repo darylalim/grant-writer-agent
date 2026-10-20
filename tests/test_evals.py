@@ -2412,3 +2412,29 @@ def test_run_once_keeps_a_raised_run_out_of_the_verdicts(tmp_path, monkeypatch):
     assert record["error"] == "RuntimeError: overloaded"
     assert "scores" not in record
     assert original == config.PROJECT_ROOT
+
+
+def test_a_run_that_hits_the_step_limit_is_still_scored(tmp_path, monkeypatch):
+    """The product stopping is not the harness breaking.
+
+    A full draft runs close to the CLI's 150-step default -- the first live run
+    on the upgraded lock hit it after five delegations -- and every call before
+    the limit is real delegation evidence. Discarded as a harness error, the
+    one run most likely to show inline drafting would report nothing at all.
+    """
+    from langgraph.errors import GraphRecursionError
+
+    class _Limited:
+        def stream(self, *_args, **_kwargs):
+            yield from INLINE
+            raise GraphRecursionError("Recursion limit of 5 reached")
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: _Limited())
+    record = run_draft_trajectory.run_once(
+        tmp_path / "run", repeat=0, recursion_limit=5
+    )
+
+    assert "error" not in record
+    assert record["stopped"] == "recursion limit (5) reached"
+    verdicts = {s["name"]: s["passed"] for s in record["scores"]}
+    assert verdicts["no-inline-drafting"] is False

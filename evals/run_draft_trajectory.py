@@ -58,6 +58,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from langgraph.errors import GraphRecursionError
+
 from evals.scorers import Score, pass_rates, render_rates
 
 if TYPE_CHECKING:
@@ -176,9 +178,11 @@ def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]
     _prepare_root(root)
     previous_root = config.PROJECT_ROOT
     config.PROJECT_ROOT = root
+
     chunks: list[dict[str, Any]] = []
     started = time.monotonic()
     error = None
+    stopped = None
     try:
         agent = build_agent(Settings(root=root, enable_search=False))
         brief = draft_request(APP_ID, rfp_path=str(RFP), funder=FUNDER)
@@ -195,6 +199,11 @@ def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]
             stream_mode="updates",
         ):
             chunks.append(chunk)
+    except GraphRecursionError:
+        # The product stopping, not the harness breaking: a full draft runs
+        # close to the CLI's default step limit, and every call up to that
+        # point is real delegation evidence. Scored, and said to have stopped.
+        stopped = f"recursion limit ({recursion_limit}) reached"
     except Exception as exc:  # noqa: BLE001 - a broken run is not a verdict
         error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -211,6 +220,7 @@ def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]
         "repeat": repeat,
         "root": str(root),
         "wall_s": round(time.monotonic() - started, 1),
+        "stopped": stopped,
     }
     if error is not None:
         # Kept apart from the verdicts, exactly as `run_scout.attempt` does: a
@@ -247,6 +257,8 @@ def _render(records: list[dict[str, Any]]) -> tuple[int, int, int]:
             print(f"{mark} {score['name']:<20} {score['detail']}")
         counts = record["counts"]
         print(f"    delegations: {counts['delegations']}")
+        if record.get("stopped"):
+            print(f"    stopped early: {record['stopped']}")
     return checked, failed, broken
 
 
