@@ -47,12 +47,13 @@ from langsmith.evaluation.evaluator import run_evaluator
 from langsmith.run_trees import RunTree
 from langsmith.utils import LangSmithConflictError, LangSmithNotFoundError
 
-from evals import evaluate_scout, push_dataset, run_scout
+from evals import evaluate_scout, push_dataset, run_draft_trajectory, run_scout
 from evals.scorers import (
     JUDGE_PROMPT,
     Score,
     build_judge_payload,
     feedback_fields,
+    pass_rates,
     posting_scores,
     read_judge_verdict,
     score_programmatically,
@@ -443,6 +444,7 @@ def test_each_model_call_is_labelled_with_the_case_it_came_from():
         "case": case.key,
         "role": "scout",
         "model": "anthropic:claude-sonnet-5",
+        "frontend": "eval",
     }
 
 
@@ -475,10 +477,9 @@ def test_the_shipped_judge_is_not_the_scouts_own_model():
     pass or fail. `evaluate_scout` must record the model `run_scout` calls, not
     a second import that can be pointed elsewhere.
     """
-    from grant_writer.config import DEFAULT_MODELS, GRADER_MODEL
+    from grant_writer.config import DEFAULT_MODELS
 
-    assert run_scout.JUDGE_MODEL is GRADER_MODEL
-    assert DEFAULT_MODELS["grader"] != DEFAULT_MODELS["discovery"]
+    assert DEFAULT_MODELS["discovery"] != run_scout.JUDGE_MODEL
     assert evaluate_scout.JUDGE_MODEL is run_scout.JUDGE_MODEL
 
 
@@ -2042,6 +2043,7 @@ def test_the_experiment_records_which_prompt_it_measured():
     )
     assert unjudged["judge"] is False
     assert unjudged["judge_model"] is None and unjudged["judge_prompt_sha"] is None
+    assert unjudged["judge_effort"] is None
     assert unjudged["scout_prompt_sha"] == labelled["scout_prompt_sha"]
     assert unjudged["dataset"] == push_dataset.DATASET_NAME
 
@@ -2159,3 +2161,280 @@ def test_the_harness_builds_no_client_and_calls_no_loader_of_its_own(monkeypatch
         # module that never finished re-executing.
         monkeypatch.undo()
         importlib.reload(evaluate_scout)
+
+
+# ---- H1: a pinned judge, repeats, and eval labels ----------------------------
+
+
+def test_the_judge_is_pinned_rather_than_borrowed_from_the_grader_role(monkeypatch):
+    """The ruler must not move with the thing it measures.
+
+    It used to be `GRADER_MODEL`, built through `build_model` at the product's
+    effort -- so a grader override, or a change to that role's effort, would
+    re-score the "after" half of a comparison with a different judge. Pinned to
+    literals here, and checked on the outgoing request rather than the module.
+    """
+    from grant_writer import config
+
+    assert run_scout.JUDGE_MODEL == "anthropic:claude-opus-5-5"
+    assert run_scout.JUDGE_EFFORT == "high"
+    # Not the grader constant: an override of that must not reach the judge.
+    assert not hasattr(run_scout, "GRADER_MODEL")
+
+    seen = {}
+
+    def fake_build(spec, *, effort=config.MODEL_EFFORT):
+        seen["spec"], seen["effort"] = spec, effort
+        raise RuntimeError("stop before the network")
+
+    monkeypatch.setattr(run_scout, "build_model", fake_build)
+    with pytest.raises(RuntimeError, match="stop before"):
+        run_scout.ask_judge(_case("genuine-fit"), "anything")
+    assert seen == {"spec": run_scout.JUDGE_MODEL, "effort": run_scout.JUDGE_EFFORT}
+
+
+def test_eval_runs_say_they_are_evals_under_the_key_real_runs_use():
+    """`frontend` is `cli` or `ui` on a real run; an eval must not look like one.
+
+    Same key, not a new one, so one filter separates measurement from use.
+    """
+    case = _case("genuine-fit")
+    for role in ("scout", "judge"):
+        assert run_scout.call_config(role, case, "m")["metadata"]["frontend"] == "eval"
+    labelled = evaluate_scout.experiment_metadata(dataset="d", judge=True, repeat=3)
+    assert labelled["frontend"] == "eval"
+    assert labelled["judge_model"] == run_scout.JUDGE_MODEL
+    assert labelled["judge_effort"] == run_scout.JUDGE_EFFORT
+    assert labelled["repeat"] == 3
+
+
+def test_pass_rates_count_each_repeat_per_case_and_check():
+    rates = pass_rates(
+        [
+            ("a", "parses", True),
+            ("a", "parses", True),
+            ("a", "parses", False),
+            ("a", "citations", True),
+            ("b", "parses", False),
+        ]
+    )
+    assert [(r.case, r.check, r.label()) for r in rates] == [
+        ("a", "parses", "2/3"),
+        ("a", "citations", "1/1"),
+        ("b", "parses", "0/1"),
+    ]
+
+
+def test_a_harness_error_is_never_averaged_into_a_pass_rate(monkeypatch):
+    """Three repeats, one of which the API refused: the rate is over two.
+
+    Counted as a failure, a 529 would read as a check the scout passes a third
+    less often -- the "three numbers, not one" collapse, arriving through the
+    repeat axis.
+    """
+    case = _case("genuine-fit")
+    calls = iter([GOOD, RuntimeError("overloaded"), GOOD])
+
+    def fake_scout(**_kwargs):
+        reply = next(calls)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(run_scout, "ask_scout", fake_scout)
+    records = [run_scout.attempt(case, judge=False, repeat=n) for n in range(3)]
+
+    assert [("error" in r) for r in records] == [False, True, False]
+    assert "RuntimeError: overloaded" in records[1]["error"]
+    rates = pass_rates(run_scout.outcomes(records))
+    assert rates and all(rate.runs == 2 for rate in rates)
+
+
+def test_skipped_scores_do_not_enter_a_pass_rate():
+    records = [
+        {
+            "case": "a",
+            "repeat": 0,
+            "scores": [
+                {"name": "parses", "passed": True, "skipped": False},
+                {"name": "eligibility", "passed": True, "skipped": True},
+            ],
+        }
+    ]
+    assert run_scout.outcomes(records) == [("a", "parses", True)]
+
+
+def test_the_experiment_tally_carries_rates_without_harness_errors():
+    example = SimpleNamespace(metadata={"key": "a"}, id="x")
+
+    def row(results):
+        return {"example": example, "evaluation_results": {"results": results}}
+
+    ok = SimpleNamespace(key="parses", score=1.0, comment=None)
+    bad = SimpleNamespace(key="parses", score=0.0, comment=None)
+    broke = SimpleNamespace(key="harness-error-judge", score=0.0, comment="529")
+    tally = evaluate_scout.render([row([ok]), row([bad, broke]), row([ok])])
+
+    assert (tally.checked, tally.failed, tally.broken) == (3, 1, 1)
+    assert [(r.check, r.label()) for r in tally.rates] == [("parses", "2/3")]
+
+
+# ---- H2: the delegation check, on recorded stream chunks ----------------------
+
+
+def _ai(*calls: tuple[str, dict]) -> dict:
+    """One orchestrator `model` update carrying the given tool calls."""
+    from langchain_core.messages import AIMessage
+
+    tool_calls = [
+        {"name": name, "args": args, "id": f"c{i}"}
+        for i, (name, args) in enumerate(calls)
+    ]
+    return {"model": {"messages": [AIMessage(content="", tool_calls=tool_calls)]}}
+
+
+def _delegate(target: str) -> tuple[str, dict]:
+    return ("task", {"subagent_type": target, "description": "do it"})
+
+
+_PLAN = ("write_todos", {"todos": [{"status": "pending", "content": "need"}]})
+
+DELEGATING = [
+    _ai(_PLAN),
+    _ai(("extract_pdf_text", {"pdf_path": "/x.pdf"})),
+    _ai(_delegate("section-drafter")),
+    _ai(_delegate("section-drafter")),
+    _ai(_delegate("compliance-checker")),
+    _ai(("write_file", {"file_path": "/applications/a/final/proposal.md"})),
+]
+
+INLINE = [
+    _ai(_PLAN),
+    _ai(("write_file", {"file_path": "/applications/a/sections/need.md"})),
+    _ai(("edit_file", {"file_path": "/applications/a/sections/design.md"})),
+    _ai(_delegate("compliance-checker")),
+]
+
+
+def _verdicts(chunks, sections):
+    seen = run_draft_trajectory.read_trajectory(chunks, sections)
+    return {s.name: s.passed for s in run_draft_trajectory.check_trajectory(seen)}
+
+
+def test_a_delegating_run_passes_every_check():
+    assert _verdicts(DELEGATING, ["need.md", "design.md"]) == {
+        "delegates-sections": True,
+        "no-inline-drafting": True,
+        "compliance-checked": True,
+        "plans": True,
+    }
+
+
+def test_a_run_that_drafts_inline_fails():
+    """The regression this exists for: the orchestrator writing sections itself.
+
+    The final draft still arrives, so nothing else in the repo would notice.
+    """
+    verdicts = _verdicts(INLINE, ["need.md", "design.md"])
+    assert verdicts["no-inline-drafting"] is False
+    assert verdicts["delegates-sections"] is False
+    seen = run_draft_trajectory.read_trajectory(INLINE, [])
+    assert seen.inline_section_writes == [
+        "/applications/a/sections/need.md",
+        "/applications/a/sections/design.md",
+    ]
+
+
+def test_fewer_drafter_calls_than_sections_fails():
+    """One section per `section-drafter` call is what the prompt asks for."""
+    one_call = [_ai(_delegate("section-drafter")), _ai(_delegate("compliance-checker"))]
+    assert _verdicts(one_call, ["a.md", "b.md"])["delegates-sections"] is False
+    assert _verdicts(one_call, ["a.md"])["delegates-sections"] is True
+
+
+def test_a_run_with_no_sections_and_no_drafter_does_not_pass_vacuously():
+    assert _verdicts([_ai(_PLAN)], [])["delegates-sections"] is False
+
+
+def test_writes_outside_sections_are_not_inline_drafting():
+    """`final/` is the orchestrator's to assemble; only `sections/` is the drafter's."""
+    seen = run_draft_trajectory.read_trajectory(DELEGATING, [])
+    assert seen.inline_section_writes == []
+
+
+def test_run_once_redirects_the_real_disk_root_and_puts_it_back(tmp_path, monkeypatch):
+    """The real-disk tools resolve against `config.PROJECT_ROOT`, not the root
+    the graph was built on, so the run must point it at its own root -- and a
+    second repeat must find it restored, or it inherits the first one's.
+    """
+    from grant_writer import config
+
+    original = config.PROJECT_ROOT
+    seen_roots = []
+
+    class _Recorded:
+        def stream(self, *_args, **_kwargs):
+            seen_roots.append(config.PROJECT_ROOT)
+            sections = tmp_path / "run" / "applications" / "trajectory" / "sections"
+            sections.mkdir(parents=True)
+            (sections / "need.md").write_text("x")
+            (sections / "design.md").write_text("x")
+            return iter(DELEGATING)
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: _Recorded())
+    record = run_draft_trajectory.run_once(
+        tmp_path / "run", repeat=0, recursion_limit=5
+    )
+
+    assert seen_roots == [tmp_path / "run"]
+    assert original == config.PROJECT_ROOT
+    assert "error" not in record
+    assert all(score["passed"] for score in record["scores"])
+    assert (tmp_path / "run" / "memories" / "org" / "AGENTS.md").is_file()
+    assert (tmp_path / "run" / "skills").is_dir()
+    assert not (tmp_path / "run" / "skills").is_symlink()
+
+
+def test_run_once_keeps_a_raised_run_out_of_the_verdicts(tmp_path, monkeypatch):
+    from grant_writer import config
+
+    original = config.PROJECT_ROOT
+
+    class _Broken:
+        def stream(self, *_args, **_kwargs):
+            raise RuntimeError("overloaded")
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: _Broken())
+    record = run_draft_trajectory.run_once(
+        tmp_path / "run", repeat=1, recursion_limit=5
+    )
+
+    assert record["error"] == "RuntimeError: overloaded"
+    assert "scores" not in record
+    assert original == config.PROJECT_ROOT
+
+
+def test_a_run_that_hits_the_step_limit_is_still_scored(tmp_path, monkeypatch):
+    """The product stopping is not the harness breaking.
+
+    A full draft runs close to the CLI's 150-step default -- the first live run
+    on the upgraded lock hit it after five delegations -- and every call before
+    the limit is real delegation evidence. Discarded as a harness error, the
+    one run most likely to show inline drafting would report nothing at all.
+    """
+    from langgraph.errors import GraphRecursionError
+
+    class _Limited:
+        def stream(self, *_args, **_kwargs):
+            yield from INLINE
+            raise GraphRecursionError("Recursion limit of 5 reached")
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: _Limited())
+    record = run_draft_trajectory.run_once(
+        tmp_path / "run", repeat=0, recursion_limit=5
+    )
+
+    assert "error" not in record
+    assert record["stopped"] == "recursion limit (5) reached"
+    verdicts = {s["name"]: s["passed"] for s in record["scores"]}
+    assert verdicts["no-inline-drafting"] is False

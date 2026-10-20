@@ -58,7 +58,8 @@ supported package manager: never `pip`, never a hand-rolled venv. There is delib
 suppressing — leave it. That tolerance is encoded as a threshold in two places, the ty hook in
 `.claude/settings.json` and the type-check step in `.github/workflows/ci.yml`; lower both when
 upstream fixes theirs. The one left: `langchain` types `TodoListMiddleware` with two type
-parameters where `deepagents`' `AgentMiddleware` alias takes three. **Read what it currently is
+parameters where `deepagents`' `AgentMiddleware` alias takes three (ty reports it against
+`agent.PlainTodoListMiddleware`, which inherits that arity). **Read what it currently is
 rather than trusting the number.** The count held at two across the deepagents 0.7 upgrade
 while both causes then changed underneath it, and it dropped to one in the October 2026 lock
 upgrade only because langgraph 1.2.16's `BaseStore.put` started accepting a `Mapping` — found by
@@ -183,7 +184,10 @@ was duplicated logic waiting to happen:
   doing the work inline* was the single largest thing removed, and this project depends on it: the
   orchestrator is supposed to `task` out to `section-drafter` rather than draft in its own context.
   No test can see any of this, and `evals/run_scout` cannot either — it calls the model directly and
-  never builds a graph. If tool discipline regresses, write the guidance into the prompts here,
+  never builds a graph. `evals/run_draft_trajectory` is the one thing that can: it runs the real
+  drafting graph on the fixtures and checks, in code, that sections went through `section-drafter`
+  and not the orchestrator's own `write_file`. Live and billed, so run by hand. If tool discipline
+  regresses, write the guidance into the prompts here,
   where it is product surface; do not reach for `deepagents.graph.BASE_AGENT_PROMPT`, which is
   deprecated and gone in 0.9.
 
@@ -285,6 +289,9 @@ runs, and still produces plausible output.
    think less, with nothing raised. `build_model` sends `MODEL_EFFORT` on every `anthropic:`
    spec, and the test asserts it on the outgoing request payload rather than the constructor,
    since an accepted-but-unserialised kwarg is precisely how it would go missing.
+   `MODEL_EFFORT` is the *default* of `build_model(spec, effort=...)`. The one caller that
+   passes its own is the eval judge (`evals/run_scout.JUDGE_EFFORT`), pinned so that changing
+   the product's effort cannot also change the ruler measuring it.
 10. **The application id input must stay outside `st.form`.** `st.form` batches its
     widgets and sends them only when Submit is pressed. `streamlit_app.py` reads that
     id back to decide which application the file browser shows, so inside the form the

@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Awaitable, Callable
 
 from deepagents import RubricMiddleware, create_deep_agent
-from langchain.agents.middleware import TodoListMiddleware
+from langchain.agents.middleware import (
+    ModelRequest,
+    ModelResponse,
+    TodoListMiddleware,
+)
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -34,6 +40,37 @@ from grant_writer.tools import (
     measure_text,
     search_grants_gov,
 )
+
+
+class PlainTodoListMiddleware(TodoListMiddleware):
+    """`write_todos`, without langchain's prose added to the system prompt.
+
+    Spelled `TodoListMiddleware(system_prompt="")` from the deepagents 0.7
+    upgrade until October 2026, and that was never empty: the middleware
+    appends `f"\\n\\n{system_prompt}"` as a text block of its own, so a blank
+    prompt became a block holding nothing but whitespace. The API now refuses
+    one outright -- `system: text content blocks must contain non-whitespace
+    text` -- on the first model call of every draft and every scan, and no test
+    saw it, because no test sends a real request.
+
+    Overriding the two wraps keeps what the blank prompt was for (the tool's
+    own schema description carries the usage guidance) and keeps
+    `after_model`, which rejects parallel `write_todos` calls in one turn.
+    """
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse | AIMessage:
+        return handler(request)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse | AIMessage:
+        return await handler(request)
 
 
 def _build_checkpointer(settings: Settings) -> BaseCheckpointSaver:
@@ -89,10 +126,10 @@ def build_agent(settings: Settings | None = None):
             # it: `write_todos` is what step 3 of ORCHESTRATOR_PROMPT tells the
             # model to plan with, and what the UI's Plan panel renders. Losing
             # it raises nothing -- the orchestrator simply stops planning and
-            # the panel stays blank. `system_prompt=""` drops langchain's
+            # the panel stays blank. The plain variant drops langchain's
             # generic prose only; the tool's own schema description, which is
             # where the usage guidance actually lives, is untouched.
-            TodoListMiddleware(system_prompt=""),
+            PlainTodoListMiddleware(),
             # No-op unless a `rubric` is passed on invocation state, so it is
             # safe to always include. When the funder's review criteria are
             # supplied, this makes the agent grade its own work against them
@@ -165,8 +202,8 @@ def build_discovery_agent(settings: Settings | None = None):
         # candidate, and the shortlist is only as complete as that list of
         # candidates -- a scan that quietly stops after four of eleven looks
         # exactly like a scan that found four. See build_agent for why it is
-        # passed here at all and why the prompt is blanked.
-        middleware=[TodoListMiddleware(system_prompt="")],
+        # passed here at all and why the prompt is left out.
+        middleware=[PlainTodoListMiddleware()],
         backend=build_backend(settings),
         permissions=discovery_permissions(),
         checkpointer=checkpointer,

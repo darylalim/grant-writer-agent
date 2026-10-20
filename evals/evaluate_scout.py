@@ -63,12 +63,21 @@ from langsmith import evaluate
 from langsmith.evaluation import EvaluationResult, EvaluationResults
 
 from evals.push_dataset import _INPUT_FIELDS, DATASET_NAME, case_from_example
-from evals.run_scout import JUDGE_MODEL, ask_judge, ask_scout
+from evals.run_scout import (
+    EVAL_FRONTEND,
+    JUDGE_EFFORT,
+    JUDGE_MODEL,
+    ask_judge,
+    ask_scout,
+)
 from evals.scorers import (
     JUDGE_PROMPT,
+    CheckRate,
     Score,
     feedback_fields,
+    pass_rates,
     posting_scores,
+    render_rates,
     score_programmatically,
 )
 from grant_writer.config import DISCOVERY_MODEL
@@ -234,7 +243,9 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
-def experiment_metadata(*, dataset: str, judge: bool) -> dict[str, Any]:
+def experiment_metadata(
+    *, dataset: str, judge: bool, repeat: int = 1
+) -> dict[str, Any]:
     """What the experiment has to record about itself to be worth comparing to.
 
     The prompt digests are the load-bearing entries. The dataset deliberately
@@ -256,11 +267,14 @@ def experiment_metadata(*, dataset: str, judge: bool) -> dict[str, Any]:
     """
     return {
         "eval": "scout-prompt",
+        "frontend": EVAL_FRONTEND,
         "dataset": dataset,
+        "repeat": repeat,
         "scout_model": DISCOVERY_MODEL,
         "scout_prompt_sha": _sha(SCOUT_PROMPT),
         "judge": judge,
         "judge_model": JUDGE_MODEL if judge else None,
+        "judge_effort": JUDGE_EFFORT if judge else None,
         "judge_prompt_sha": _sha(JUDGE_PROMPT) if judge else None,
     }
 
@@ -286,6 +300,8 @@ class Tally:
     failed: int = 0
     broken: int = 0
     blank: int = 0
+    #: One per case and check, harness errors excluded (`CheckRate` says why).
+    rates: tuple[CheckRate, ...] = ()
 
     def summary(self) -> str:
         """The closing line, shaped like `run_scout.main`'s.
@@ -319,6 +335,7 @@ def render(rows: Iterable[Any]) -> Tally:
     two destinations -- which is worse than not offering the choice.
     """
     checked = failed = broken = blank = 0
+    verdicts: list[tuple[str, str, bool]] = []
     for row in rows:
         example = row["example"]
         key = (example.metadata or {}).get("key", str(example.id))
@@ -335,10 +352,17 @@ def render(rows: Iterable[Any]) -> Tally:
                 continue
             checked += 1
             passed = bool(result.score)
+            verdicts.append((key, result.key, passed))
             if not passed:
                 failed += 1
             print(f"  {'✓' if passed else '✗'} {result.key:<24} {result.comment or ''}")
-    return Tally(checked=checked, failed=failed, broken=broken, blank=blank)
+    return Tally(
+        checked=checked,
+        failed=failed,
+        broken=broken,
+        blank=blank,
+        rates=tuple(pass_rates(verdicts)),
+    )
 
 
 def main() -> int:
@@ -357,7 +381,15 @@ def main() -> int:
     parser.add_argument(
         "--prefix", default="scout-prompt", help="experiment name prefix"
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="run each row N times and report pass rates (compare with N >= 3)",
+    )
     args = parser.parse_args()
+    if args.repeat < 1:
+        parser.error("--repeat must be at least 1")
 
     # Truthiness, not `is None`: `tests/conftest.py` blanks these rather than
     # popping them, and LangSmith itself skips a value that strips to nothing
@@ -387,7 +419,10 @@ def main() -> int:
         data=args.dataset,
         evaluators=evaluators,
         experiment_prefix=args.prefix,
-        metadata=experiment_metadata(dataset=args.dataset, judge=not args.no_judge),
+        metadata=experiment_metadata(
+            dataset=args.dataset, judge=not args.no_judge, repeat=args.repeat
+        ),
+        num_repetitions=args.repeat,
         # 0 is the SDK's default too, so this pins the value rather than
         # choosing a new one -- and pinning is the point: a flip upstream would
         # otherwise parallelise a billed run with no edit here. It means serial
@@ -396,6 +431,8 @@ def main() -> int:
         max_concurrency=0,
     )
     tally = render(results)
+    if args.repeat > 1:
+        render_rates(list(tally.rates))
     print(f"\n{'=' * 78}\n{tally.summary()} {results.experiment_name}")
     # Zero either way, exactly as `run_scout.main` returns zero: this is a
     # measurement, and a non-zero exit invites wiring it into a pipeline that

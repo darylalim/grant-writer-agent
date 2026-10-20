@@ -4,6 +4,7 @@
     uv run python -m evals.run_scout --no-judge    # programmatic scorers only
     uv run python -m evals.run_scout --case leaky-brief
     uv run python -m evals.run_scout --out results.json
+    uv run python -m evals.run_scout --repeat 3    # pass rate per check, for comparing
 
 **This costs money and needs a live `ANTHROPIC_API_KEY`.** It is not collected
 by `pytest tests/` and is not run in CI, both on purpose -- see `evals/README.md`.
@@ -50,12 +51,14 @@ from evals.scorers import (
     Score,
     build_judge_payload,
     feedback_fields,
+    pass_rates,
     posting_scores,
     read_judge_verdict,
+    render_rates,
     score_programmatically,
 )
 from evals.scout_cases import CASES, ScoutCase
-from grant_writer.config import DISCOVERY_MODEL, GRADER_MODEL, build_model
+from grant_writer.config import DISCOVERY_MODEL, build_model
 from grant_writer.prompts import SCOUT_PROMPT
 
 if TYPE_CHECKING:  # the client now arrives on the run; see `post_scores`
@@ -66,7 +69,20 @@ if TYPE_CHECKING:  # the client now arrives on the run; see `post_scores`
 # because it is not a second opinion from the same place. The grader already
 # sits a tier above discovery for the same reason. Named once here so the
 # experiment's recorded `judge_model` cannot drift from the model actually called.
-JUDGE_MODEL = GRADER_MODEL
+#
+# Pinned -- model *and* effort -- rather than borrowed from `GRADER_MODEL`. The
+# judge is the ruler, and a ruler that moves with the thing it measures reports
+# nothing: a `GRANT_WRITER_GRADER_MODEL` override, or a change to the grader
+# role's effort, would otherwise re-score the "after" half of a comparison with
+# a different judge than the "before" half, and the difference would be read as
+# the prompt's. Change these on purpose, and only between comparisons.
+JUDGE_MODEL = "anthropic:claude-opus-5-5"
+JUDGE_EFFORT = "high"
+
+#: The `frontend` an eval run records. Real runs carry `cli` or `ui` under the
+#: same key (`config.trace_config`), so one filter separates measurement from
+#: use -- without it, repeated eval runs land in the dashboards that read usage.
+EVAL_FRONTEND = "eval"
 
 
 def _text(reply: object) -> str:
@@ -129,7 +145,7 @@ def ask_judge(
     across two call sites, one of them would eventually read the reply itself
     and the skip would quietly become a pass.
     """
-    grader = build_model(JUDGE_MODEL)
+    grader = build_model(JUDGE_MODEL, effort=JUDGE_EFFORT)
     verdict = _text(
         grader.invoke(
             [
@@ -158,7 +174,12 @@ def call_config(role: str, case: ScoutCase, model_spec: str) -> RunnableConfig:
     return {
         "run_name": role,
         "tags": ["eval", "scout-prompt", role, f"case:{case.key}"],
-        "metadata": {"case": case.key, "role": role, "model": model_spec},
+        "metadata": {
+            "case": case.key,
+            "role": role,
+            "model": model_spec,
+            "frontend": EVAL_FRONTEND,
+        },
     }
 
 
@@ -273,7 +294,7 @@ def post_scores(run: RunTree | None, scores: list[Score]) -> None:
             _unrecorded(run, [score.name], exc)
 
 
-def run_case(case: ScoutCase, *, judge: bool) -> dict:
+def run_case(case: ScoutCase, *, judge: bool, repeat: int = 0) -> dict:
     """Score one case. Returns a JSON-serialisable record.
 
     The whole case is one traced run named after the fixture, with the scout
@@ -290,11 +311,19 @@ def run_case(case: ScoutCase, *, judge: bool) -> dict:
     argument. A context manager says the same thing with the name computed
     where the case is in scope.
     """
+    metadata = {
+        "case": case.key,
+        "why": case.why,
+        "frontend": EVAL_FRONTEND,
+        "repeat": repeat,
+        "judge_model": JUDGE_MODEL if judge else None,
+        "judge_effort": JUDGE_EFFORT if judge else None,
+    }
     with trace(
         name=f"scout:{case.key}",
         run_type="chain",
         tags=["eval", "scout-prompt", f"case:{case.key}"],
-        metadata={"case": case.key, "why": case.why},
+        metadata=metadata,
         inputs={"case": case.key, "why": case.why},
     ) as run:
         output = ask_scout(
@@ -316,6 +345,7 @@ def run_case(case: ScoutCase, *, judge: bool) -> dict:
         record = {
             "case": case.key,
             "why": case.why,
+            "repeat": repeat,
             "output": output,
             "scores": [asdict(score) for score in scores],
         }
@@ -326,11 +356,49 @@ def run_case(case: ScoutCase, *, judge: bool) -> dict:
         return record
 
 
+def attempt(case: ScoutCase, *, judge: bool, repeat: int) -> dict:
+    """`run_case`, with a raised call recorded as a harness error.
+
+    Before `--repeat` a crash ended the run, which was honest if expensive.
+    Over N repeats it would throw away every repeat already paid for, so the
+    exception is kept as a record of its own -- and kept *apart*: a record with
+    an `error` key has no scores, never feeds `pass_rates`, and is counted on
+    its own line. A rate limit is not a regression.
+    """
+    try:
+        return run_case(case, judge=judge, repeat=repeat)
+    except Exception as exc:  # noqa: BLE001 - a broken eval is not a verdict
+        return {
+            "case": case.key,
+            "repeat": repeat,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def outcomes(records: list[dict]) -> list[tuple[str, str, bool]]:
+    """The real verdicts in `records`, as `pass_rates` wants them.
+
+    Skipped scores and harness-error records contribute nothing -- the two
+    things that must never be averaged into a pass rate.
+    """
+    return [
+        (record["case"], score["name"], bool(score["passed"]))
+        for record in records
+        if "error" not in record
+        for score in record["scores"]
+        if not score["skipped"]
+    ]
+
+
 def _render(records: list[dict]) -> int:
     """Print a per-case table. Returns the number of real failures."""
     failures = 0
     for record in records:
-        print(f"\n{'=' * 78}\n{record['case']}\n{'-' * 78}")
+        repeat = f"  (repeat {record['repeat'] + 1})" if record.get("repeat") else ""
+        print(f"\n{'=' * 78}\n{record['case']}{repeat}\n{'-' * 78}")
+        if "error" in record:
+            print(f"  ! harness error: {record['error']}")
+            continue
         for score in record["scores"]:
             if score["skipped"]:
                 mark = "  ·"
@@ -354,7 +422,15 @@ def main() -> int:
         help="skip the LLM grounding judge (one fewer model call per case)",
     )
     parser.add_argument("--out", help="write the full records, including raw output")
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="run each case N times and report pass rates (compare with N >= 3)",
+    )
     args = parser.parse_args()
+    if args.repeat < 1:
+        parser.error("--repeat must be at least 1")
 
     if not os.getenv("ANTHROPIC_API_KEY"):
         print(
@@ -371,16 +447,26 @@ def main() -> int:
         )
         return 1
 
-    records = [run_case(case, judge=not args.no_judge) for case in cases]
+    records = [
+        attempt(case, judge=not args.no_judge, repeat=n)
+        for case in cases
+        for n in range(args.repeat)
+    ]
     failures = _render(records)
+    if args.repeat > 1:
+        render_rates(pass_rates(outcomes(records)))
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as handle:
             json.dump(records, handle, indent=2)
         print(f"\nFull records written to {args.out}")
 
-    checked = sum(1 for r in records for s in r["scores"] if not s["skipped"])
-    print(f"\n{'=' * 78}\n{checked - failures}/{checked} checks passed.")
+    checked = len(outcomes(records))
+    broken = sum(1 for record in records if "error" in record)
+    summary = f"{checked - failures}/{checked} checks passed."
+    if broken:
+        summary += f" {broken} harness error(s): the eval broke, not the scout."
+    print(f"\n{'=' * 78}\n{summary}")
     # Zero either way: this is a measurement, not a gate. A failing scorer here
     # is a finding to read, and a non-zero exit invites someone to wire it into
     # a pipeline that then blocks on a model's mood.
