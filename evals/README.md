@@ -110,10 +110,12 @@ uv run python -m evals.run_draft_trajectory --repeat 3 --out evals/out/trajector
 
 It needs no judge. The top-level `updates` stream carries only the
 orchestrator's own calls, because a subagent's calls run inside the `task` tool
-and never reach it, so a `write_file` under `sections/` that does show up there is
-the orchestrator drafting inline. It checks four things: one `section-drafter`
-call per section file, no inline section writes, `compliance-checker` called,
-and `write_todos` used. Each run's draft is kept under `evals/out/trajectory/`
+and never reach it, so a write under `sections/` that does show up there is the
+orchestrator's own. It checks four things: one `section-drafter` call per
+section file, no section the orchestrator `write_file`d without having read or
+edited it first, `compliance-checker` called, and `write_todos` used. Revising a
+drafter's section is printed as a count beside that verdict and does not fail
+it; why the line sits there is in the module docstring. Each run's draft is kept under `evals/out/trajectory/`
 to read afterwards.
 
 **The drafting side is not covered at all.** `SCOUT_PROMPT` was first because it

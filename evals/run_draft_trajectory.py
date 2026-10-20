@@ -28,19 +28,41 @@ this sees exactly what a user's activity feed would show.
 
 That parser only ever sees the orchestrator. Without `subgraphs=True`, a
 subagent's own tool calls happen inside the `task` tool and never reach the
-top-level stream -- so a `write_file` under `sections/` that does reach it is
-the orchestrator drafting inline. That one fact is what makes the check
-programmatic rather than a judgement.
+top-level stream -- so a write under `sections/` that does reach it is the
+orchestrator's own. That one fact is what makes the check programmatic rather
+than a judgement.
 
 Four checks, all code, and the counts beside them rather than only a verdict:
 
 - `delegates-sections` -- at least one `section-drafter` call per section file
   on disk. The prompt says one section per call, so fewer calls than files
   means some section was written another way.
-- `no-inline-drafting` -- the orchestrator itself wrote nothing under
-  `/applications/*/sections/`.
+- `no-inline-drafting` -- the orchestrator `write_file`d no section it had not
+  already read or edited. Revising a drafter's section is reported as a count
+  beside the verdict and does not fail it.
 - `compliance-checked` -- `compliance-checker` was called at least once.
 - `plans` -- `write_todos` was used. The UI's Plan panel depends on it.
+
+## Why revising does not count (H2b)
+
+The first version failed any orchestrator `write_file` or `edit_file` under
+`sections/`, and scored 0/3 on the first live runs. Almost all of that was
+revision -- 34 to 50 `edit_file` calls per run after the drafters' pass, which
+`ORCHESTRATOR_PROMPT` step 5 asks for ("Do all revision and tightening in
+`sections/`"). Counting it measured the step budget (D0), not delegation.
+
+So this was narrowed *after* seeing those results, and the narrowing is a
+definition, not a discovery. A section counts as drafted inline when the
+orchestrator `write_file`s a path it had not touched earlier in the run: it
+wrote content it never saw from anyone else. `edit_file` is always a revision,
+since it replaces text that must already be there. A `write_file` over a path
+it had read or edited is a whole-file revision, counted with the edits.
+
+The stream cannot tell a create from an overwrite any other way: the
+filesystem tools overwrite silently and answer "Updated file" either way, and
+the drafter's own writes never reach this stream. Read-before-write is the
+proxy for "this section already existed", and it errs towards failing: an
+orchestrator that overwrites a section without looking at it is drafting.
 """
 
 from __future__ import annotations
@@ -77,7 +99,7 @@ CASE = "scmp-2026"
 OUT = REPO / "evals" / "out" / "trajectory"
 
 _SECTIONS = re.compile(r"^/applications/[^/]+/sections/")
-_INLINE_TOOLS = frozenset({"write_file", "edit_file"})
+_TOUCH_TOOLS = frozenset({"read_file", "write_file", "edit_file"})
 
 
 @dataclass
@@ -87,6 +109,7 @@ class Trajectory:
     delegations: Counter[str] = field(default_factory=Counter)
     tools: Counter[str] = field(default_factory=Counter)
     inline_section_writes: list[str] = field(default_factory=list)
+    section_revisions: list[str] = field(default_factory=list)
     plans: int = 0
     sections_on_disk: list[str] = field(default_factory=list)
 
@@ -103,6 +126,7 @@ def read_trajectory(
     from grant_writer.activity import DELEGATE, PLAN, TOOL, iter_activity
 
     seen = Trajectory(sections_on_disk=sorted(sections_on_disk))
+    touched: set[str] = set()
     for chunk in chunks:
         for event in iter_activity(chunk):
             if event.kind == DELEGATE:
@@ -111,8 +135,14 @@ def read_trajectory(
                 seen.plans += 1
             elif event.kind == TOOL:
                 seen.tools[event.label] += 1
-                if event.label in _INLINE_TOOLS and _SECTIONS.match(event.detail):
-                    seen.inline_section_writes.append(event.detail)
+                path = event.detail
+                if event.label not in _TOUCH_TOOLS or not _SECTIONS.match(path):
+                    continue
+                if event.label == "write_file" and path not in touched:
+                    seen.inline_section_writes.append(path)
+                elif event.label != "read_file":
+                    seen.section_revisions.append(path)
+                touched.add(path)
     return seen
 
 
@@ -121,6 +151,7 @@ def check_trajectory(seen: Trajectory) -> list[Score]:
     drafter = seen.delegations["section-drafter"]
     checker = seen.delegations["compliance-checker"]
     sections = len(seen.sections_on_disk)
+    revised = f"; {len(seen.section_revisions)} revision(s) of sections/"
     return [
         Score(
             "delegates-sections",
@@ -134,7 +165,8 @@ def check_trajectory(seen: Trajectory) -> list[Score]:
                 "orchestrator wrote " + ", ".join(seen.inline_section_writes)
                 if seen.inline_section_writes
                 else "orchestrator wrote no section itself"
-            ),
+            )
+            + revised,
         ),
         Score(
             "compliance-checked",
@@ -163,21 +195,14 @@ def _prepare_root(root: Path) -> None:
 def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]:
     """One full drafting run on `root`. Returns a JSON-serialisable record.
 
-    `config.PROJECT_ROOT` is pointed at `root` for the run, and that is not
-    optional. The tools that write to real disk (`extract_pdf_text` above all)
-    resolve their output against it rather than against `Settings.root`, so a
-    graph built on another root would archive the solicitation into this
-    repository's `applications/` and then fail to find it. Restored afterwards
-    so a second repeat starts clean.
+    The graph is built on `root`, and that alone keeps the run inside it: the
+    real-disk tools take their root from `Settings.root`.
     """
-    from grant_writer import config
     from grant_writer.agent import build_agent
     from grant_writer.config import Settings
     from grant_writer.prompts import draft_request
 
     _prepare_root(root)
-    previous_root = config.PROJECT_ROOT
-    config.PROJECT_ROOT = root
 
     chunks: list[dict[str, Any]] = []
     started = time.monotonic()
@@ -206,8 +231,6 @@ def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]
         stopped = f"recursion limit ({recursion_limit}) reached"
     except Exception as exc:  # noqa: BLE001 - a broken run is not a verdict
         error = f"{type(exc).__name__}: {exc}"
-    finally:
-        config.PROJECT_ROOT = previous_root
 
     sections_dir = root / "applications" / APP_ID / "sections"
     sections = (
@@ -235,6 +258,7 @@ def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]
         "plans": seen.plans,
         "sections_on_disk": seen.sections_on_disk,
         "inline_section_writes": seen.inline_section_writes,
+        "section_revisions": seen.section_revisions,
     }
     record["scores"] = [asdict(score) for score in check_trajectory(seen)]
     return record
@@ -288,8 +312,8 @@ def main() -> int:
         for n in range(args.repeat)
     ]
     if not existed and repo_app.exists():
-        # The PROJECT_ROOT redirect above failed: a real-disk tool wrote into
-        # this repository instead of the run's root. Say so loudly.
+        # A real-disk tool wrote into this repository instead of the run's
+        # root -- the bug building the tools from `Settings.root` fixed, back.
         print(f"WARNING: a run wrote into {repo_app}", file=sys.stderr)
 
     checked, failed, broken = _render(records)

@@ -2339,10 +2339,59 @@ def test_a_run_that_drafts_inline_fails():
     assert verdicts["no-inline-drafting"] is False
     assert verdicts["delegates-sections"] is False
     seen = run_draft_trajectory.read_trajectory(INLINE, [])
-    assert seen.inline_section_writes == [
-        "/applications/a/sections/need.md",
-        "/applications/a/sections/design.md",
+    assert seen.inline_section_writes == ["/applications/a/sections/need.md"]
+    assert seen.section_revisions == ["/applications/a/sections/design.md"]
+
+
+_SECTION = "/applications/a/sections/need.md"
+
+
+def test_revising_a_drafted_section_is_counted_and_does_not_fail():
+    """H2b: `edit_file` after the drafters' pass is the revision step 5 asks for.
+
+    The first live runs made 34-50 of these each and scored 0/3 for it.
+    """
+    chunks = [
+        _ai(_delegate("section-drafter")),
+        _ai(("read_file", {"file_path": _SECTION})),
+        _ai(("edit_file", {"file_path": _SECTION})),
+        _ai(("edit_file", {"file_path": _SECTION})),
     ]
+    seen = run_draft_trajectory.read_trajectory(chunks, ["need.md"])
+    assert seen.inline_section_writes == []
+    assert seen.section_revisions == [_SECTION, _SECTION]
+    verdict = next(
+        s
+        for s in run_draft_trajectory.check_trajectory(seen)
+        if s.name == "no-inline-drafting"
+    )
+    assert verdict.passed
+    assert "2 revision(s)" in verdict.detail
+
+
+def test_rewriting_a_section_already_read_is_a_revision():
+    """Live run 1 rewrote a drafter's section whole, after reading it."""
+    chunks = [
+        _ai(("read_file", {"file_path": _SECTION})),
+        _ai(("write_file", {"file_path": _SECTION})),
+    ]
+    seen = run_draft_trajectory.read_trajectory(chunks, [])
+    assert seen.inline_section_writes == []
+    assert seen.section_revisions == [_SECTION]
+
+
+def test_writing_a_section_never_seen_is_inline_even_after_delegating():
+    """Live run 2 wrote a shared frame no drafter was given; and an overwrite
+    of a drafter's file the orchestrator never read is content it wrote itself.
+    """
+    chunks = [
+        _ai(_delegate("section-drafter")),
+        _ai(("write_file", {"file_path": _SECTION})),
+        _ai(("write_file", {"file_path": _SECTION})),
+    ]
+    seen = run_draft_trajectory.read_trajectory(chunks, [])
+    assert seen.inline_section_writes == [_SECTION]
+    assert seen.section_revisions == [_SECTION]
 
 
 def test_fewer_drafter_calls_than_sections_fails():
@@ -2362,10 +2411,10 @@ def test_writes_outside_sections_are_not_inline_drafting():
     assert seen.inline_section_writes == []
 
 
-def test_run_once_redirects_the_real_disk_root_and_puts_it_back(tmp_path, monkeypatch):
-    """The real-disk tools resolve against `config.PROJECT_ROOT`, not the root
-    the graph was built on, so the run must point it at its own root -- and a
-    second repeat must find it restored, or it inherits the first one's.
+def test_run_once_builds_its_graph_on_the_run_root(tmp_path, monkeypatch):
+    """The run's root reaches the graph through `Settings`, and nothing global
+    is touched: the real-disk tools take their root from `Settings.root`, so the
+    `PROJECT_ROOT` swap this used to need is gone.
     """
     from grant_writer import config
 
@@ -2381,12 +2430,19 @@ def test_run_once_redirects_the_real_disk_root_and_puts_it_back(tmp_path, monkey
             (sections / "design.md").write_text("x")
             return iter(DELEGATING)
 
-    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: _Recorded())
+    built_on = []
+
+    def _build(settings):
+        built_on.append(settings.root)
+        return _Recorded()
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", _build)
     record = run_draft_trajectory.run_once(
         tmp_path / "run", repeat=0, recursion_limit=5
     )
 
-    assert seen_roots == [tmp_path / "run"]
+    assert built_on == [tmp_path / "run"]
+    assert seen_roots == [original]
     assert original == config.PROJECT_ROOT
     assert "error" not in record
     assert all(score["passed"] for score in record["scores"])

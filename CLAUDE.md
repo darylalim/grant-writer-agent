@@ -238,6 +238,14 @@ runs, and still produces plausible output.
    each narrower than the union and neither is a superset of the other. A permission rule and a
    real-disk writer are two enforcement points, not one, and only the first knows about graphs.
 
+   **The root comes from the caller too.** The two writers are built per graph by
+   `tools.build_extract_pdf_tool` / `build_fetch_opportunity_tool` from `Settings.root`, and
+   `_resolve_output_path` takes that root as a required argument. It used to read
+   `config.PROJECT_ROOT`, so a graph built on any other root archived into this checkout's
+   `applications/` and then looked for the file under its own. That never escaped a content
+   directory, but it was the wrong tree, and nothing said so. Don't reintroduce a module-level instance
+   of either tool: it could only resolve against `PROJECT_ROOT`.
+
    The two id boundaries *are* one function: `application_dir` and `opportunities_dir` both call
    `_resolve_content_id`, which takes the noun only to shape the message. Fixing an ordering bug in
    one copy and not the other is exactly the failure having one copy prevents;
