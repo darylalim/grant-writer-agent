@@ -117,22 +117,28 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
 (a commit can't contain its own hash), or note it there as `(previous commit)`.
 
 - [x] Plan PR: this file merged to `main` (commit: `6b63ca2`)
-- [ ] A0 / A0b: re-survey; checkpoints backed up; parked thread created; fixtures committed; "before" baseline taken (commit: `ee9d209` fixtures)
-  - 2026-10-19: re-survey, backup and fixtures done. **Parked thread and "before" baseline blocked**: the API key is not scoped to a workspace (`anthropic-workspace-id` required). Old lock kept runnable in a worktree at `.grant_writer/oldlock` (detached at `6b63ca2`) so both can still be taken on it.
-- [ ] A1–A3: lock upgraded; gates green; `uv audit` clean; checkpoints resume; risky packages audited (commit: `c06e8b1`)
-  - Done except the live half of 2b (resume a thread with `chat`; approve the parked one). Offline read of every existing thread on both locks matched.
-- [ ] A4 / 4b / 4c: smoke test, cost/caching baseline, live trace check, recorded in A's commit message
+- [x] A0 / A0b: re-survey; checkpoints backed up; parked thread created; fixtures committed; "before" baseline taken (commit: `ee9d209` fixtures)
+  - 2026-10-19: re-survey, backup and fixtures done. After the key swap: parked thread `upgrade-parked` created on the **old** lock (one pending `write_file` to `final/proposal.md`), and the "before" baseline taken on the old lock from the `.grant_writer/oldlock` worktree (old lock plus the `99dd443` fix, without which no run gets past its first call).
+  - The first live call found a bug on **both** locks: `TodoListMiddleware(system_prompt="")` sent a whitespace-only system block, which the API now refuses with a 400. Fixed in `99dd443`.
+- [x] A1–A3: lock upgraded; gates green; `uv audit` clean; checkpoints resume; risky packages audited (commit: `c06e8b1`)
+  - Live half of 2b done. The new lock migrated the real checkpoint file (`writes.task_path` added) and read the parked thread identically. Approving it through a `Command` resume wrote `final/proposal.md` with the same content hash the old lock had pending (`5df6ae77e4e1`), so invariant 11 holds across the version boundary. Separately, `probe-eoc-2` resumed through `chat` with its full context.
+- [x] A4 / 4b / 4c: smoke test, cost/caching baseline, live trace check (results here; A's commit predates the key swap)
+  - A4: `run_scout` 26/26 on the new lock.
+  - 4b, one fixture run each. Draft: before 1641.5 s, 151 calls, $11.22; after 1300.2 s, 155 calls, $10.44 (LangSmith `total_cost`). Discover: before 42.6 s, $0.23 (2 scouts); after 93.8 s, $0.35 (3 scouts), so per candidate it is flat at about $0.115. Opus cache-hit rate about 92.5% on both. No `max_tokens` stop on either. **Neither draft reached `final/`**: before ended by assembling into `sections/00-assembled-draft.md`, and after hit the 150-step limit before assembly.
+  - 4c: traces carry `run_name`, `tags` and `metadata` as designed, and can be found by `app_id` and tag through both the SDK and `langsmith trace list`. OTel spans are inactive: no tracer provider is registered.
 - [ ] A5–A6: docs updated; A committed, no release (commit: `       `)
 - [ ] A2: `.gitignore`, description, topics, README intro (commit: `160f25f`)
   - Done except `gh repo edit` (description and topics), which is outward-facing and waits for the user.
 - [ ] B: `uv_build` 0.13; archive contents checked (commit: `       `)
 - [x] C: CI ruff/ty pins (commit: `6ef0929`)
 - [ ] C2: hooks pinned; triggers widened; `ask` rules (commit: `a334939`)
-  - Pins and triggers pipe-tested. Whether the `ask` prompt actually appears is unconfirmed: needs the user to say whether a guarded command prompted.
+  - Pins and triggers pipe-tested. Whether the `ask` prompt actually appears is unconfirmed: needs the user to say whether a guarded command prompted (the H2 run, `evals.run_draft_trajectory`, is on the list).
+  - Security review of `main...track-h` (2026-10-19): no findings.
 - [ ] C3: setup-uv v10; uv pinned; `uv audit` in CI; Dependabot (commit: `       `)
 - [x] H1: pinned judge, `--repeat`, eval labels (commit: `84215b3`)
 - [ ] H2: delegation check; run on A's result (commit: `c2d9ce4` code and offline tests)
-  - The live run on A's result is still to do (blocked on the API key).
+  - Live on A's result, `--repeat 3`: **8/12**. `compliance-checked` 3/3, `plans` 3/3, `delegates-sections` 2/3 (one run had 6 section files for 5 drafter calls), `no-inline-drafting` **0/3**. All three runs hit the 150-step limit, about 1190 s each, and none reached `final/`.
+  - This is **not an A regression**. The before run on the old lock shows the same pattern in LangSmith: about 38 orchestrator `edit_file` calls on `sections/`. Most flagged writes are `edit_file` revisions after the drafter's pass (34–50 per run, against 2–4 `write_file`), which `ORCHESTRATOR_PROMPT` step 5 permits ("Do all revision and tightening in `sections/`"). As written, the check counts revising as drafting. Whether that is the right line, and whether 0/3 blocks the release, is a question for the user. Not settled here.
 - [ ] **Release 0.2.2 (end of Tier 1):** its own PR, only `version` bumped in `pyproject.toml`, merged
   after A, A2, C, C2, H1 and H2 are all on `main` and H2 passed on A's result. Release notes: the
   dependency changes; the three cleared aiohttp advisories (GHSA-494j-54xm-rwp3,
