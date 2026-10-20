@@ -2339,10 +2339,59 @@ def test_a_run_that_drafts_inline_fails():
     assert verdicts["no-inline-drafting"] is False
     assert verdicts["delegates-sections"] is False
     seen = run_draft_trajectory.read_trajectory(INLINE, [])
-    assert seen.inline_section_writes == [
-        "/applications/a/sections/need.md",
-        "/applications/a/sections/design.md",
+    assert seen.inline_section_writes == ["/applications/a/sections/need.md"]
+    assert seen.section_revisions == ["/applications/a/sections/design.md"]
+
+
+_SECTION = "/applications/a/sections/need.md"
+
+
+def test_revising_a_drafted_section_is_counted_and_does_not_fail():
+    """H2b: `edit_file` after the drafters' pass is the revision step 5 asks for.
+
+    The first live runs made 34-50 of these each and scored 0/3 for it.
+    """
+    chunks = [
+        _ai(_delegate("section-drafter")),
+        _ai(("read_file", {"file_path": _SECTION})),
+        _ai(("edit_file", {"file_path": _SECTION})),
+        _ai(("edit_file", {"file_path": _SECTION})),
     ]
+    seen = run_draft_trajectory.read_trajectory(chunks, ["need.md"])
+    assert seen.inline_section_writes == []
+    assert seen.section_revisions == [_SECTION, _SECTION]
+    verdict = next(
+        s
+        for s in run_draft_trajectory.check_trajectory(seen)
+        if s.name == "no-inline-drafting"
+    )
+    assert verdict.passed
+    assert "2 revision(s)" in verdict.detail
+
+
+def test_rewriting_a_section_already_read_is_a_revision():
+    """Live run 1 rewrote a drafter's section whole, after reading it."""
+    chunks = [
+        _ai(("read_file", {"file_path": _SECTION})),
+        _ai(("write_file", {"file_path": _SECTION})),
+    ]
+    seen = run_draft_trajectory.read_trajectory(chunks, [])
+    assert seen.inline_section_writes == []
+    assert seen.section_revisions == [_SECTION]
+
+
+def test_writing_a_section_never_seen_is_inline_even_after_delegating():
+    """Live run 2 wrote a shared frame no drafter was given; and an overwrite
+    of a drafter's file the orchestrator never read is content it wrote itself.
+    """
+    chunks = [
+        _ai(_delegate("section-drafter")),
+        _ai(("write_file", {"file_path": _SECTION})),
+        _ai(("write_file", {"file_path": _SECTION})),
+    ]
+    seen = run_draft_trajectory.read_trajectory(chunks, [])
+    assert seen.inline_section_writes == [_SECTION]
+    assert seen.section_revisions == [_SECTION]
 
 
 def test_fewer_drafter_calls_than_sections_fails():
