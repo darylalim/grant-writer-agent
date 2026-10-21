@@ -78,6 +78,7 @@ Set these in `.env` (see `.env.example`):
 | `TAVILY_API_KEY` | Unless `--no-search` | Web search for funder research and non-federal opportunities |
 | `LANGSMITH_API_KEY` | Recommended | Tracing; a multi-agent run is hard to debug from stdout alone |
 | `GRANT_WRITER_*_MODEL` | No | Override the model for a role (`DRAFTING`, `RESEARCH`, `COMPLIANCE`, `GRADER`, `DISCOVERY`) |
+| `GRANT_WRITER_*_EFFORT` | No | Override the reasoning effort for a role, same role names (`low` to `max`; every role ships at `high`) |
 | `GRANT_WRITER_ROOT` | No | Project root, when the console script is installed outside the repo |
 
 ## Finding opportunities

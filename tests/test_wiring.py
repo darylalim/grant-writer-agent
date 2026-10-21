@@ -36,10 +36,11 @@ from grant_writer.backends import (
 )
 from grant_writer.config import (
     CONTENT_DIRS,
+    DEFAULT_EFFORT,
     DEFAULT_MODELS,
+    GRADER_EFFORT,
     GRADER_MODEL,
     MAX_OUTPUT_TOKENS,
-    MODEL_EFFORT,
     PROJECT_ROOT,
     Settings,
     build_model,
@@ -322,7 +323,7 @@ def test_the_rubric_grader_stays_dormant_without_a_rubric():
     unbuilt grader is positive evidence that nothing reached the network, which
     a `None` return on its own does not give.
     """
-    middleware = RubricMiddleware(model=build_model(GRADER_MODEL))
+    middleware = RubricMiddleware(model=build_model(GRADER_MODEL, effort=GRADER_EFFORT))
     # Cast because both hooks are typed against a `RubricState` and a live
     # `Runtime`, and a bare dict with no runtime is precisely the input that
     # proves the point: neither is consulted before the `rubric` check. Building
@@ -347,7 +348,7 @@ def test_the_rubric_grader_wakes_when_a_rubric_is_present():
     The grader is stubbed rather than called: what is under test is the gate,
     not the grading, and a real grade is a billed model call.
     """
-    middleware = RubricMiddleware(model=build_model(GRADER_MODEL))
+    middleware = RubricMiddleware(model=build_model(GRADER_MODEL, effort=GRADER_EFFORT))
     middleware._grade = cast(
         Any,
         # Keyword-only `context` matches the upstream signature exactly rather
@@ -476,6 +477,7 @@ def test_a_subagent_cannot_be_built_without_deciding_about_skills():
             description="x",
             system_prompt="x",
             model_spec=DEFAULT_MODELS["drafting"],
+            effort=DEFAULT_EFFORT["drafting"],
         )
 
 
@@ -717,7 +719,9 @@ def test_default_model_resolves_to_a_usable_output_ceiling(role, spec):
 
     Pins invariant 9.
     """
-    max_tokens = getattr(build_model(spec), "max_tokens", None)
+    max_tokens = getattr(
+        build_model(spec, effort=DEFAULT_EFFORT[role]), "max_tokens", None
+    )
     assert max_tokens is not None, f"{role}: {spec!r} exposes no max_tokens"
     assert max_tokens >= MAX_OUTPUT_TOKENS, (
         f"{role}: {spec!r} resolves to max_tokens={max_tokens}, below the "
@@ -725,27 +729,43 @@ def test_default_model_resolves_to_a_usable_output_ceiling(role, spec):
     )
 
 
+def test_every_model_role_has_an_effort_and_no_other():
+    """`DEFAULT_EFFORT` is keyed exactly like `DEFAULT_MODELS`.
+
+    A role with a model and no effort would fail only at build time, as a
+    `KeyError` in whatever reached for it; an effort with no model is a setting
+    nobody's request carries. Either way the two dicts have stopped describing
+    the same roster.
+    """
+    assert DEFAULT_EFFORT.keys() == DEFAULT_MODELS.keys()
+
+
 @pytest.mark.parametrize(("role", "spec"), sorted(DEFAULT_MODELS.items()))
-def test_default_model_sends_an_explicit_effort(role, spec):
-    """Every shipped model must carry `MODEL_EFFORT` in the request it builds.
+def test_default_model_sends_its_roles_effort(role, spec):
+    """Every shipped model must carry its own role's effort in the request.
 
     Asserted on the outgoing payload rather than on a constructor attribute,
     because a kwarg the client accepts and never serialises is the failure: the
     request goes out without it, and Opus 5.5 quietly runs at `medium`.
+    Parametrized over `DEFAULT_EFFORT` for the reason the ceiling case uses
+    `DEFAULT_MODELS`: a developer's `GRANT_WRITER_*_EFFORT` must not change
+    what this checks.
+
+    Pins invariant 9.
     """
-    model = build_model(spec)
+    model = build_model(spec, effort=DEFAULT_EFFORT[role])
     payload = model._get_request_payload([("user", "hi")])  # ty: ignore[unresolved-attribute]
-    assert payload.get("output_config", {}).get("effort") == MODEL_EFFORT, (
+    assert payload.get("output_config", {}).get("effort") == DEFAULT_EFFORT[role], (
         f"{role}: {spec!r} sends {payload.get('output_config')!r}"
     )
 
 
-def test_an_explicit_effort_reaches_the_request_and_the_default_does_not_move():
+def test_an_explicit_effort_reaches_the_request_and_omitting_one_is_refused():
     """The eval judge pins its own effort through the same construction path.
 
-    On the payload for the same reason as the case above. And the default is
-    re-checked here because adding a keyword is exactly how a default gets
-    changed by accident, which would move every role at once.
+    On the payload for the same reason as the case above. And `effort` has no
+    default: a default is exactly how a new call site would inherit some other
+    role's depth without anyone choosing it, so its absence is pinned too.
     """
     spec = DEFAULT_MODELS["grader"]
     pinned = build_model(spec, effort="low")
@@ -753,8 +773,55 @@ def test_an_explicit_effort_reaches_the_request_and_the_default_does_not_move():
     assert payload["output_config"]["effort"] == "low"
     assert payload["max_tokens"] == MAX_OUTPUT_TOKENS
 
-    default = build_model(spec)._get_request_payload([("user", "hi")])  # ty: ignore[unresolved-attribute]
-    assert default["output_config"]["effort"] == MODEL_EFFORT
+    with pytest.raises(TypeError, match="effort"):
+        build_model(spec)  # ty: ignore[missing-argument]
+
+
+def test_each_role_is_built_at_its_own_effort(monkeypatch):
+    """Both graphs hand every model its *own* role's effort, not a neighbour's.
+
+    Every role ships at the same effort, so passing `RESEARCH_EFFORT` to the
+    drafter would send the very same request today and be invisible to the
+    payload case above -- until one role's value moves, when the wrong role
+    moves with it and nothing raises. So each role's model and effort are
+    replaced with a sentinel naming that role, and every `build_model` call
+    either graph makes must pair the two up. Drafting and discovery are each
+    built twice (orchestrator and subagent), which is why this records pairs
+    rather than counting calls.
+
+    Pins invariant 9.
+    """
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+
+    from grant_writer import agent as agent_module
+    from grant_writer import subagents as subagents_module
+
+    for module in (agent_module, subagents_module):
+        for role in DEFAULT_MODELS:
+            for kind in ("MODEL", "EFFORT"):
+                name = f"{role.upper()}_{kind}"
+                if hasattr(module, name):
+                    monkeypatch.setattr(module, name, f"{kind.lower()}:{role}")
+
+    calls: list[tuple[str, str]] = []
+
+    def _record(spec, *, effort):
+        calls.append((spec, effort))
+        return GenericFakeChatModel(messages=iter([]))
+
+    monkeypatch.setattr(agent_module, "build_model", _record)
+    monkeypatch.setattr(subagents_module, "build_model", _record)
+
+    build_agent(Settings(enable_search=False))
+    build_discovery_agent(Settings(enable_search=False))
+
+    mismatched = [
+        (spec, effort)
+        for spec, effort in calls
+        if spec.removeprefix("model:") != effort.removeprefix("effort:")
+    ]
+    assert not mismatched, f"a role was built at another role's effort: {mismatched}"
+    assert {spec.removeprefix("model:") for spec, _ in calls} == DEFAULT_MODELS.keys()
 
 
 # ---- the discovery graph ----------------------------------------------------

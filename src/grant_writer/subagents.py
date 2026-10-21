@@ -27,9 +27,13 @@ from deepagents import FilesystemPermission, SubAgent
 
 from grant_writer.backends import compliance_permissions, scouting_permissions
 from grant_writer.config import (
+    COMPLIANCE_EFFORT,
     COMPLIANCE_MODEL,
+    DISCOVERY_EFFORT,
     DISCOVERY_MODEL,
+    DRAFTING_EFFORT,
     DRAFTING_MODEL,
+    RESEARCH_EFFORT,
     RESEARCH_MODEL,
     SKILLS_DIR,
     Settings,
@@ -50,6 +54,7 @@ def _subagent(
     description: str,
     system_prompt: str,
     model_spec: str,
+    effort: str,
     skills: list[str] | None,
     tools: list[Any] | None = None,
     permissions: list[FilesystemPermission] | None = None,
@@ -79,7 +84,7 @@ def _subagent(
         "name": name,
         "description": description,
         "system_prompt": system_prompt,
-        "model": build_model(model_spec),
+        "model": build_model(model_spec, effort=effort),
         "tools": tools or [],
     }
     if skills is not None:
@@ -103,6 +108,7 @@ def build_subagents(settings: Settings | None = None) -> list[SubAgent]:
         ),
         system_prompt=RESEARCHER_PROMPT,
         model_spec=RESEARCH_MODEL,
+        effort=RESEARCH_EFFORT,
         tools=[search] if search else [],
         # It writes prose into a file the drafter reads; the section guides are
         # for whoever turns that into a section, not for gathering it.
@@ -118,6 +124,7 @@ def build_subagents(settings: Settings | None = None) -> list[SubAgent]:
         ),
         system_prompt=DRAFTER_PROMPT,
         model_spec=DRAFTING_MODEL,
+        effort=DRAFTING_EFFORT,
         tools=[measure_text],
         skills=[SKILLS_DIR],
     )
@@ -131,6 +138,7 @@ def build_subagents(settings: Settings | None = None) -> list[SubAgent]:
         ),
         system_prompt=COMPLIANCE_PROMPT,
         model_spec=COMPLIANCE_MODEL,
+        effort=COMPLIANCE_EFFORT,
         tools=[measure_text],
         # It audits sections against the guides that produced them, so it needs
         # the same guides in hand to say what a section was supposed to contain.
@@ -166,6 +174,7 @@ def build_discovery_subagents() -> list[SubAgent]:
         ),
         system_prompt=SCOUT_PROMPT,
         model_spec=DISCOVERY_MODEL,
+        effort=DISCOVERY_EFFORT,
         # No tools. It reads two files and writes one, all of which the
         # filesystem middleware already provides -- and withholding search is
         # the point rather than an omission: a scorer that could go looking for

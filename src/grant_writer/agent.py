@@ -23,8 +23,11 @@ from grant_writer.backends import (
     seed_store_from_disk,
 )
 from grant_writer.config import (
+    DISCOVERY_EFFORT,
     DISCOVERY_MODEL,
+    DRAFTING_EFFORT,
     DRAFTING_MODEL,
+    GRADER_EFFORT,
     GRADER_MODEL,
     MEMORY_FILE,
     SKILLS_DIR,
@@ -113,7 +116,7 @@ def build_agent(settings: Settings | None = None):
         seed_store_from_disk(store, settings)
 
     return create_deep_agent(
-        model=build_model(DRAFTING_MODEL),
+        model=build_model(DRAFTING_MODEL, effort=DRAFTING_EFFORT),
         tools=tools,
         system_prompt=ORCHESTRATOR_PROMPT,
         subagents=build_subagents(settings),
@@ -135,7 +138,7 @@ def build_agent(settings: Settings | None = None):
             # supplied, this makes the agent grade its own work against them
             # and iterate.
             RubricMiddleware(
-                model=build_model(GRADER_MODEL),
+                model=build_model(GRADER_MODEL, effort=GRADER_EFFORT),
                 max_iterations=settings.max_rubric_iterations,
             ),
         ],
@@ -188,7 +191,7 @@ def build_discovery_agent(settings: Settings | None = None):
         seed_store_from_disk(store, settings)
 
     return create_deep_agent(
-        model=build_model(DISCOVERY_MODEL),
+        model=build_model(DISCOVERY_MODEL, effort=DISCOVERY_EFFORT),
         tools=tools,
         system_prompt=DISCOVERY_PROMPT,
         subagents=build_discovery_subagents(),
