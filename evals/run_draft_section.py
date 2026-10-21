@@ -56,8 +56,15 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.outputs import ChatGeneration, ChatResult
 
 from evals.draft_cases import CASES, RFP_PDF, DraftCase
 from evals.draft_scorers import (
@@ -101,36 +108,60 @@ METRICS = (
 _BUILD_LOCK = threading.Lock()
 
 
-class _ScriptedOrchestrator(GenericFakeChatModel):
-    """An orchestrator that delegates exactly once and then stops."""
+class _ScriptedOrchestrator(BaseChatModel):
+    """An orchestrator that delegates exactly once and then stops.
+
+    Stateless on purpose: the reply is decided from the conversation, not
+    drawn from an iterator. The first version was a `GenericFakeChatModel`
+    over `iter([...])`, which passed offline and failed on the first live
+    pilot with `StopIteration` on its very first turn. With tracing on,
+    deepagents' `SummarizationMiddleware.wrap_model_call` is a `@traceable`,
+    and posting its run serialises the model request -- model object included
+    -- through langsmith's `_pydantic_json_dump`, which iterates the
+    `messages` field and drains it. The suite runs with tracing off, so only a
+    live run could see it. Nothing here can be consumed by being looked at.
+    """
+
+    brief: str
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-orchestrator"
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> _ScriptedOrchestrator:
         del tools, kwargs
         return self
 
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del stop, run_manager, kwargs
+        if any(isinstance(m, ToolMessage) for m in messages):
+            reply = AIMessage(content="Delegated.")
+        else:
+            reply = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {
+                            "description": self.brief,
+                            "subagent_type": "section-drafter",
+                        },
+                        "id": "h3-delegate",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        return ChatResult(generations=[ChatGeneration(message=reply)])
+
 
 def _script(case: DraftCase) -> _ScriptedOrchestrator:
-    return _ScriptedOrchestrator(
-        messages=iter(
-            [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "task",
-                            "args": {
-                                "description": case.brief,
-                                "subagent_type": "section-drafter",
-                            },
-                            "id": "h3-delegate",
-                            "type": "tool_call",
-                        }
-                    ],
-                ),
-                AIMessage(content="Delegated."),
-            ]
-        )
-    )
+    return _ScriptedOrchestrator(brief=case.brief)
 
 
 def prepare_root(root: Path, case: DraftCase) -> str:

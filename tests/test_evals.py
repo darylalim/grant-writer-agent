@@ -2824,3 +2824,28 @@ def test_the_judge_calibration_set_has_both_verdicts_and_known_cases():
     verdicts = {expect for _, _, expect in run_draft_section.CALIBRATION}
     assert verdicts == {True, False}
     assert {key for key, _, _ in run_draft_section.CALIBRATION} <= keys
+
+
+def test_the_scripted_orchestrator_survives_being_serialised():
+    """The live pilot's failure: a traced middleware drained the script.
+
+    With tracing on, deepagents' summarization middleware posts a run whose
+    inputs carry the model, and langsmith's serialiser iterates a
+    `GenericFakeChatModel`'s `messages` iterator to dump it. The suite runs
+    with tracing off, so the harness tests above cannot see it; this calls the
+    same serialiser directly, then asks the model to act.
+    """
+    from langchain_core.messages import HumanMessage, ToolMessage
+    from langsmith._internal._serde import dumps_json
+
+    case = _draft_case("tight-limit")
+    model = run_draft_section._script(case)
+    dumps_json({"model": model})
+    first = model.invoke([HumanMessage("go")])
+    assert first.tool_calls[0]["args"]["description"] == case.brief
+    again = model.invoke([HumanMessage("go")])
+    assert again.tool_calls, "stateless: the same conversation, the same reply"
+    done = model.invoke(
+        [HumanMessage("go"), first, ToolMessage("ok", tool_call_id="h3-delegate")]
+    )
+    assert not done.tool_calls and done.content == "Delegated."
