@@ -132,8 +132,9 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
   - `gh repo edit` run 2026-10-19 with the user's confirmation. The description is the one in `pyproject.toml`. Topics are exactly the 17 above: the repo already had 12, and four the plan never listed (`deepagents`, `fundraising`, `grants-gov`, `proposal-writing`) were removed at the user's choice, since keeping them would have gone over GitHub's 20-topic limit.
 - [ ] B: `uv_build` 0.13; archive contents checked (commit: `       `)
 - [x] C: CI ruff/ty pins (commit: `6ef0929`)
-- [ ] C2: hooks pinned; triggers widened; `ask` rules (commit: `a334939`)
-  - Pins and triggers pipe-tested. Whether the `ask` prompt actually appears is unconfirmed: needs the user to say whether a guarded command prompted (the H2 run, `evals.run_draft_trajectory`, is on the list).
+- [x] C2: hooks pinned; triggers widened; `ask` rules (commit: `a334939`)
+  - Pins and triggers pipe-tested.
+  - 2026-10-20: the `ask` prompt confirmed by the user in **default mode** (not auto mode). Probe: `uv run grant-writer chat --help`, which matches `Bash(uv run grant-writer chat *)` but makes no API call. The command was sent as `cd <repo> && uv run …`, so the rule also matches inside a compound command.
   - Security review of `main...track-h` (2026-10-19): no findings.
 - [ ] C3: setup-uv v10; uv pinned; `uv audit` in CI; Dependabot (commit: `       `)
 - [x] H1: pinned judge, `--repeat`, eval labels (commit: `84215b3`)
