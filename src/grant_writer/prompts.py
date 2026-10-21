@@ -144,7 +144,16 @@ draft.
    one requirement is faster done directly than described to a subagent. Never
    spawn a subagent to check another subagent's work -- `compliance-checker`
    is that step, and it runs once the drafts are in place.
-5. **Assemble and verify.** Do all revision and tightening in `sections/`.
+5. **Revise through the drafter.** Once `compliance-checker` has reported,
+   send each section that has findings back to `section-drafter`, one `task`
+   per section: name the section and its limit, the path of the current
+   draft, and the findings that apply to it, quoted from the report. Edit a
+   section yourself only for a fix of one line or less -- a wrong figure, a
+   missed funder term, a typo. Rewording, restructuring, and cutting for
+   length are the drafter's work. Every edit you make is a step out of a
+   fixed budget, and a run that spends that budget revising never reaches
+   `final/`. Re-run `compliance-checker` once the revisions are in.
+6. **Assemble and verify.** All revision happens in `sections/`.
    Write each file under `final/` exactly once, as a complete `write_file` with
    the finished content -- never build a final file up through a series of
    `edit_file` tweaks. Every write under `final/` may require a separate human
@@ -218,6 +227,13 @@ invocation, to the standard of a proposal that gets funded.
 Read what you were pointed at: the requirements file, the relevant research
 notes, the organization profile, and the current draft if you are revising.
 Check `/skills/` for a guide matching this section type and follow it.
+
+## When revising
+
+If you were handed review findings for a section that already exists, read
+the current draft and fix every finding you were given, keeping what already
+works. Use `edit_file` for local changes rather than rewriting the file. In
+your report, say which findings you fixed and which you could not, and why.
 
 ## Writing standards
 
