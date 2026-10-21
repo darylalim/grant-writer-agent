@@ -130,7 +130,9 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
   - The docs landed in the lock commit itself: `CLAUDE.md`, the README's checkpoints row and its backup command.
 - [x] A2: `.gitignore`, description, topics, README intro (commit: `160f25f`)
   - `gh repo edit` run 2026-10-19 with the user's confirmation. The description is the one in `pyproject.toml`. Topics are exactly the 17 above: the repo already had 12, and four the plan never listed (`deepagents`, `fundraising`, `grants-gov`, `proposal-writing`) were removed at the user's choice, since keeping them would have gone over GitHub's 20-topic limit.
-- [ ] B: `uv_build` 0.13; archive contents checked (commit: `       `)
+- [x] B: `uv_build` 0.13; archive contents checked (commit: `       `)
+  - 2026-10-20: **uv 0.13.4 chosen**, for both the local uv (`uv self update` from 0.12.22, with the user's OK) and the backend bound `uv_build>=0.13.4,<0.14.0`. 0.13.4 is the release that replaces a compromised root CA in the bundled certificates (GHSA-hq85-5cpj-mr62). 0.13.2 also fixed the backend's recursive-glob matching. The 0.13.0 notes list no breaking changes to backend configuration. C3 pins this version.
+  - Archives: compared against a baseline built the same day from `main` with uv 0.12.22. The sdist and wheel file lists are **identical**, wheel `METADATA` is byte-identical, and `WHEEL` says `Generator: uv 0.13.4` (the fast path, since uv and the backend match). The wheel installs into an isolated environment and `grant-writer --help` runs. `uv.lock` is unchanged. Suite: 448 passed in 11.35s.
 - [x] C: CI ruff/ty pins (commit: `6ef0929`)
 - [x] C2: hooks pinned; triggers widened; `ask` rules (commit: `a334939`)
   - Pins and triggers pipe-tested.
