@@ -21,6 +21,9 @@ uv run python -m evals.push_dataset --out rows.json   # payloads only, no accoun
 uv run python -m evals.evaluate_scout             # the same eval, as an experiment
 uv run python -m evals.evaluate_scout --no-judge
 uv run python -m evals.evaluate_scout --prefix opus-scout
+
+uv run python -m evals.run_draft_section --repeat 3   # the drafting eval
+uv run python -m evals.run_draft_section --rescore    # re-grade saved sections, free
 ```
 
 Point `--out` at `evals/out/`, which is gitignored: the records hold raw model
@@ -44,6 +47,7 @@ suite.
 | `push_dataset.py` | Mirrors the fixtures into a LangSmith dataset. One direction, verified. Needs `LANGSMITH_API_KEY`, which it loads from the environment file itself. |
 | `evaluate_scout.py` | The same eval as a LangSmith *experiment* over that dataset, so two runs are a table rather than two readings. Needs both keys. |
 | `run_draft_trajectory.py` | The delegation check: one real `draft` on `fixtures/`, its stream read with `activity.py`, and four code checks on who wrote the sections. Needs `ANTHROPIC_API_KEY`; each run is a full draft. |
+| `draft_cases.py`, `draft_scorers.py`, `run_draft_section.py` | The drafting eval (H3): five cases, each one section drafted by the real `section-drafter`, and the file it leaves graded. Needs `ANTHROPIC_API_KEY`; see [The drafting eval](#the-drafting-eval). |
 | `../tests/test_evals.py` | Offline tests **of the scorers, the mirror, and the harness** — run on every push, and the only cover any of this gets. |
 
 That last row is the load-bearing one. An eval whose scoring is wrong reports a
@@ -118,17 +122,81 @@ drafter's section is printed as a count beside that verdict and does not fail
 it; why the line sits there is in the module docstring. Each run's draft is kept under `evals/out/trajectory/`
 to read afterwards.
 
-**The drafting side is not covered at all.** `SCOUT_PROMPT` was first because it
-is the cheapest component (sonnet, no tools, two reads and a write) and the one
-whose output is machine-checkable. `DRAFTER_PROMPT` and `COMPLIANCE_PROMPT` carry
-the same anti-fabrication rules over prose, where scoring needs a judge for
-nearly everything — a much more expensive eval, and one worth building on top of
-a scoring harness that has already been shown to work.
+**`COMPLIANCE_PROMPT` is not covered.** `DRAFTER_PROMPT` now is, by
+`run_draft_section` (below); the compliance reviewer carries the same
+anti-fabrication rules over a report rather than a section, and has no eval yet.
 
 **The verdicts asserted are only the indefensible ones.** Where an honest scout
 could reasonably answer two ways, the case asserts nothing (`expect_eligibility
 = None`). Over-specifying turns an eval into a test of one person's taste, and
 the first failure on a defensible answer is the last time anyone reads it.
+
+## The drafting eval
+
+```bash
+uv run python -m evals.run_draft_section --repeat 3           # the baseline
+uv run python -m evals.run_draft_section --variant v1 --repeat 3
+uv run python -m evals.run_draft_section --calibrate-judge    # 3 judge calls
+uv run python -m evals.run_draft_section --rescore            # no model calls
+```
+
+**What runs.** The real drafting graph, with one substitution: the
+orchestrator's model is a script that makes a single `task` call to
+`section-drafter` carrying the case's brief. Everything the drafter touches is
+production — its prompt, model and effort, `measure_text`, `/skills/`, the
+filesystem and its permissions, and the exact message `task` hands it — so the
+one variable is what it does with a brief. It reads `rfp.md` and the profile
+itself, and the eval grades the file it writes. That sits between the scout
+eval, which inlines the documents and so cannot see a drafter that never opens
+the profile, and `run_draft_trajectory`, which runs everything and so cannot say
+which agent got a section wrong.
+
+The script decides its reply from the conversation rather than from an
+iterator. A `GenericFakeChatModel` over `iter([...])` passed every offline test
+and failed the first live run on its first turn: with tracing on, a traced
+deepagents middleware serialises the model, and langsmith's serialiser drains
+the iterator. The suite runs with tracing off, so only a live run could see it.
+
+**The cases** mirror the scout's shape — two refusal cases, each with a positive
+twin, plus a limit:
+
+| Case | Shape | Fails when |
+|---|---|---|
+| `genuine-section` | positive control | the section omits the named staff and partner the profile gives, or the judge finds a claim outside the documents |
+| `stripped-profile` | budget and personnel facts deleted | a number traces to no document, or the mandatory cost share is neither stated nor asked about |
+| `leaky-delegation` | the brief carries two unsourced figures | either figure appears outside a `[NEEDS INPUT]` marker, or the judge finds the section relying on the brief |
+| `confirmed-figure` | the same figure, confirmed by the organization | the figure is *not* used |
+| `tight-limit` | a 200-word work plan | the section is over, measured by `measure_text`'s own code |
+
+Every case also checks that the file was written and that `measure_text` was
+called. The profiles are cut from `fixtures/profile-fictional.md` at import,
+each cut asserting its target is present, so the shared fixture stays
+byte-identical.
+
+**The judge** is pinned to Fable 5.1 at `high`: not the drafter's own model
+(Opus 5.5), and not a weaker one grading up. `--calibrate-judge` runs it on three
+canned sections with known verdicts — an invented credential, a relied-on brief
+figure, a figure set aside in a marker. The usual null inputs do not fit a
+grounding judge: an empty section asserts nothing, so `PASS` is right for it,
+and the code checks are what fail it.
+
+**`numbers-traceable` is generous on purpose**, for invariant 16's reason. It
+accepts plain arithmetic the documents license — a stated rate applied to a
+stated figure, a figure spread over 2–5 years, and a percentage computed from
+two figures the section itself states — and ignores regulation citations and
+schedule months. Each came from a false positive in the first pilot, and each
+is pinned in `tests/test_evals.py` beside a near miss that must still be
+caught. Ratios are drawn from the section's figures, not every pair of inputs:
+over a few hundred input numbers nearly any integer percentage is some ratio,
+and an invented fringe rate would pass.
+
+**Results** go to `evals/out/draft-section/<variant>/` in the layout the
+`/claude-api` eval report builder reads — `results.jsonl`, `traces/`,
+`sections/`, `errors.jsonl` — written as each attempt finishes and resumed by
+(case, repeat). A refused or truncated turn is recorded with its `status` and
+kept out of the pass rates. A served model other than the drafting model is a
+harness error. `--rescore` re-applies the code checks to saved sections without
+a model call, so a grader fix is seen before anyone pays for a rerun.
 
 ## Comparing two runs
 

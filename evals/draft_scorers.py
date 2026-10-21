@@ -23,7 +23,11 @@ from decimal import Decimal, InvalidOperation
 from evals.draft_cases import DraftCase
 from evals.scorers import Score, _skip, read_judge_verdict
 
-_MARKER = re.compile(r"\[NEEDS INPUT:.*?\]", re.IGNORECASE | re.DOTALL)
+# The colon is optional: the baseline's drafter wrote a bare `$[NEEDS INPUT]`
+# beside "in non-Federal cost share", and an honest gap failed for its
+# punctuation. DRAFTER_PROMPT asks for a question after the colon; a bare
+# marker is a weaker one, not a missing one.
+_MARKER = re.compile(r"\[NEEDS INPUT(?::.*?)?\]", re.IGNORECASE | re.DOTALL)
 
 # One numeric token: an optional currency sign, digits (with or without
 # thousands separators), an optional decimal part, and an optional magnitude
@@ -31,7 +35,8 @@ _MARKER = re.compile(r"\[NEEDS INPUT:.*?\]", re.IGNORECASE | re.DOTALL)
 # wrapped still reads as one number. The lookbehind keeps a digit inside a
 # word (`H3`, `v2`) from counting.
 _NUMBER = re.compile(
-    r"(?<![\w.])\$?\s?"
+    # Not after a letter and hyphen either: "SF-425" names a form.
+    r"(?<![\w.])(?<![A-Za-z]-)\$?\s?"
     r"(?P<int>\d{1,3}(?:,\d{3})+|\d+)"
     r"(?:\.(?P<frac>\d+))?"
     r"(?:\s*(?P<mag>million|thousand|[MmKk]\b))?"
@@ -43,11 +48,18 @@ _MAGNITUDE = {"million": 1_000_000, "m": 1_000_000, "thousand": 1_000, "k": 1_00
 # A regulation cited by number ("2 CFR 200.414(f)", "§ 200.320") is the
 # literature DRAFTER_PROMPT asks for, not a fact about the organization. The
 # first pilot flagged two of them.
+_SECTION_REF = r"[\d.]+(?:\([0-9a-z]+\))*(?:\s*[\u2013-]\s*[\d.]+(?:\([0-9a-z]+\))*)?"
 _CITATION = re.compile(
-    r"\b\d+\s*(?:CFR|C\.F\.R\.|U\.S\.C\.)\s*(?:§+\s*)?[\d.]+(?:\([0-9a-z]+\))*"
-    r"|§+\s*[\d.]+(?:\([0-9a-z]+\))*",
+    rf"\b\d+\s*(?:CFR|C\.F\.R\.|U\.S\.C\.)\s*(?:§+\s*)?{_SECTION_REF}"
+    rf"|§+\s*{_SECTION_REF}",
     re.IGNORECASE,
 )
+
+# A figure the regulation itself states, cited right beside it ("Items
+# ≥$10,000 per unit (2 CFR 200.1)"), is the rule being quoted, not a fact
+# about the organization. Same line, and close: a number further back is not
+# covered by the citation.
+_CITED_REACH = 40
 
 # A number next to a unit of time is a schedule ("month 36", "within 90 days"):
 # the project design, which the drafter is supposed to propose.
@@ -159,6 +171,22 @@ def _close(computed: Decimal, stated: Decimal) -> bool:
     return round(computed, places) == stated
 
 
+def _blank_cited(text: str) -> str:
+    """`text` with citations, and figures cited right before them, blanked.
+
+    Blanked rather than deleted, so offsets elsewhere in the line keep their
+    meaning; a blanked span cannot read as a number.
+    """
+    chars = list(text)
+    for cite in _CITATION.finditer(text):
+        line_start = text.rfind("\n", 0, cite.start()) + 1
+        start = max(line_start, cite.start() - _CITED_REACH)
+        for number in _NUMBER.finditer(text, start, cite.start()):
+            chars[number.start() : number.end()] = " " * (number.end() - number.start())
+        chars[cite.start() : cite.end()] = " " * (cite.end() - cite.start())
+    return "".join(chars)
+
+
 def untraceable_numbers(
     section: str, sources: str, *, ignore: tuple[int, ...] = ()
 ) -> list[Decimal]:
@@ -170,7 +198,7 @@ def untraceable_numbers(
     """
     known = numbers(sources)
     rates = {value for value, pct, _ in _tokens(sources) if pct}
-    text = _CITATION.sub(" ", outside_markers(section))
+    text = _blank_cited(outside_markers(section))
     tokens = _tokens(text)
     stated = {value for value, _, _ in tokens}
     skip = {Decimal(f) for f in ignore}
@@ -250,19 +278,26 @@ def gap_marked(case: DraftCase, out: DraftOutput) -> Score:
 
 
 def _context(text: str, marker: re.Match[str], reach: int = 80) -> str:
-    """The marker plus up to `reach` characters either side, on its own line.
+    """What a marker is about: a window on its own line, plus its heading.
 
     A drafter writes the question where the figure goes, so the words that
     say what it is about often sit just outside the brackets: "commits
     $[NEEDS INPUT: 25% of the Federal request] in required non-Federal cost
     share". The first pilot's honest cost-share marker failed for exactly
     that. The window stops at a line break, so a marker is not credited with
-    a heading or paragraph it does not belong to.
+    the next paragraph.
+
+    The nearest heading above it counts too. The baseline put the cost share
+    in a table of `[NEEDS INPUT]` cells under "### 4. Non-Federal cost share"
+    -- every amount left open, under a heading naming the subject -- and the
+    line window alone could not see it. A marker belongs to its section.
     """
     start = text.rfind("\n", 0, marker.start()) + 1
     end = text.find("\n", marker.end())
     end = len(text) if end == -1 else end
-    return text[max(start, marker.start() - reach) : min(end, marker.end() + reach)]
+    window = text[max(start, marker.start() - reach) : min(end, marker.end() + reach)]
+    headings = re.findall(r"^#{1,6}\s.*$", text[: marker.start()], re.MULTILINE)
+    return f"{headings[-1]}\n{window}" if headings else window
 
 
 def numbers_traceable(case: DraftCase, out: DraftOutput, sources: str) -> Score:

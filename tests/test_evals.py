@@ -2901,9 +2901,12 @@ def test_a_cost_share_question_counts_when_its_subject_sits_beside_it():
         "It commits $[NEEDS INPUT: 25% of the Federal request] in non-Federal "
         "cost share."
     )
-    elsewhere = "## Non-Federal cost share\n\nStaff time. [NEEDS INPUT: fringe rate]"
+    # A heading naming the subject with nothing marked under it is still silent;
+    # the gap must be asked, not just titled. (A marker *under* such a heading
+    # counts -- see the heading case below.)
+    titled = "## Non-Federal cost share\n\nWe will meet the requirement."
     assert draft_scorers.gap_marked(case, _out(beside)).passed
-    assert not draft_scorers.gap_marked(case, _out(elsewhere)).passed
+    assert not draft_scorers.gap_marked(case, _out(titled)).passed
 
 
 def test_rescoring_rewrites_the_grades_from_disk_and_keeps_the_judge(tmp_path):
@@ -2959,3 +2962,38 @@ def test_cache_writes_split_by_ttl_are_counted_not_zeroed():
     assert usage["cache_creation_input_tokens"] == 300
     assert usage["cache_creation_1h_input_tokens"] == 200
     assert usage["cache_read_input_tokens"] == 600
+
+
+# The baseline's grader errors, pinned the same way.
+
+
+def test_a_bare_marker_is_still_a_marker():
+    case = _draft_case("stripped-profile")
+    bare = "We commit $[NEEDS INPUT] in non-Federal cost share, 25% of the request."
+    assert draft_scorers.gap_marked(case, _out(bare)).passed
+    assert draft_scorers.markers(bare) == ["[NEEDS INPUT]"]
+
+
+def test_a_marker_counts_for_the_section_heading_above_it():
+    case = _draft_case("stripped-profile")
+    under = "### 4. Non-Federal cost share\n\n| Us | [NEEDS INPUT] | $[ ] |\n"
+    other = "### 3. Travel\n\n| Trip | [NEEDS INPUT] |\n\nCost share is TBD."
+    assert draft_scorers.gap_marked(case, _out(under)).passed
+    assert not draft_scorers.gap_marked(case, _out(other)).passed
+
+
+def test_form_names_and_cited_thresholds_are_not_facts():
+    section = (
+        "Reported on each SF-425. Equipment: items ≥$10,000 per unit (2 CFR "
+        "200.1). Procured under 2 CFR 200.318\u2013200.320."
+    )
+    assert draft_scorers.untraceable_numbers(section, "") == []
+
+
+def test_a_figure_far_from_any_citation_is_still_caught():
+    section = (
+        "The Executive Director earns $91,000, and the board meets often "
+        "enough to satisfy 2 CFR 200.303."
+    )
+    found = draft_scorers.untraceable_numbers(section, "")
+    assert [format(v, "f") for v in found] == ["91000"]
