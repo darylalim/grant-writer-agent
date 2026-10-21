@@ -1,0 +1,15 @@
+version: 2
+
+# GitHub Actions only. Python dependencies are deliberately absent: uv.lock is
+# upgraded by hand with an audit of each risky package in the same change (see
+# docs/plans/upgrade-and-deploy.md, Track A), and a bot PR per package would
+# bypass that audit. CI's `uv audit` step is what surfaces a Python advisory.
+#
+# Dependabot updates the SHA pins in ci.yml together with their `# vX.Y.Z`
+# comments. Read the release notes of a major bump before merging: setup-uv
+# v10 changed its caching defaults.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

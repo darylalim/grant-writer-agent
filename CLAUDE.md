@@ -43,8 +43,11 @@ bites.
 
 CI adds what the local loop cannot. It runs the suite on **3.14** as well as `.python-version`'s
 3.13, and pins `ruff@0.17.1` / `ty@0.0.89`. The hooks pin the same versions, so a local edit is
-formatted exactly as CI's `format --check` reads it. **A version bump touches three places in one
-commit:** `ci.yml`, the hooks in `.claude/settings.json`, and this paragraph. Bump deliberately, and
+formatted exactly as CI's `format --check` reads it. uv itself is pinned by `[tool.uv]
+required-version` in `pyproject.toml`, which setup-uv reads too, so the three jobs pass no
+`version:`. Move it together with the `uv_build` bound in `[build-system]`. CI's `lint` job also
+runs `uv audit` and fails on any advisory not ignored there by ID, with a reason. **A ruff or ty
+version bump touches three places in one commit:** `ci.yml`, the hooks in `.claude/settings.json`, and this paragraph. Bump deliberately, and
 re-check the ty baseline when you do. Billed commands (`grant-writer draft`/`discover`/`chat`,
 `evals.run_scout`, `evals.evaluate_scout`) and any `rm`/`mv` of `.grant_writer/checkpoints*` are
 `permissions.ask` rules there: confirmed by a human, never forbidden. Releases need no separate step: a green push to `main`

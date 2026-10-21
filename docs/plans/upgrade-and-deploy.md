@@ -93,8 +93,8 @@ without stopping to ask.
 | # | Decision | Options | Recommendation | Needed by |
 |---|---|---|---|---|
 | 1 | When to release 0.2.2 | after A / after Tier 1 | **Decided 2026-10-19: after Tier 1**, once H2 passes on A's result, as its own PR | end of Tier 1 |
-| 2 | Dependabot | actions only / none | Actions only (Python stays manual and audited) | C3 |
-| 3 | How CI pins uv | `required-version` / `version:` inputs | `required-version`: one place, local and CI | C3 |
+| 2 | Dependabot | actions only / none | **Decided 2026-10-20: actions only** (Python stays manual and audited) | C3 |
+| 3 | How CI pins uv | `required-version` / `version:` inputs | **Decided 2026-10-20: `required-version`** (`==0.13.4`): one place, local and CI | C3 |
 | 4 | Effort per role | values | drafting, grader, compliance `high`; research, discovery `medium`, confirmed by D4 | D1 step 3 |
 | 5 | Scout model | Sonnet 5.5 / Haiku 5.5 | Keep Sonnet unless Haiku matches on citation and invention scores over 3 repeats | D4 |
 | 6 | Server-side refusal fallback | off / `fallbacks: "default"` | Decide from H4's measured rate; off if it's zero | D2 step 3 |
@@ -130,12 +130,20 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
   - The docs landed in the lock commit itself: `CLAUDE.md`, the README's checkpoints row and its backup command.
 - [x] A2: `.gitignore`, description, topics, README intro (commit: `160f25f`)
   - `gh repo edit` run 2026-10-19 with the user's confirmation. The description is the one in `pyproject.toml`. Topics are exactly the 17 above: the repo already had 12, and four the plan never listed (`deepagents`, `fundraising`, `grants-gov`, `proposal-writing`) were removed at the user's choice, since keeping them would have gone over GitHub's 20-topic limit.
-- [ ] B: `uv_build` 0.13; archive contents checked (commit: `       `)
+- [x] B: `uv_build` 0.13; archive contents checked (commit: `30c8194`)
+  - 2026-10-20: **uv 0.13.4 chosen**, for both the local uv (`uv self update` from 0.12.22, with the user's OK) and the backend bound `uv_build>=0.13.4,<0.14.0`. 0.13.4 is the release that replaces a compromised root CA in the bundled certificates (GHSA-hq85-5cpj-mr62). 0.13.2 also fixed the backend's recursive-glob matching. The 0.13.0 notes list no breaking changes to backend configuration. C3 pins this version.
+  - Archives: compared against a baseline built the same day from `main` with uv 0.12.22. The sdist and wheel file lists are **identical**, wheel `METADATA` is byte-identical, and `WHEEL` says `Generator: uv 0.13.4` (the fast path, since uv and the backend match). The wheel installs into an isolated environment and `grant-writer --help` runs. `uv.lock` is unchanged. Suite: 448 passed in 11.35s.
 - [x] C: CI ruff/ty pins (commit: `6ef0929`)
-- [ ] C2: hooks pinned; triggers widened; `ask` rules (commit: `a334939`)
-  - Pins and triggers pipe-tested. Whether the `ask` prompt actually appears is unconfirmed: needs the user to say whether a guarded command prompted (the H2 run, `evals.run_draft_trajectory`, is on the list).
+- [x] C2: hooks pinned; triggers widened; `ask` rules (commit: `a334939`)
+  - Pins and triggers pipe-tested.
+  - 2026-10-20: the `ask` prompt confirmed by the user in **default mode** (not auto mode). Probe: `uv run grant-writer chat --help`, which matches `Bash(uv run grant-writer chat *)` but makes no API call. The command was sent as `cd <repo> && uv run …`, so the rule also matches inside a compound command.
   - Security review of `main...track-h` (2026-10-19): no findings.
-- [ ] C3: setup-uv v10; uv pinned; `uv audit` in CI; Dependabot (commit: `       `)
+- [x] C3: setup-uv v10; uv pinned; `uv audit` in CI; Dependabot (commit: `       `; certifi: `b2c8d17`)
+  - 2026-10-20. `setup-uv` is `1c37ad07…` = v10.3.0 (resolved with `gh api`, a direct commit tag) on all three jobs. v10's one breaking change disables the cache under `enable-cache: auto` on `pull_request_target`/`workflow_run`/`release` events. This workflow sets `enable-cache: true` and runs on none of them, so nothing changes. v10.3.0 embeds checksums only through uv 0.13.0; newer versions are verified against `astral-sh/versions` (v10.1+). `checkout` is still current at v7.0.1. Permissions are unchanged.
+  - uv: `[tool.uv] required-version = "==0.13.4"`, which setup-uv reads by default, so no job passes `version:`.
+  - `uv audit` initially reported **11 advisories published since Track A's clean audit**. **Decided by the user:** upgrade certifi 2026.10.18 → 2026.10.19 (PYSEC-2026-4320, compromised emSign CAs; runtime dependency via httpx/requests) in its own commit, `b2c8d17`. Accept the 9 pillow advisories **by ID** in `ci.yml`: dev-only through streamlit, whose latest (1.66.0) caps `pillow<13`, while all 9 are fixed in 13.0.0, and nothing here decodes images. `--ignore-until-fixed` can't cover these, since a fix exists. Checked locally: passes with all 9 ignored, fails with any one dropped. **Remove the ignores when streamlit lifts the cap.**
+  - Dependabot: `github-actions` only, weekly. README and `CLAUDE.md` updated.
+  - Not yet validated: the PR's own CI run (both matrix legs, `lint` with the audit) and, after merge, the `release` job's "Decide whether to release" output.
 - [x] H1: pinned judge, `--repeat`, eval labels (commit: `84215b3`)
 - [x] H2: delegation check; run on A's result (commit: `c2d9ce4` code and offline tests)
   - Live on A's result, `--repeat 3`: **8/12**. `compliance-checked` 3/3, `plans` 3/3, `delegates-sections` 2/3 (one run had 6 section files for 5 drafter calls), `no-inline-drafting` **0/3**. All three runs hit the 150-step limit, about 1190 s each, and none reached `final/`.

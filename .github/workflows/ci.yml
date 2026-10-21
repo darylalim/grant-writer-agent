@@ -69,7 +69,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           # Sets UV_PYTHON, so the sync below builds on this interpreter rather
@@ -100,7 +100,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -110,6 +110,29 @@ jobs:
       # group, since tests/ imports streamlit and ty resolves imports statically.
       - name: Install
         run: uv sync --locked
+
+      # Every advisory against uv.lock fails the job unless it is ignored here
+      # by ID, with its reason. By ID rather than --ignore-until-fixed: that
+      # flag only covers advisories with no fix released, and these have one
+      # we cannot install. A *new* pillow advisory still fails.
+      #
+      # pillow, 9 advisories, all fixed in 13.0.0 (accepted 2026-10-20): dev-only,
+      # pulled in by streamlit, whose latest release (1.66.0) caps pillow<13.
+      # Nothing here decodes images -- uploads are PDFs read by pypdf, and
+      # st.pdf renders in the browser. Remove these lines when streamlit lifts
+      # the cap and the lock moves to pillow 13.
+      - name: Audit dependencies
+        run: >-
+          uv audit --locked --preview-features audit-command
+          --ignore GHSA-65qm-jvmh-6pqg
+          --ignore GHSA-vx6w-vv9f-6gvg
+          --ignore GHSA-58r4-6rv3-gfh8
+          --ignore GHSA-q45j-58j2-45rg
+          --ignore GHSA-462x-pgg6-55fp
+          --ignore GHSA-8g5g-8vmr-9782
+          --ignore GHSA-c6hw-5grf-ff96
+          --ignore GHSA-p4wg-p73j-c528
+          --ignore GHSA-pchr-8j38-3x4p
 
       # Pinned on purpose. [tool.ruff.lint] selects whole families, so a release
       # that adds a rule to any of them turns CI red on code that did not change.
@@ -164,7 +187,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 

@@ -19,6 +19,9 @@ you to fill instead of inventing data.
 
 ## Quick start
 
+Needs **uv 0.13.4** exactly: `pyproject.toml` pins it with `required-version`,
+so any other uv refuses to run here. `uv self update 0.13.4` installs it.
+
 ```bash
 uv sync
 cp .env.example .env             # add ANTHROPIC_API_KEY and TAVILY_API_KEY
@@ -255,6 +258,12 @@ uv run python -m evals.run_scout                     # prompt eval: live model, 
 - **CI** runs on Python 3.13 and 3.14, with pinned `ruff` and `ty` versions.
   The Claude Code hooks pin the same versions, so a local edit is formatted
   exactly as CI checks it.
+- **uv is pinned too**, to 0.13.4 by `required-version` in `pyproject.toml`.
+  CI reads the same setting, so local and CI builds run the same uv, and it
+  moves together with the `uv_build` bound.
+- **CI audits `uv.lock`** with `uv audit` and fails on any advisory not
+  accepted by ID in `ci.yml`, with the reason next to it. Dependabot keeps the
+  GitHub Actions current; Python dependencies are upgraded by hand.
 - **Billed commands ask first in Claude Code.** `draft`, `discover`, `chat` and
   the live evals, plus any `rm` or `mv` of the checkpoint file, need a
   confirmation before they run.
