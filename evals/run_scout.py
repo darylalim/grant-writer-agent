@@ -58,7 +58,7 @@ from evals.scorers import (
     score_programmatically,
 )
 from evals.scout_cases import CASES, ScoutCase
-from grant_writer.config import DISCOVERY_MODEL, build_model
+from grant_writer.config import DISCOVERY_EFFORT, DISCOVERY_MODEL, build_model
 from grant_writer.prompts import SCOUT_PROMPT
 
 if TYPE_CHECKING:  # the client now arrives on the run; see `post_scores`
@@ -121,7 +121,7 @@ def ask_scout(
     content itself". Passing the brief through rather than reconstructing it is
     what keeps the dataset able to change that instruction.
     """
-    scout = build_model(DISCOVERY_MODEL)
+    scout = build_model(DISCOVERY_MODEL, effort=DISCOVERY_EFFORT)
     payload = (
         f"{brief}\n\n"
         f"<opportunity-file>\n{candidate}\n</opportunity-file>\n\n"
@@ -158,7 +158,9 @@ def ask_judge(
     return read_judge_verdict(verdict)
 
 
-def call_config(role: str, case: ScoutCase, model_spec: str) -> RunnableConfig:
+def call_config(
+    role: str, case: ScoutCase, model_spec: str, effort: str
+) -> RunnableConfig:
     """The labels one model call carries into LangSmith.
 
     A function rather than a literal at each call site so it can be checked
@@ -170,6 +172,11 @@ def call_config(role: str, case: ScoutCase, model_spec: str) -> RunnableConfig:
     `BaseChatModel.invoke` accepts, and it is a `TypedDict` -- so a key it does
     not know is rejected here rather than accepted and dropped in silence,
     which is the same hazard `config.trace_config` centralises for the graphs.
+
+    `effort` sits beside `model` because the two are one setting now that each
+    role has its own: a scout run at `medium` and one at `high` share a model
+    id, so without it a before/after comparison of an effort change could not
+    say from the trace which half a run belongs to.
     """
     return {
         "run_name": role,
@@ -178,6 +185,7 @@ def call_config(role: str, case: ScoutCase, model_spec: str) -> RunnableConfig:
             "case": case.key,
             "role": role,
             "model": model_spec,
+            "effort": effort,
             "frontend": EVAL_FRONTEND,
         },
     }
@@ -330,14 +338,18 @@ def run_case(case: ScoutCase, *, judge: bool, repeat: int = 0) -> dict:
             brief=case.brief,
             candidate=case.candidate,
             profile=case.profile,
-            config=call_config("scout", case, DISCOVERY_MODEL),
+            config=call_config("scout", case, DISCOVERY_MODEL, DISCOVERY_EFFORT),
         )
 
         scores: list[Score] = score_programmatically(case, output)
 
         if judge:
             scores.append(
-                ask_judge(case, output, config=call_config("judge", case, JUDGE_MODEL))
+                ask_judge(
+                    case,
+                    output,
+                    config=call_config("judge", case, JUDGE_MODEL, JUDGE_EFFORT),
+                )
             )
 
         post_scores(run, scores)

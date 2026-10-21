@@ -80,7 +80,7 @@ from evals.scorers import (
     render_rates,
     score_programmatically,
 )
-from grant_writer.config import DISCOVERY_MODEL
+from grant_writer.config import DISCOVERY_EFFORT, DISCOVERY_MODEL
 from grant_writer.prompts import SCOUT_PROMPT
 
 if TYPE_CHECKING:
@@ -271,6 +271,7 @@ def experiment_metadata(
         "dataset": dataset,
         "repeat": repeat,
         "scout_model": DISCOVERY_MODEL,
+        "scout_effort": DISCOVERY_EFFORT,
         "scout_prompt_sha": _sha(SCOUT_PROMPT),
         "judge": judge,
         "judge_model": JUDGE_MODEL if judge else None,

@@ -436,7 +436,7 @@ def _run_tree(client=None) -> RunTree:
 def test_each_model_call_is_labelled_with_the_case_it_came_from():
     """Two calls per case, and neither used to say which case."""
     case = _case("genuine-fit")
-    config = run_scout.call_config("scout", case, "anthropic:claude-sonnet-5")
+    config = run_scout.call_config("scout", case, "anthropic:claude-sonnet-5", "medium")
 
     assert config["run_name"] == "scout"
     assert f"case:{case.key}" in config["tags"]
@@ -444,6 +444,7 @@ def test_each_model_call_is_labelled_with_the_case_it_came_from():
         "case": case.key,
         "role": "scout",
         "model": "anthropic:claude-sonnet-5",
+        "effort": "medium",
         "frontend": "eval",
     }
 
@@ -455,8 +456,8 @@ def test_the_scout_and_the_judge_are_told_apart():
     scout -- and the judge exists precisely because it is not one.
     """
     case = _case("genuine-fit")
-    scout = run_scout.call_config("scout", case, "anthropic:claude-sonnet-5")
-    judge = run_scout.call_config("judge", case, "anthropic:claude-opus-5")
+    scout = run_scout.call_config("scout", case, "anthropic:claude-sonnet-5", "high")
+    judge = run_scout.call_config("judge", case, "anthropic:claude-opus-5", "high")
 
     assert scout["run_name"] != judge["run_name"]
     assert scout["metadata"]["model"] != judge["metadata"]["model"]
@@ -2174,8 +2175,6 @@ def test_the_judge_is_pinned_rather_than_borrowed_from_the_grader_role(monkeypat
     re-score the "after" half of a comparison with a different judge. Pinned to
     literals here, and checked on the outgoing request rather than the module.
     """
-    from grant_writer import config
-
     assert run_scout.JUDGE_MODEL == "anthropic:claude-opus-5-5"
     assert run_scout.JUDGE_EFFORT == "high"
     # Not the grader constant: an override of that must not reach the judge.
@@ -2183,7 +2182,7 @@ def test_the_judge_is_pinned_rather_than_borrowed_from_the_grader_role(monkeypat
 
     seen = {}
 
-    def fake_build(spec, *, effort=config.MODEL_EFFORT):
+    def fake_build(spec, *, effort):
         seen["spec"], seen["effort"] = spec, effort
         raise RuntimeError("stop before the network")
 
@@ -2198,14 +2197,23 @@ def test_eval_runs_say_they_are_evals_under_the_key_real_runs_use():
 
     Same key, not a new one, so one filter separates measurement from use.
     """
+    from grant_writer import config
+
     case = _case("genuine-fit")
     for role in ("scout", "judge"):
-        assert run_scout.call_config(role, case, "m")["metadata"]["frontend"] == "eval"
+        assert (
+            run_scout.call_config(role, case, "m", "e")["metadata"]["frontend"]
+            == "eval"
+        )
     labelled = evaluate_scout.experiment_metadata(dataset="d", judge=True, repeat=3)
     assert labelled["frontend"] == "eval"
     assert labelled["judge_model"] == run_scout.JUDGE_MODEL
     assert labelled["judge_effort"] == run_scout.JUDGE_EFFORT
     assert labelled["repeat"] == 3
+    # The scout's effort, beside its model: a before/after comparison of a
+    # discovery effort change shares a model id on both sides, so this is the
+    # only label that says which half an experiment is.
+    assert labelled["scout_effort"] == config.DISCOVERY_EFFORT
 
 
 def test_pass_rates_count_each_repeat_per_case_and_check():

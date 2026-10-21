@@ -71,19 +71,45 @@ MAX_OUTPUT_TOKENS = 64000
 # the upgrade alone would have made drafting think less -- no error, just a
 # shallower proposal. Thinking cannot be disabled on these models; effort is
 # the only depth control. Anthropic specs only: other providers reject the key.
-MODEL_EFFORT = "high"
+#
+# Per role, keyed like DEFAULT_MODELS and overridable the same way, because the
+# roles do not need the same depth: a scan that decides whether to apply at all
+# is not a section someone submits. Every role is `high` for now -- the same
+# request as when this was one global value -- so that moving a role is a
+# change to this dict alone, made after an eval can see what it costs. An
+# override outside langchain-anthropic's accepted levels fails loudly, at
+# construction: the field is a `Literal`.
+DEFAULT_EFFORT = {
+    "drafting": "high",
+    "research": "high",
+    "compliance": "high",
+    "grader": "high",
+    "discovery": "high",
+}
+
+DRAFTING_EFFORT = os.getenv("GRANT_WRITER_DRAFTING_EFFORT", DEFAULT_EFFORT["drafting"])
+RESEARCH_EFFORT = os.getenv("GRANT_WRITER_RESEARCH_EFFORT", DEFAULT_EFFORT["research"])
+COMPLIANCE_EFFORT = os.getenv(
+    "GRANT_WRITER_COMPLIANCE_EFFORT", DEFAULT_EFFORT["compliance"]
+)
+GRADER_EFFORT = os.getenv("GRANT_WRITER_GRADER_EFFORT", DEFAULT_EFFORT["grader"])
+DISCOVERY_EFFORT = os.getenv(
+    "GRANT_WRITER_DISCOVERY_EFFORT", DEFAULT_EFFORT["discovery"]
+)
 
 
-def build_model(spec: str, *, effort: str = MODEL_EFFORT) -> BaseChatModel:
+def build_model(spec: str, *, effort: str) -> BaseChatModel:
     """Resolve a `provider:model` spec into a chat model with a real ceiling.
 
     Called lazily from `build_agent`/`build_subagents` rather than at import, so
     importing this module stays cheap and the CLI's `require_api_keys` check
     still reports missing credentials before any client is constructed.
 
-    `effort` exists for the one caller that must not move with the product's
-    setting: the eval judge, which pins its own so a before/after comparison of
-    an effort change is scored by the same judge on both sides.
+    `effort` is required, with no default, so a new call site cannot quietly
+    inherit some other role's depth: each caller names its own role's
+    `*_EFFORT`, and the eval judge names its pinned `JUDGE_EFFORT`, so a
+    before/after comparison of an effort change is scored by the same judge on
+    both sides. It is ignored for non-Anthropic specs, which reject the key.
     """
     if spec.startswith("anthropic:"):
         return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS, effort=effort)
