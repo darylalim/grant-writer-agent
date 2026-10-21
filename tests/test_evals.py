@@ -47,7 +47,15 @@ from langsmith.evaluation.evaluator import run_evaluator
 from langsmith.run_trees import RunTree
 from langsmith.utils import LangSmithConflictError, LangSmithNotFoundError
 
-from evals import evaluate_scout, push_dataset, run_draft_trajectory, run_scout
+from evals import (
+    draft_cases,
+    draft_scorers,
+    evaluate_scout,
+    push_dataset,
+    run_draft_section,
+    run_draft_trajectory,
+    run_scout,
+)
 from evals.scorers import (
     JUDGE_PROMPT,
     Score,
@@ -2502,3 +2510,317 @@ def test_a_run_that_hits_the_step_limit_is_still_scored(tmp_path, monkeypatch):
     assert record["stopped"] == "recursion limit (5) reached"
     verdicts = {s["name"]: s["passed"] for s in record["scores"]}
     assert verdicts["no-inline-drafting"] is False
+
+
+# ---- H3: the drafting eval, scorers and harness -------------------------------
+#
+# Same contract as the scout's: each case hands a scorer one specific failure.
+# The number-tracing cases lean the other way too, pinning spellings that must
+# *not* be reported, because a false positive here is the expensive direction
+# (invariant 16) -- an honest figure flagged teaches the reader to skip the flag.
+
+
+def _draft_case(key: str) -> draft_cases.DraftCase:
+    return next(c for c in draft_cases.CASES if c.key == key)
+
+
+def _out(section: str | None, *calls: str) -> draft_scorers.DraftOutput:
+    return draft_scorers.DraftOutput(section=section, tool_calls=calls)
+
+
+@pytest.mark.parametrize(
+    ("stated", "source"),
+    [
+        ("$1,100,000", "budget of $1.1 million"),
+        ("1100000", "$1,100,000"),
+        ("$1.1M", "1.1 million"),
+        ("$212,000", "sales: $212,000"),
+        ("212000 dollars", "$212,000"),
+        ("$68K", "$68,000"),
+        ("a 25% match", "equal to 25% of"),
+        ("$1.1\nmillion", "1.1 million"),
+    ],
+)
+def test_a_figure_spelled_differently_from_its_source_still_traces(stated, source):
+    assert draft_scorers.untraceable_numbers(f"We note {stated}.", source) == []
+
+
+def test_an_invented_salary_is_reported_and_a_marker_is_not():
+    section = (
+        "The Executive Director's salary is $72,500 with fringe at 24%. "
+        "[NEEDS INPUT: confirm the evaluator cost; the brief estimated $68,000]"
+    )
+    found = draft_scorers.untraceable_numbers(section, "fringe at 24% of salary")
+    assert [format(v, "f") for v in found] == ["72500"]
+
+
+def test_years_and_single_digits_are_not_inventions():
+    section = "Over 3 years, from 2026 to 2029, across 3 states, in Year 2."
+    assert draft_scorers.untraceable_numbers(section, "") == []
+
+
+def test_a_leaked_figure_fails_in_prose_and_passes_inside_a_marker():
+    case = _draft_case("leaky-delegation")
+    asked = "[NEEDS INPUT: is the $68,000 evaluator estimate right? total $735,000?]"
+    assert draft_scorers.no_leaked_figure(case, _out(asked)).passed
+    for prose in ("Evaluator: $68,000.", "Evaluator: $68K.", "Total: $735,000."):
+        assert not draft_scorers.no_leaked_figure(case, _out(prose)).passed, prose
+
+
+def test_the_confirmed_figure_must_be_used_not_merely_asked_about():
+    case = _draft_case("confirmed-figure")
+    used = "The external evaluator contract is budgeted at $68,000."
+    asked = "[NEEDS INPUT: confirm the $68,000 evaluator quote]"
+    assert draft_scorers.uses_confirmed_figure(case, _out(used)).passed
+    assert not draft_scorers.uses_confirmed_figure(case, _out(asked)).passed
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "[NEEDS INPUT: what cost share has the board approved?]",
+        "[NEEDS INPUT: amount of the non-Federal match]",
+        "[NEEDS INPUT: cost-sharing contributors and amounts]",
+    ],
+)
+def test_the_cost_share_gap_is_recognised_however_it_is_phrased(marker):
+    case = _draft_case("stripped-profile")
+    assert draft_scorers.gap_marked(case, _out(f"Text. {marker}")).passed
+
+
+def test_a_fiscal_plan_silent_on_cost_share_fails_the_gap_check():
+    case = _draft_case("stripped-profile")
+    other = "[NEEDS INPUT: fringe benefit rate]"
+    assert not draft_scorers.gap_marked(case, _out(f"Text. {other}")).passed
+
+
+def test_an_empty_section_collects_no_check_for_being_short():
+    """A null drafter must fail; writing nothing is under every limit."""
+    case = _draft_case("tight-limit")
+    for section in (None, "", "   \n"):
+        scores = draft_scorers.score_programmatically(case, _out(section), "")
+        verdicts = {s.name: s.passed for s in scores if not s.skipped}
+        assert verdicts["section-written"] is False
+        assert verdicts["within-limit"] is False
+
+
+def test_the_limit_is_counted_by_measure_text_itself():
+    case = _draft_case("tight-limit")
+    over = " ".join(["word"] * 201)
+    exact = " ".join(["word"] * 200)
+    assert not draft_scorers.within_limit(case, _out(over)).passed
+    assert draft_scorers.within_limit(case, _out(exact)).passed
+
+
+def test_the_profile_cuts_remove_every_withheld_fact_and_keep_the_rest():
+    stripped = draft_cases.STRIPPED_PROFILE
+    for gone in (
+        "$1.1 million",
+        "$480,000",
+        "Okafor",
+        "Brandt",
+        "24%",
+        "$60,000",
+        "de minimis",
+        "## Key personnel",
+    ):
+        assert gone not in stripped, gone
+    for kept in (
+        "Late-Frost Network",
+        "High Plains Orchard Extension Office",
+        "Red River Berry Association",
+        "$212,000",
+        "two-signature",
+    ):
+        assert kept in stripped, kept
+    for profile in (draft_cases.FULL_PROFILE, stripped):
+        assert "<!--" not in profile and "FICTIONAL FIXTURE" not in profile
+
+
+def test_a_cut_whose_target_moved_raises_instead_of_shrinking_nothing():
+    with pytest.raises(ValueError, match="not found exactly once"):
+        draft_cases._cut("profile text", "a line that is not there\n")
+
+
+def test_every_case_brief_names_its_inputs_and_its_own_output_path():
+    keys = [c.key for c in draft_cases.CASES]
+    assert len(set(keys)) == len(keys)
+    for case in draft_cases.CASES:
+        assert case.rfp_path in case.brief and case.section_path in case.brief
+        assert f"Limit: {case.limit_words} words." in case.brief
+        assert "/memories/org/AGENTS.md" in case.brief
+
+
+def test_each_refusal_case_has_its_positive_twin():
+    """A drafter that hedges everything and ignores every brief must fail somewhere."""
+    by_key = {c.key: c for c in draft_cases.CASES}
+    assert by_key["genuine-section"].expect_names
+    assert by_key["confirmed-figure"].required_figures == (68_000,)
+    assert set(by_key["confirmed-figure"].required_figures) <= set(
+        by_key["leaky-delegation"].forbidden_figures
+    )
+
+
+def test_the_draft_judge_is_pinned_and_is_not_the_drafter():
+    from grant_writer.config import DEFAULT_MODELS
+
+    assert run_draft_section.JUDGE_MODEL == "anthropic:claude-fable-5-1"
+    assert run_draft_section.JUDGE_EFFORT == "high"
+    assert DEFAULT_MODELS["drafting"] != run_draft_section.JUDGE_MODEL
+
+
+def test_the_draft_judge_is_shown_the_brief_and_both_documents():
+    case = _draft_case("leaky-delegation")
+    payload = draft_scorers.build_draft_judge_payload(case, "RFP TEXT", "SECTION")
+    assert "$68,000" in payload and "RFP TEXT" in payload and "SECTION" in payload
+    assert case.profile in payload
+    unreadable = draft_scorers.read_draft_judge_verdict("maybe?")
+    assert unreadable.skipped
+
+
+def test_every_scorer_has_a_declared_report_column():
+    """A check missing from METRICS renders as a blank column in the report."""
+    case = _draft_case("leaky-delegation")
+    names = {s.name for s in draft_scorers.score_programmatically(case, _out("x"), "")}
+    assert names | {"grounded"} <= set(run_draft_section.METRICS)
+    assert run_draft_section.METRICS[0] == "all-pass"
+
+
+class _FakeDrafter:
+    """A scripted section-drafter, built where `subagents.build_model` was."""
+
+    def __init__(self, replies):
+        self.replies = replies
+
+    def __call__(self, spec, *, effort):
+        del spec, effort
+        from langchain_core.language_models.fake_chat_models import (
+            GenericFakeChatModel,
+        )
+
+        class _Bound(GenericFakeChatModel):
+            def bind_tools(self, tools, **_kwargs):
+                return self
+
+        return _Bound(messages=iter(self.replies))
+
+
+def _reply(*calls, text="", stop="tool_use", model=None):
+    from langchain_core.messages import AIMessage
+
+    from grant_writer.config import DRAFTING_MODEL
+
+    served = model or DRAFTING_MODEL.split(":", 1)[-1]
+    return AIMessage(
+        text,
+        tool_calls=[
+            {"name": name, "args": args, "id": f"c{i}", "type": "tool_call"}
+            for i, (name, args) in enumerate(calls)
+        ],
+        response_metadata={"model_name": served, "stop_reason": stop},
+        usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+    )
+
+
+def _run_offline(monkeypatch, case, replies):
+    from grant_writer import subagents
+
+    monkeypatch.setattr(subagents, "build_model", _FakeDrafter(replies))
+    return run_draft_section.attempt(case, judge=False, repeat=0)
+
+
+def test_the_harness_scores_an_oracle_drafter_as_passing(monkeypatch):
+    """Through the real graph: scripted orchestrator, real task tool and backend.
+
+    The section reaches disk only through the drafter's own `write_file`, so a
+    pass here proves the brief arrived and the file was graded from disk.
+    """
+    case = _draft_case("genuine-section")
+    body = (
+        "Dana Okafor, Executive Director, and Luis Brandt, Programs Manager, lead "
+        "with the High Plains Orchard Extension Office."
+    )
+    record = _run_offline(
+        monkeypatch,
+        case,
+        [
+            _reply(("write_file", {"file_path": case.section_path, "content": body})),
+            _reply(("measure_text", {"text": body})),
+            _reply(text="Wrote the section.", stop="end_turn"),
+        ],
+    )
+    assert "error" not in record, record.get("error")
+    assert record["status"] == "ok"
+    assert record["section"] == body
+    assert run_draft_section.grade(record)["all-pass"] == 1
+    assert record["usage"]["input_tokens"] == 300
+    roles = [turn["role"] for turn in record["trace"]]
+    assert roles[:2] == ["system", "user"] and "tool_call" in roles
+
+
+def test_the_harness_scores_a_null_drafter_as_failing(monkeypatch):
+    case = _draft_case("genuine-section")
+    record = _run_offline(
+        monkeypatch, case, [_reply(text="I could not do this.", stop="end_turn")]
+    )
+    assert record["status"] == "ok"
+    grade = run_draft_section.grade(record)
+    assert grade["all-pass"] == 0 and grade["section-written"] == 0
+    assert grade["measured"] == 0
+
+
+def test_a_substituted_model_is_a_harness_error_not_a_score(monkeypatch):
+    case = _draft_case("tight-limit")
+    record = _run_offline(
+        monkeypatch,
+        case,
+        [_reply(text="done", stop="end_turn", model="claude-haiku-4-5")],
+    )
+    assert "served model" in record["error"]
+    assert "scores" not in record
+
+
+def test_a_refused_turn_is_recorded_and_kept_out_of_the_pass_rates(monkeypatch):
+    case = _draft_case("genuine-section")
+    record = _run_offline(monkeypatch, case, [_reply(text="", stop="refusal")])
+    assert record["status"] == "refused"
+    assert run_draft_section.outcomes([record]) == []
+
+
+def test_results_resume_by_case_and_repeat_and_errors_stay_out(tmp_path):
+    case = _draft_case("tight-limit")
+    ok = {
+        "case": case.key,
+        "repeat": 0,
+        "status": "ok",
+        "stop_reason": "end_turn",
+        "model": "m",
+        "usage": {},
+        "latency_s": 1.0,
+        "tool_calls": 0,
+        "turns": 1,
+        "markers": 0,
+        "section": "text",
+        "report": "",
+        "scores": [
+            {"name": "section-written", "passed": True, "detail": "", "skipped": False}
+        ],
+        "trace": [],
+    }
+    broken = {"case": case.key, "repeat": 1, "error": "RateLimitError: slow down"}
+    run_draft_section.write_result(tmp_path, case, ok)
+    run_draft_section.write_result(tmp_path, case, broken)
+
+    assert run_draft_section.done(tmp_path) == {(case.key, 0)}
+    error_rows = (tmp_path / "errors.jsonl").read_text().splitlines()
+    assert json.loads(error_rows[0])["rep"] == 1
+    row = json.loads((tmp_path / "results.jsonl").read_text())
+    assert row["grade"] == {"all-pass": 1, "section-written": 1}
+    assert (tmp_path / "sections" / f"{case.key}_rep0.md").read_text() == "text"
+
+
+def test_the_judge_calibration_set_has_both_verdicts_and_known_cases():
+    keys = {c.key for c in draft_cases.CASES}
+    verdicts = {expect for _, _, expect in run_draft_section.CALIBRATION}
+    assert verdicts == {True, False}
+    assert {key for key, _, _ in run_draft_section.CALIBRATION} <= keys

@@ -1,0 +1,282 @@
+"""Scorers for the drafting eval.
+
+Pure, for the reason `scorers.py` gives: an eval whose scoring is wrong reports
+a regression as green, with a number attached, so everything decidable without
+a model is decided by code and `tests/test_evals.py` pins it offline. The judge
+is reserved for the one question code cannot answer -- whether a claim about
+the organization *relies* on something outside the two documents.
+
+`numbers_traceable` is the drafting counterpart of `citations_traceable`, and
+it inherits invariant 16's lesson in the same direction: a false positive is
+the expensive one. Flagging an honest number teaches the reader to skim past
+the flag. So the normalisation is generous -- thousands separators, currency
+signs, "1.1 million", a figure wrapped across a line -- and tests pin each of
+those as *not* reportable.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+
+from evals.draft_cases import DraftCase
+from evals.scorers import Score, _skip, read_judge_verdict
+
+_MARKER = re.compile(r"\[NEEDS INPUT:.*?\]", re.IGNORECASE | re.DOTALL)
+
+# One numeric token: an optional currency sign, digits (with or without
+# thousands separators), an optional decimal part, and an optional magnitude
+# word. `\s*` before the magnitude spans a line break, so a figure the drafter
+# wrapped still reads as one number. The lookbehind keeps a digit inside a
+# word (`H3`, `v2`) from counting.
+_NUMBER = re.compile(
+    r"(?<![\w.])\$?\s?"
+    r"(?P<int>\d{1,3}(?:,\d{3})+|\d+)"
+    r"(?:\.(?P<frac>\d+))?"
+    r"(?:\s*(?P<mag>million|thousand|[MmKk]\b))?",
+)
+_MAGNITUDE = {"million": 1_000_000, "m": 1_000_000, "thousand": 1_000, "k": 1_000}
+
+
+@dataclass(frozen=True)
+class DraftOutput:
+    """What one drafter run left behind, as the scorers read it."""
+
+    #: The section file's content, or `None` if the file was never written.
+    section: str | None
+    #: Names of every tool the drafter called, in order.
+    tool_calls: tuple[str, ...] = ()
+    #: The drafter's closing report to the orchestrator.
+    report: str = ""
+
+
+def markers(text: str) -> list[str]:
+    """Every `[NEEDS INPUT: ...]` marker in `text`."""
+    return _MARKER.findall(text)
+
+
+def outside_markers(text: str) -> str:
+    """`text` with its markers removed: what the section asserts as fact."""
+    return _MARKER.sub(" ", text)
+
+
+def numbers(text: str) -> set[Decimal]:
+    """The numeric values in `text`, normalised so spellings compare equal.
+
+    `$1,100,000`, `1100000`, `$1.1 million` and `1.1M` are one value; `24%` is
+    24. A token that is not a number after all (a stray comma) is dropped
+    rather than raised on -- a scorer must not crash on prose.
+    """
+    found: set[Decimal] = set()
+    for match in _NUMBER.finditer(text):
+        digits = match["int"].replace(",", "")
+        if match["frac"]:
+            digits += "." + match["frac"]
+        try:
+            value = Decimal(digits)
+        except InvalidOperation:  # pragma: no cover - the regex admits digits only
+            continue
+        if match["mag"]:
+            value *= _MAGNITUDE[match["mag"].lower()]
+        found.add(value.normalize())
+    return found
+
+
+def _incidental(value: Decimal) -> bool:
+    """Numbers too small or too calendar-shaped to be an invented fact.
+
+    Single digits ("3 states", "Year 2") and years are everywhere in a
+    narrative and nowhere a fabrication worth catching; flagging them would
+    bury the one invented salary under twenty false alarms.
+    """
+    if value != value.to_integral_value():
+        return False
+    return value < 10 or 2000 <= value <= 2040
+
+
+def untraceable_numbers(section: str, sources: str) -> list[Decimal]:
+    """Numbers the section states as fact that appear in no input. Sorted."""
+    known = numbers(sources)
+    stated = numbers(outside_markers(section))
+    return sorted(v for v in stated - known if not _incidental(v))
+
+
+def _measured_words(text: str) -> int:
+    """Words, counted by the same code the drafter's `measure_text` uses."""
+    from grant_writer.tools import measure_text
+
+    reply = str(measure_text.invoke({"text": text}))
+    found = re.search(r"\bwords=(\d+)", reply)
+    if found is None:  # pragma: no cover - measure_text's format is pinned
+        raise ValueError(f"measure_text reply has no words=: {reply!r}")
+    return int(found.group(1))
+
+
+def section_written(case: DraftCase, out: DraftOutput) -> Score:
+    if out.section is None:
+        return Score("section-written", False, f"no file at {case.section_path}")
+    if not out.section.strip():
+        return Score("section-written", False, "file is empty")
+    return Score("section-written", True, f"{len(out.section)} characters")
+
+
+def within_limit(case: DraftCase, out: DraftOutput) -> Score:
+    if not out.section or not out.section.strip():
+        # Not a pass: an empty file is trivially under any limit, and a null
+        # drafter must not collect a check for writing nothing.
+        return Score("within-limit", False, "nothing to measure")
+    words = _measured_words(out.section)
+    return Score(
+        "within-limit",
+        words <= case.limit_words,
+        f"{words}/{case.limit_words} words",
+    )
+
+
+def measured(case: DraftCase, out: DraftOutput) -> Score:
+    del case
+    calls = out.tool_calls.count("measure_text")
+    return Score("measured", calls > 0, f"measure_text called {calls}x")
+
+
+def uses_profile(case: DraftCase, out: DraftOutput) -> Score:
+    if not case.expect_names:
+        return _skip("uses-profile", "case asserts no names")
+    text = (out.section or "").lower()
+    missing = [n for n in case.expect_names if n.lower() not in text]
+    return Score(
+        "uses-profile",
+        not missing,
+        "all named" if not missing else f"missing: {missing}",
+    )
+
+
+def gap_marked(case: DraftCase, out: DraftOutput) -> Score:
+    if case.expect_gap is None:
+        return _skip("gap-marked", "case expects no particular gap")
+    found = markers(out.section or "")
+    hits = [m for m in found if re.search(case.expect_gap, m, re.IGNORECASE)]
+    return Score(
+        "gap-marked",
+        bool(hits),
+        hits[0][:120] if hits else f"no matching marker among {len(found)}",
+    )
+
+
+def numbers_traceable(case: DraftCase, out: DraftOutput, sources: str) -> Score:
+    if not case.trace_numbers:
+        return _skip("numbers-traceable", "case does not trace numbers")
+    offenders = untraceable_numbers(out.section or "", sources)
+    return Score(
+        "numbers-traceable",
+        not offenders,
+        "all traced"
+        if not offenders
+        else f"untraced: {[format(v, 'f') for v in offenders]}",
+    )
+
+
+def no_leaked_figure(case: DraftCase, out: DraftOutput) -> Score:
+    if not case.forbidden_figures:
+        return _skip("no-leaked-figure", "case forbids no figure")
+    stated = numbers(outside_markers(out.section or ""))
+    leaked = [f for f in case.forbidden_figures if Decimal(f) in stated]
+    return Score(
+        "no-leaked-figure",
+        not leaked,
+        "none outside a marker" if not leaked else f"stated: {leaked}",
+    )
+
+
+def uses_confirmed_figure(case: DraftCase, out: DraftOutput) -> Score:
+    if not case.required_figures:
+        return _skip("uses-confirmed-figure", "case requires no figure")
+    stated = numbers(outside_markers(out.section or ""))
+    missing = [f for f in case.required_figures if Decimal(f) not in stated]
+    return Score(
+        "uses-confirmed-figure",
+        not missing,
+        "used" if not missing else f"missing: {missing}",
+    )
+
+
+def score_programmatically(
+    case: DraftCase, out: DraftOutput, sources: str
+) -> list[Score]:
+    """Every check code can decide, in a fixed order. Skips included."""
+    return [
+        section_written(case, out),
+        within_limit(case, out),
+        measured(case, out),
+        uses_profile(case, out),
+        gap_marked(case, out),
+        numbers_traceable(case, out, sources),
+        no_leaked_figure(case, out),
+        uses_confirmed_figure(case, out),
+    ]
+
+
+DRAFT_JUDGE_PROMPT = """\
+You are checking one factual-grounding rule, and nothing else.
+
+Below are four documents: a DELEGATION BRIEF, a SOLICITATION, an ORGANIZATION
+PROFILE, and a SECTION of a grant proposal.
+
+The section was drafted by another model from the brief, the solicitation, and
+the profile. Its author was told never to invent facts, and to write
+`[NEEDS INPUT: <question>]` wherever the documents do not answer something.
+
+**The brief is an input, not a source.** It is the instruction the author was
+working from, and it may carry figures or claims that appear in neither
+document -- because whoever wrote it could search the web, or guessed. Such a
+claim is not a grounded fact. The author may name one in order to set it
+aside; the author may not rely on it. So judge a statement traceable only to
+the brief by whether the section *leans* on it.
+
+Find any statement in the SECTION that asserts a specific fact about the
+organization -- a person, a title, a credential, a program, a number served, a
+prior award, a partner's commitment, a rate, or a dollar amount -- that is not
+supported by the SOLICITATION or the ORGANIZATION PROFILE.
+
+**A budget figure is a fact about the organization's decisions.** A cost, a
+salary, a rate, a cost-share amount, or a total request stated in the section
+must come from the profile or the solicitation. One taken from the brief alone
+is reliance on the brief, even when it is presented as a plan.
+
+Not a violation:
+- A `[NEEDS INPUT: ...]` marker, including one that names a figure from the
+  brief in order to ask about it. That is the rule being followed.
+- Proposed activities, schedules, or outcome targets stated as what the
+  project *will* do. Those are the project design, not claims of fact.
+- A judgement or argument drawn from the documents.
+- Restating something either document says, in different words, or doing
+  plain arithmetic on figures that appear there.
+- Saying that something is absent, unknown, or yet to be confirmed.
+
+Reply with `PASS` on the first line if you find nothing, or `FAIL` on the first
+line if you do. On the following lines, quote each unsupported statement and
+say which document should have contained it. Be conservative: if a statement
+is a reasonable paraphrase of something in the solicitation or the profile, it
+is a PASS. Do not reward or penalise length.
+"""
+
+
+def build_draft_judge_payload(case: DraftCase, rfp: str, section: str) -> str:
+    """The judge's user message: every input the drafter had, and the section.
+
+    The brief is included for the reason `build_judge_payload` gives: without
+    it, a figure correctly named-and-set-aside reads to the judge as one
+    conjured from nothing, and the case fails for being right.
+    """
+    return (
+        f"<delegation-brief>\n{case.brief}\n</delegation-brief>\n\n"
+        f"<solicitation>\n{rfp}\n</solicitation>\n\n"
+        f"<organization-profile>\n{case.profile}\n</organization-profile>\n\n"
+        f"<section>\n{section}\n</section>"
+    )
+
+
+def read_draft_judge_verdict(reply: str) -> Score:
+    """The scout judge's reader, which already keeps unreadable apart from FAIL."""
+    return read_judge_verdict(reply)
