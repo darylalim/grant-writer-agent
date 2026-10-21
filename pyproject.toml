@@ -61,6 +61,14 @@ dev = [
     "streamlit[pdf]>=1.60.0",
 ]
 
+[tool.uv]
+# One pin for the local uv and CI's: setup-uv reads this when no `version:`
+# input is given, so the three jobs in ci.yml carry none. Exact, and moved in
+# step with the `uv_build` bound in [build-system] -- when uv and the backend
+# match, uv builds with its own copy instead of fetching `uv_build` from PyPI.
+# An older local uv refuses to run here; `uv self update` is the fix.
+required-version = "==0.13.4"
+
 [tool.pytest.ini_options]
 # The repo root, so `tests/test_evals.py` can import `evals`. The build backend
 # is src-layout, so only `src/` is installed and the root is otherwise off the
