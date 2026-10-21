@@ -34,9 +34,25 @@ _NUMBER = re.compile(
     r"(?<![\w.])\$?\s?"
     r"(?P<int>\d{1,3}(?:,\d{3})+|\d+)"
     r"(?:\.(?P<frac>\d+))?"
-    r"(?:\s*(?P<mag>million|thousand|[MmKk]\b))?",
+    r"(?:\s*(?P<mag>million|thousand|[MmKk]\b))?"
+    r"(?P<pct>\s*(?:%|percent\b))?",
+    re.IGNORECASE,
 )
 _MAGNITUDE = {"million": 1_000_000, "m": 1_000_000, "thousand": 1_000, "k": 1_000}
+
+# A regulation cited by number ("2 CFR 200.414(f)", "§ 200.320") is the
+# literature DRAFTER_PROMPT asks for, not a fact about the organization. The
+# first pilot flagged two of them.
+_CITATION = re.compile(
+    r"\b\d+\s*(?:CFR|C\.F\.R\.|U\.S\.C\.)\s*(?:§+\s*)?[\d.]+(?:\([0-9a-z]+\))*"
+    r"|§+\s*[\d.]+(?:\([0-9a-z]+\))*",
+    re.IGNORECASE,
+)
+
+# A number next to a unit of time is a schedule ("month 36", "within 90 days"):
+# the project design, which the drafter is supposed to propose.
+_TIME_BEFORE = re.compile(r"\b(?:months?|years?|weeks?|days?|quarters?|Q)\s*$", re.I)
+_TIME_AFTER = re.compile(r"^\s*(?:months?|years?|weeks?|days?|quarters?)\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -68,7 +84,12 @@ def numbers(text: str) -> set[Decimal]:
     24. A token that is not a number after all (a stray comma) is dropped
     rather than raised on -- a scorer must not crash on prose.
     """
-    found: set[Decimal] = set()
+    return {value for value, _, _ in _tokens(text)}
+
+
+def _tokens(text: str) -> list[tuple[Decimal, bool, bool]]:
+    """`(value, is_percent, is_schedule)` for each number in `text`."""
+    found: list[tuple[Decimal, bool, bool]] = []
     for match in _NUMBER.finditer(text):
         digits = match["int"].replace(",", "")
         if match["frac"]:
@@ -79,7 +100,11 @@ def numbers(text: str) -> set[Decimal]:
             continue
         if match["mag"]:
             value *= _MAGNITUDE[match["mag"].lower()]
-        found.add(value.normalize())
+        schedule = bool(
+            _TIME_BEFORE.search(text[: match.start()])
+            or _TIME_AFTER.match(text[match.end() :])
+        )
+        found.append((value.normalize(), bool(match["pct"]), schedule))
     return found
 
 
@@ -95,11 +120,70 @@ def _incidental(value: Decimal) -> bool:
     return value < 10 or 2000 <= value <= 2040
 
 
-def untraceable_numbers(section: str, sources: str) -> list[Decimal]:
-    """Numbers the section states as fact that appear in no input. Sorted."""
+def _derived(
+    value: Decimal,
+    is_percent: bool,
+    known: set[Decimal],
+    rates: set[Decimal],
+    stated: set[Decimal],
+) -> bool:
+    """Plain arithmetic on figures the inputs give. The judge allows it too.
+
+    Three shapes, each from the first pilot, and each kept narrow so the
+    check still catches an invention:
+
+    - a rate the inputs state, applied to a figure they state ("25% of the
+      $250,000 minimum" is $62,500);
+    - an input figure spread over a project's years ("$480,000 over three
+      years" is $160,000 a year), divisors 2 to 5 only;
+    - a percentage computed from two figures **the section itself states**
+      ("58 coached, 41 (71%) passed"). Operands are drawn from the section,
+      not the inputs: over every pair of input numbers, nearly any integer
+      percentage is some ratio, and an invented 30% fringe rate would pass.
+    """
+    for rate in rates:
+        if any(_close(a * rate / 100, value) for a in known):
+            return True
+    if any(_close(a / n, value) for a in known for n in range(2, 6)):
+        return True
+    if is_percent:
+        traced = [a for a in stated if a in known and a > 0]
+        return any(_close(100 * a / b, value) for a in traced for b in traced if a < b)
+    return False
+
+
+def _close(computed: Decimal, stated: Decimal) -> bool:
+    """Equal once rounded the way a writer rounds: to the stated precision."""
+    exponent = stated.as_tuple().exponent
+    places = -exponent if isinstance(exponent, int) and exponent < 0 else 0
+    return round(computed, places) == stated
+
+
+def untraceable_numbers(
+    section: str, sources: str, *, ignore: tuple[int, ...] = ()
+) -> list[Decimal]:
+    """Numbers the section states as fact that no input gives. Sorted.
+
+    `ignore` is for figures another check already owns -- `no-leaked-figure`
+    scores the brief's own numbers, so counting them here too would score one
+    fault twice.
+    """
     known = numbers(sources)
-    stated = numbers(outside_markers(section))
-    return sorted(v for v in stated - known if not _incidental(v))
+    rates = {value for value, pct, _ in _tokens(sources) if pct}
+    text = _CITATION.sub(" ", outside_markers(section))
+    tokens = _tokens(text)
+    stated = {value for value, _, _ in tokens}
+    skip = {Decimal(f) for f in ignore}
+    offenders = {
+        value
+        for value, pct, schedule in tokens
+        if value not in known
+        and value not in skip
+        and not schedule
+        and not _incidental(value)
+        and not _derived(value, pct, known, rates, stated)
+    }
+    return sorted(offenders)
 
 
 def _measured_words(text: str) -> int:
@@ -155,19 +239,38 @@ def uses_profile(case: DraftCase, out: DraftOutput) -> Score:
 def gap_marked(case: DraftCase, out: DraftOutput) -> Score:
     if case.expect_gap is None:
         return _skip("gap-marked", "case expects no particular gap")
-    found = markers(out.section or "")
-    hits = [m for m in found if re.search(case.expect_gap, m, re.IGNORECASE)]
+    text = out.section or ""
+    found = list(_MARKER.finditer(text))
+    hits = [m for m in found if re.search(case.expect_gap, _context(text, m), re.I)]
     return Score(
         "gap-marked",
         bool(hits),
-        hits[0][:120] if hits else f"no matching marker among {len(found)}",
+        hits[0].group(0)[:120] if hits else f"no matching marker among {len(found)}",
     )
+
+
+def _context(text: str, marker: re.Match[str], reach: int = 80) -> str:
+    """The marker plus up to `reach` characters either side, on its own line.
+
+    A drafter writes the question where the figure goes, so the words that
+    say what it is about often sit just outside the brackets: "commits
+    $[NEEDS INPUT: 25% of the Federal request] in required non-Federal cost
+    share". The first pilot's honest cost-share marker failed for exactly
+    that. The window stops at a line break, so a marker is not credited with
+    a heading or paragraph it does not belong to.
+    """
+    start = text.rfind("\n", 0, marker.start()) + 1
+    end = text.find("\n", marker.end())
+    end = len(text) if end == -1 else end
+    return text[max(start, marker.start() - reach) : min(end, marker.end() + reach)]
 
 
 def numbers_traceable(case: DraftCase, out: DraftOutput, sources: str) -> Score:
     if not case.trace_numbers:
         return _skip("numbers-traceable", "case does not trace numbers")
-    offenders = untraceable_numbers(out.section or "", sources)
+    offenders = untraceable_numbers(
+        out.section or "", sources, ignore=case.forbidden_figures
+    )
     return Score(
         "numbers-traceable",
         not offenders,

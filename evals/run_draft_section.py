@@ -221,19 +221,34 @@ def _drafter_messages(
 
 
 def _usage(messages: list[Any]) -> dict[str, int]:
+    """Summed usage, with cache writes counted wherever langchain files them.
+
+    When the API splits writes by TTL, langchain-anthropic reports them as
+    `ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens` and sets
+    `cache_creation` to **0**. Reading only `cache_creation` counted every
+    write as uncached input in the first pilot -- a zero that looked like a
+    measurement. The 1h share is kept apart because it bills at 2x input, not
+    the 1.25x of a 5-minute write.
+    """
     total = {
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 0,
+        "cache_creation_1h_input_tokens": 0,
     }
     for message in messages:
         usage = getattr(message, "usage_metadata", None) or {}
         details = usage.get("input_token_details") or {}
+        five = details.get("ephemeral_5m_input_tokens") or 0
+        hour = details.get("ephemeral_1h_input_tokens") or 0
         total["input_tokens"] += usage.get("input_tokens", 0)
         total["output_tokens"] += usage.get("output_tokens", 0)
-        total["cache_read_input_tokens"] += details.get("cache_read", 0)
-        total["cache_creation_input_tokens"] += details.get("cache_creation", 0)
+        total["cache_read_input_tokens"] += details.get("cache_read") or 0
+        total["cache_creation_input_tokens"] += (
+            (details.get("cache_creation") or 0) + five + hour
+        )
+        total["cache_creation_1h_input_tokens"] += hour
     return total
 
 
@@ -397,7 +412,10 @@ def run_case(
     tool_calls = tuple(c["name"] for m in replies for c in m.tool_calls)
     out = DraftOutput(section=section, tool_calls=tool_calls, report=_text(replies[-1]))
 
-    sources = "\n".join((rfp, case.profile, case.brief))
+    # The documents only, not the brief: the brief is an input but not a
+    # source, so a figure it alone carries does not trace (DRAFT_JUDGE_PROMPT
+    # draws the same line).
+    sources = "\n".join((rfp, case.profile))
     scores = score_programmatically(case, out, sources)
     judge_meta: dict[str, Any] = {}
     if case.judge and judge and status == "ok" and section:
@@ -512,6 +530,46 @@ def done(variant: Path) -> set[tuple[str, int]]:
     return {(row["prompt_id"], row["rep"]) for row in rows}
 
 
+def rescore(variant: Path) -> list[dict[str, Any]]:
+    """Re-apply the code checks to `variant`'s saved sections. No model calls.
+
+    A grader fix should not need a paid rerun to be seen: the section files and
+    traces are on disk, and every check but the judge is a pure function of
+    them. The judge's verdict is carried over as recorded. Rewrites
+    `results.jsonl` in place; returns minimal records for `outcomes`.
+    """
+    by_key = {c.key: c for c in CASES}
+    path = variant / "results.jsonl"
+    rows = [json.loads(line) for line in path.read_text("utf-8").splitlines() if line]
+    with tempfile.TemporaryDirectory(prefix="h3-rescore-") as tmp:
+        rfp = prepare_root(Path(tmp), CASES[0])
+    records = []
+    for row in rows:
+        case = by_key[row["prompt_id"]]
+        stem = f"{case.key}_rep{row['rep']}"
+        section_file = variant / "sections" / f"{stem}.md"
+        trace = json.loads((variant / "traces" / f"{stem}.json").read_text("utf-8"))
+        out = DraftOutput(
+            section=section_file.read_text("utf-8") if section_file.is_file() else None,
+            tool_calls=tuple(t["name"] for t in trace if t["role"] == "tool_call"),
+        )
+        scores = score_programmatically(case, out, "\n".join((rfp, case.profile)))
+        if "grounded" in row["grade"]:
+            judged = row.get("explanation", {}).get("grounded", "")
+            scores.append(Score("grounded", bool(row["grade"]["grounded"]), judged))
+        record = {
+            "case": case.key,
+            "repeat": row["rep"],
+            "status": row["status"],
+            "scores": [asdict(score) for score in scores],
+        }
+        row["grade"] = grade(record)
+        row["explanation"] = {s.name: s.detail for s in scores}
+        records.append(record)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), "utf-8")
+    return records
+
+
 def outcomes(records: list[dict[str, Any]]) -> list[tuple[str, str, bool]]:
     """Real verdicts only: no skips, no harness errors, no refused/truncated turns."""
     return [
@@ -561,6 +619,11 @@ def main() -> int:
     parser.add_argument("--recursion-limit", type=int, default=60)
     parser.add_argument("--out", help="also write run_scout-style records here")
     parser.add_argument(
+        "--rescore",
+        action="store_true",
+        help="re-apply the code checks to a variant's saved sections; no model calls",
+    )
+    parser.add_argument(
         "--calibrate-judge",
         action="store_true",
         help="run the judge on three canned sections with known verdicts, then exit",
@@ -569,12 +632,24 @@ def main() -> int:
     if args.repeat < 1 or args.jobs < 1:
         parser.error("--repeat and --jobs must be at least 1")
 
-    if not os.getenv("ANTHROPIC_API_KEY"):
+    if not args.rescore and not os.getenv("ANTHROPIC_API_KEY"):
         print(
             "ANTHROPIC_API_KEY is not set; this eval calls a real model.",
             file=sys.stderr,
         )
         return 1
+    if args.rescore:
+        records = rescore(Path(args.flow) / args.variant)
+        for record in records:
+            print(f"\n{record['case']}  (repeat {record['repeat'] + 1})")
+            for score in record["scores"]:
+                mark = "·" if score["skipped"] else "✓" if score["passed"] else "✗"
+                print(f"  {mark} {score['name']:<22} {score['detail'][:100]}")
+        checked = outcomes(records)
+        passed = sum(1 for _, _, ok in checked if ok)
+        print(f"\n{passed}/{len(checked)} checks passed (rescored).")
+        return 0
+
     if args.calibrate_judge:
         with tempfile.TemporaryDirectory(prefix="h3-calibrate-") as tmp:
             rfp = prepare_root(Path(tmp), CASES[0])

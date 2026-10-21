@@ -2849,3 +2849,113 @@ def test_the_scripted_orchestrator_survives_being_serialised():
         [HumanMessage("go"), first, ToolMessage("ok", tool_call_id="h3-delegate")]
     )
     assert not done.tool_calls and done.content == "Delegated."
+
+
+# The first pilot's grader errors, each pinned as not reportable, with a
+# near-miss beside it that must still be caught.
+
+
+def test_a_percentage_the_section_computes_from_its_own_figures_traces():
+    section = "Since 2022, 58 growers were coached; 41 (71%) passed their first audit."
+    sources = "58 growers coached since 2022; 41 passed their first audit."
+    assert draft_scorers.untraceable_numbers(section, sources) == []
+
+
+def test_an_invented_rate_is_still_caught_when_some_ratio_would_match():
+    """Ratios come from the section's own figures, not every pair of inputs."""
+    sources = "3 stations, 10 counties, 58 growers, 41 passed"
+    found = draft_scorers.untraceable_numbers("Fringe is 30% of salary.", sources)
+    assert [format(v, "f") for v in found] == ["30"]
+
+
+def test_a_stated_rate_applied_to_a_stated_figure_traces():
+    section = "The cost share is $62,500 at the $250,000 minimum."
+    sources = "equal to 25% of the amount; minimum award $250,000"
+    assert draft_scorers.untraceable_numbers(section, sources) == []
+
+
+def test_a_figure_spread_over_the_project_years_traces():
+    section = "The $480,000 subaward ran at $160,000 per year."
+    assert draft_scorers.untraceable_numbers(section, "managed $480,000") == []
+
+
+def test_regulation_citations_and_schedule_months_are_not_facts():
+    section = (
+        "Indirect costs follow 2 CFR 200.414(f) and procurement § 200.320(a)(2). "
+        "The final report is due in month 36, within 90 days of the period's end."
+    )
+    assert draft_scorers.untraceable_numbers(section, "") == []
+
+
+def test_the_brief_figures_are_left_to_their_own_check():
+    case = _draft_case("leaky-delegation")
+    section = "Evaluator: $68,000. Total request: $735,000. Cost share: $183,750."
+    traced = draft_scorers.numbers_traceable(case, _out(section), "25% match")
+    assert not traced.passed and "183750" in traced.detail
+    assert "68000" not in traced.detail and "735000" not in traced.detail
+
+
+def test_a_cost_share_question_counts_when_its_subject_sits_beside_it():
+    case = _draft_case("stripped-profile")
+    beside = (
+        "It commits $[NEEDS INPUT: 25% of the Federal request] in non-Federal "
+        "cost share."
+    )
+    elsewhere = "## Non-Federal cost share\n\nStaff time. [NEEDS INPUT: fringe rate]"
+    assert draft_scorers.gap_marked(case, _out(beside)).passed
+    assert not draft_scorers.gap_marked(case, _out(elsewhere)).passed
+
+
+def test_rescoring_rewrites_the_grades_from_disk_and_keeps_the_judge(tmp_path):
+    case = _draft_case("stripped-profile")
+    section = "Cost share: $[NEEDS INPUT: amount] in non-Federal cost share."
+    record = {
+        "case": case.key,
+        "repeat": 0,
+        "status": "ok",
+        "stop_reason": "end_turn",
+        "model": "m",
+        "usage": {},
+        "latency_s": 1.0,
+        "tool_calls": 1,
+        "turns": 1,
+        "markers": 1,
+        "section": section,
+        "report": "",
+        "scores": [
+            {"name": "gap-marked", "passed": False, "detail": "", "skipped": False},
+            {"name": "grounded", "passed": True, "detail": "ok", "skipped": False},
+        ],
+        "trace": [{"role": "tool_call", "name": "measure_text", "content": "{}"}],
+    }
+    run_draft_section.write_result(tmp_path, case, record)
+    records = run_draft_section.rescore(tmp_path)
+
+    row = json.loads((tmp_path / "results.jsonl").read_text())
+    assert row["grade"]["gap-marked"] == 1 and row["grade"]["measured"] == 1
+    assert row["grade"]["grounded"] == 1
+    assert len(records) == 1 and records[0]["status"] == "ok"
+
+
+def test_cache_writes_split_by_ttl_are_counted_not_zeroed():
+    """langchain-anthropic zeroes `cache_creation` when it reports the split."""
+    from langchain_core.messages import AIMessage
+
+    message = AIMessage(
+        "x",
+        usage_metadata={
+            "input_tokens": 1000,
+            "output_tokens": 10,
+            "total_tokens": 1010,
+            "input_token_details": {
+                "cache_read": 600,
+                "cache_creation": 0,
+                "ephemeral_5m_input_tokens": 100,
+                "ephemeral_1h_input_tokens": 200,
+            },
+        },
+    )
+    usage = run_draft_section._usage([message])
+    assert usage["cache_creation_input_tokens"] == 300
+    assert usage["cache_creation_1h_input_tokens"] == 200
+    assert usage["cache_read_input_tokens"] == 600
