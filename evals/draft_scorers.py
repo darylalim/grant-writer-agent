@@ -339,6 +339,39 @@ def uses_confirmed_figure(case: DraftCase, out: DraftOutput) -> Score:
     )
 
 
+# A placeholder that is not a marker: `$[ ]`, `[#]`, `[___]`, `$[request]`,
+# `TBD`, `$XX,XXX`. The orchestrator collects gaps by searching for
+# `[NEEDS INPUT`, so each of these is a hole nobody is asked to fill. The
+# baseline left 45 `$[ ]` blanks in two stripped-profile sections. A bare
+# `[NEEDS INPUT]` is deliberately *not* here: it is still found, and honest
+# fiscal tables use it as a cell value with the question beside it -- failing
+# those would teach the reader to skim past this check.
+_BLANK = re.compile(
+    r"\$\s?\[(?!NEEDS INPUT)[^\[\]\n]*\]"
+    # Not a task-list checkbox, `- [ ]` at the start of a line.
+    r"|(?<![-*+] )\[\s*(?:_+|#+|\.\.\.|…)?\s*\](?!\()"
+    r"|\bTB[DA]\b|\$?\bX{2,}(?:,X{3})*\b",
+    re.IGNORECASE,
+)
+
+
+def blanks(text: str) -> list[str]:
+    """Every placeholder in `text` that a gap collection cannot find."""
+    return _BLANK.findall(text)
+
+
+def no_blanks(case: DraftCase, out: DraftOutput) -> Score:
+    del case
+    if not out.section or not out.section.strip():
+        return Score("no-blanks", False, "nothing to check")
+    found = blanks(out.section)
+    return Score(
+        "no-blanks",
+        not found,
+        "every gap is a marker" if not found else f"{len(found)}: {found[:5]}",
+    )
+
+
 def score_programmatically(
     case: DraftCase, out: DraftOutput, sources: str
 ) -> list[Score]:
@@ -352,6 +385,7 @@ def score_programmatically(
         numbers_traceable(case, out, sources),
         no_leaked_figure(case, out),
         uses_confirmed_figure(case, out),
+        no_blanks(case, out),
     ]
 
 

@@ -2594,6 +2594,42 @@ def test_a_fiscal_plan_silent_on_cost_share_fails_the_gap_check():
     assert not draft_scorers.gap_marked(case, _out(f"Text. {other}")).passed
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        # The baseline's own shapes, from two stripped-profile sections.
+        "By state: Kansas $[ ], Nebraska $[ ], Oklahoma $[ ].",
+        "| Personnel and fringe | $[ ] | $[ ] | [#] |",
+        "Minimum required: 0.25 x $[request] = $[NEEDS INPUT].",
+        "Required match: $[Federal request] x 25% = $[NEEDS INPUT: amount].",
+        "Evaluator: TBD.",
+        "Total request: $XX,XXX.",
+        "Signed by [___] on behalf of the Foundation.",
+    ],
+)
+def test_a_placeholder_no_gap_collection_can_find_is_a_blank(line):
+    case = _draft_case("stripped-profile")
+    assert not draft_scorers.no_blanks(case, _out(line)).passed, line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # A bare marker is a weaker gap, not an invisible one: the baseline's
+        # honest fiscal tables use it as a cell with the question beside it.
+        "| Travel | $[NEEDS INPUT] | [NEEDS INPUT: trips, travelers, rates] |",
+        "Cost share: $[NEEDS INPUT: 25% of the Federal request].",
+        "- [ ] Install stations before bloom",
+        "See the [work plan](02-work-plan.md) and reference [1].",
+        "Section 2.4 [page 6] sets the match at 25%.",
+        "Year XXI of the program.",
+    ],
+)
+def test_a_marker_link_or_checkbox_is_not_a_blank(line):
+    case = _draft_case("stripped-profile")
+    assert draft_scorers.no_blanks(case, _out(line)).passed, line
+
+
 def test_an_empty_section_collects_no_check_for_being_short():
     """A null drafter must fail; writing nothing is under every limit."""
     case = _draft_case("tight-limit")

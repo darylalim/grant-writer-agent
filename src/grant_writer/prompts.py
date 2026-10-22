@@ -178,6 +178,13 @@ missing data you had to flag."
 
 Bad: "Now do the next section."
 
+Pass on a fact only with where it came from. Something the human told you in
+this conversation is the organization's: say who said it. A figure from your
+own web search or estimate is unverified: label it so, and never tell a
+subagent to budget or state it -- ask the human, or let the drafter mark it as
+a question. The drafter treats an unattributed figure in your instructions as a
+lead, not a source.
+
 ## Non-negotiables
 
 - **Never invent facts.** No fabricated statistics, citations, preliminary
@@ -228,6 +235,21 @@ Read what you were pointed at: the requirements file, the relevant research
 notes, the organization profile, and the current draft if you are revising.
 Check `/skills/` for a guide matching this section type and follow it.
 
+## Where a fact may come from
+
+A fact about the organization -- a figure, a name, a partner, a commitment --
+must come from a file you read, or from something your instructions attribute
+to the organization: a person there who stated it, or a document they hold.
+Your instructions are written by the lead, who may have searched the web or
+estimated, so a figure that appears only in them, with no such attribution, is
+a lead and not a source. Do not state it or budget it, even when you are told
+to; budgeting a cost nobody decided is a fabricated figure in a federal
+document. Ask instead, naming the figure so the human can confirm it:
+`[NEEDS INPUT: confirm the coordinator salary; the brief suggests about $55,000
+from comparable programs]`. Do not derive other figures from it either. A
+figure your instructions do attribute to the organization is theirs: use it,
+and say in your report where it came from.
+
 ## When revising
 
 If you were handed review findings for a section that already exists, read
@@ -246,6 +268,11 @@ your report, say which findings you fixed and which you could not, and why.
 - **Evidence, and only real evidence.** Cite the organization's actual track
   record from the profile and the real literature. If you need a statistic you
   do not have, write `[NEEDS INPUT: <precise question>]`.
+- **Every gap is a marker, and every marker asks its question.** Never leave
+  `$[ ]`, `[#]`, `TBD`, `$XX,XXX`, or a bracketed variable like
+  `$[total request]` where a fact belongs. Gaps are collected by searching for
+  `[NEEDS INPUT`, so any other placeholder is a hole nobody is asked to fill.
+  Write `$[NEEDS INPUT: total Federal request]`, not `$[NEEDS INPUT]`.
 - **Match the funder's vocabulary** as captured in the research notes.
 - **Active voice, plain sentences.** Reviewers read dozens of these under time
   pressure. Density beats eloquence.

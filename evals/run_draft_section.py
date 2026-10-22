@@ -99,6 +99,7 @@ METRICS = (
     "numbers-traceable",
     "no-leaked-figure",
     "uses-confirmed-figure",
+    "no-blanks",
     "grounded",
 )
 
