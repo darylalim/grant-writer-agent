@@ -370,6 +370,58 @@ def test_the_rubric_grader_wakes_when_a_rubric_is_present():
     assert update["_rubric_status"] == "satisfied"
 
 
+class _FirstRequest(Exception):
+    """Raised in place of sending, carrying the request that would have gone."""
+
+
+def _first_grader_request(monkeypatch, spec: str) -> dict:
+    """The payload a rubric round's first grader call would send for `spec`."""
+    from langchain_anthropic import ChatAnthropic
+
+    def _capture(self, payload):
+        del self
+        raise _FirstRequest(payload)
+
+    monkeypatch.setattr(ChatAnthropic, "_create", _capture)
+    grader = RubricMiddleware(
+        model=build_model(spec, effort=GRADER_EFFORT)
+    )._ensure_grader()
+    with pytest.raises(_FirstRequest) as sent:
+        grader.invoke({"messages": [("user", "Grade this.")]})
+    return sent.value.args[0]
+
+
+@pytest.mark.parametrize("spec", sorted(set(DEFAULT_MODELS.values())))
+def test_the_grader_never_forces_a_tool_choice(monkeypatch, spec):
+    """No shipped model is sent a forced `tool_choice` by the rubric grader.
+
+    Opus 5.5 and Sonnet 5.5 answer `tool_choice` `any` or `tool` with a 400, so
+    a forced choice fails the first rubric round of every `--rubric` run. Two
+    upstream decisions keep it off today, and both match on the model *id*:
+    `RubricMiddleware` picks native structured output when the model's profile
+    declares it, and langchain-anthropic's `_supports_forced_tool_choice` lists
+    the 5.x prefixes. Over every shipped id rather than `GRADER_MODEL` alone,
+    because a `GRANT_WRITER_GRADER_MODEL` override may name any of them -- and
+    an id neither list knows (a `claude-opus-5-6`, say) is sent `any`, which is
+    why this is pinned on the request rather than assumed.
+    """
+    payload = _first_grader_request(monkeypatch, spec)
+    assert payload.get("tool_choice", {}).get("type") not in ("any", "tool"), payload
+    assert "format" in payload.get("output_config", {}), (
+        f"{spec!r} no longer uses native structured output for grading"
+    )
+
+
+def test_the_forced_tool_choice_check_can_see_one(monkeypatch):
+    """The case above would notice a forced choice if one were sent.
+
+    An older id that upstream still forces stands in for the regression, so the
+    absence asserted above is a reading, not a capture that never looks.
+    """
+    payload = _first_grader_request(monkeypatch, "anthropic:claude-opus-4-1")
+    assert payload["tool_choice"]["type"] == "any"
+
+
 def test_the_rubric_iteration_cap_comes_from_settings():
     """Pins invariant 8.
 
@@ -740,6 +792,32 @@ def test_every_model_role_has_an_effort_and_no_other():
     assert DEFAULT_EFFORT.keys() == DEFAULT_MODELS.keys()
 
 
+@pytest.mark.parametrize("judge", ["grader", "compliance"])
+def test_no_judge_ships_cheaper_than_the_drafter_it_judges(judge):
+    """The grader and the compliance reviewer think at least as hard as drafting.
+
+    Lowering effort is the obvious lever when a run costs too much, and the
+    judges are the roles a cost-cutting pass reaches for first, because their
+    output is not what gets submitted. That is backwards: a judge shallower than
+    the work it judges passes what it should catch, and the only symptom is a
+    review that reads as satisfied.
+
+    The order is written out here because a `Literal` promises membership, not
+    a ranking -- but its *members* are checked against the installed
+    langchain-anthropic, so a level added upstream fails this rather than
+    falling outside a scale nobody updated.
+    """
+    from typing import get_args
+
+    from langchain_anthropic import ChatAnthropic
+
+    scale = ("low", "medium", "high", "xhigh", "max")
+    annotation = ChatAnthropic.model_fields["reasoning_effort"].annotation
+    (accepted,) = (arg for arg in get_args(annotation) if arg is not type(None))
+    assert set(get_args(accepted)) == set(scale)
+    assert scale.index(DEFAULT_EFFORT[judge]) >= scale.index(DEFAULT_EFFORT["drafting"])
+
+
 @pytest.mark.parametrize(("role", "spec"), sorted(DEFAULT_MODELS.items()))
 def test_default_model_sends_its_roles_effort(role, spec):
     """Every shipped model must carry its own role's effort in the request.
@@ -758,6 +836,41 @@ def test_default_model_sends_its_roles_effort(role, spec):
     assert payload.get("output_config", {}).get("effort") == DEFAULT_EFFORT[role], (
         f"{role}: {spec!r} sends {payload.get('output_config')!r}"
     )
+
+
+@pytest.mark.parametrize(("role", "spec"), sorted(DEFAULT_MODELS.items()))
+def test_a_traced_call_records_the_effort_it_sent(monkeypatch, role, spec):
+    """A model call's trace says which effort it ran at, and the request does not.
+
+    langchain-anthropic records the model and `max_tokens` on a run but not the
+    effort, so with three roles on Sonnet at two efforts a trace could not say
+    which setting produced a cost. Read off `on_chat_model_start`, which is what
+    the LangSmith tracer is handed, through a binding as `create_agent` uses the
+    model. And absent from the payload: the API has a request `metadata` field
+    of its own, and a trace label is not something to send to it.
+    """
+    from langchain_anthropic import ChatAnthropic
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    traced: list[dict] = []
+
+    class _Tracer(BaseCallbackHandler):
+        def on_chat_model_start(self, serialized, messages, *, metadata=None, **kw):
+            del serialized, messages, kw
+            traced.append(metadata or {})
+
+    def _refuse(self, payload):
+        del self, payload
+        raise _FirstRequest
+
+    monkeypatch.setattr(ChatAnthropic, "_create", _refuse)
+    model = build_model(spec, effort=DEFAULT_EFFORT[role])
+    with pytest.raises(_FirstRequest):
+        model.bind(stop=["\n\n"]).invoke("hi", config={"callbacks": [_Tracer()]})
+
+    assert [run.get("effort") for run in traced] == [DEFAULT_EFFORT[role]]
+    payload = model._get_request_payload([("user", "hi")])  # ty: ignore[unresolved-attribute]
+    assert "metadata" not in payload
 
 
 def test_an_explicit_effort_reaches_the_request_and_omitting_one_is_refused():
@@ -780,7 +893,7 @@ def test_an_explicit_effort_reaches_the_request_and_omitting_one_is_refused():
 def test_each_role_is_built_at_its_own_effort(monkeypatch):
     """Both graphs hand every model its *own* role's effort, not a neighbour's.
 
-    Every role ships at the same effort, so passing `RESEARCH_EFFORT` to the
+    Three roles ship at the same effort, so passing `COMPLIANCE_EFFORT` to the
     drafter would send the very same request today and be invisible to the
     payload case above -- until one role's value moves, when the wrong role
     moves with it and nothing raises. So each role's model and effort are

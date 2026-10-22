@@ -74,17 +74,19 @@ MAX_OUTPUT_TOKENS = 64000
 #
 # Per role, keyed like DEFAULT_MODELS and overridable the same way, because the
 # roles do not need the same depth: a scan that decides whether to apply at all
-# is not a section someone submits. Every role is `high` for now -- the same
-# request as when this was one global value -- so that moving a role is a
-# change to this dict alone, made after an eval can see what it costs. An
-# override outside langchain-anthropic's accepted levels fails loudly, at
-# construction: the field is a `Literal`.
+# is not a section someone submits. Research and discovery gather and sort;
+# a human reads their output before anything is submitted, so they run at
+# `medium`. Drafting writes what is submitted, and the grader and compliance
+# reviewer judge it -- a judge cheaper than the work it judges passes what it
+# should catch -- so those stay `high`. An override outside
+# langchain-anthropic's accepted levels fails loudly, at construction: the
+# field is a `Literal`.
 DEFAULT_EFFORT = {
     "drafting": "high",
-    "research": "high",
+    "research": "medium",
     "compliance": "high",
     "grader": "high",
-    "discovery": "high",
+    "discovery": "medium",
 }
 
 DRAFTING_EFFORT = os.getenv("GRANT_WRITER_DRAFTING_EFFORT", DEFAULT_EFFORT["drafting"])
@@ -110,9 +112,20 @@ def build_model(spec: str, *, effort: str) -> BaseChatModel:
     `*_EFFORT`, and the eval judge names its pinned `JUDGE_EFFORT`, so a
     before/after comparison of an effort change is scored by the same judge on
     both sides. It is ignored for non-Anthropic specs, which reject the key.
+
+    It is also put in the model's trace `metadata`, because langchain-anthropic
+    records the model and `max_tokens` on a run but not the effort sent -- and
+    with roles at different efforts on the same model id, the trace is where a
+    surprising cost or a shallow answer gets traced back to its setting. That
+    field labels the run only; it is not the API's request `metadata`.
     """
     if spec.startswith("anthropic:"):
-        return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS, effort=effort)
+        return init_chat_model(
+            spec,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            effort=effort,
+            metadata={"effort": effort},
+        )
     return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS)
 
 

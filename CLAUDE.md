@@ -300,11 +300,18 @@ runs, and still produces plausible output.
    **Effort is the same trap one field over.** Thinking cannot be disabled on Opus 5.5 or
    Sonnet 5.5, so `output_config.effort` is the only depth control — and Opus 5.5 defaults it
    to `medium` where Opus 5 defaulted to `high`. The upgrade alone would have made drafting
-   think less, with nothing raised. `build_model` sends `MODEL_EFFORT` on every `anthropic:`
-   spec, and the test asserts it on the outgoing request payload rather than the constructor,
-   since an accepted-but-unserialised kwarg is precisely how it would go missing.
-   `MODEL_EFFORT` is the *default* of `build_model(spec, effort=...)`. The one caller that
-   passes its own is the eval judge (`evals/run_scout.JUDGE_EFFORT`), pinned so that changing
+   think less, with nothing raised. The rule is unchanged by effort now being per role:
+   **set explicitly, never inherited.** `DEFAULT_EFFORT` is keyed like `DEFAULT_MODELS` and
+   overridable the same way (`GRANT_WRITER_*_EFFORT`): research and discovery ship at
+   `medium`, drafting, grader and compliance at `high`, because a judge cheaper than the work
+   it judges passes what it should catch. `build_model(spec, *, effort)` takes it as a
+   **required** argument with no default, since a default is how a new call site would
+   inherit another role's depth without anyone choosing it. The tests assert each role's own
+   value on the outgoing request payload rather than the constructor, since an
+   accepted-but-unserialised kwarg is precisely how it would go missing — and swap in
+   role-named sentinels to catch one role handed a neighbour's effort, which sends an
+   identical request whenever the two values happen to match. The eval judges pin their own
+   (`evals/run_scout.JUDGE_EFFORT`, `evals/run_draft_section.JUDGE_EFFORT`) so that changing
    the product's effort cannot also change the ruler measuring it.
 10. **The application id input must stay outside `st.form`.** `st.form` batches its
     widgets and sends them only when Submit is pressed. `streamlit_app.py` reads that
