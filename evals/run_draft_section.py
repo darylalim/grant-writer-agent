@@ -125,6 +125,8 @@ class _ScriptedOrchestrator(BaseChatModel):
     """
 
     brief: str
+    #: H4 reuses this script to reach `compliance-checker` as well.
+    subagent: str = "section-drafter"
 
     @property
     def _llm_type(self) -> str:
@@ -152,7 +154,7 @@ class _ScriptedOrchestrator(BaseChatModel):
                         "name": "task",
                         "args": {
                             "description": self.brief,
-                            "subagent_type": "section-drafter",
+                            "subagent_type": self.subagent,
                         },
                         "id": "h3-delegate",
                         "type": "tool_call",
@@ -258,17 +260,22 @@ def _trace(case: DraftCase, messages: list[Any]) -> list[dict[str, Any]]:
     """The exchange in the report's turn format. System prompt first."""
     from grant_writer.prompts import DRAFTER_PROMPT
 
-    turns: list[dict[str, Any]] = [
-        {"role": "system", "content": DRAFTER_PROMPT},
-        {"role": "user", "content": case.brief},
+    return turns(DRAFTER_PROMPT, case.brief, messages)
+
+
+def turns(system: str, brief: str, messages: list[Any]) -> list[dict[str, Any]]:
+    """`_trace` for any subagent: its prompt, its brief, then the exchange."""
+    out: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": brief},
     ]
     for message in messages:
         if isinstance(message, AIMessage):
             text = _text(message)
             if text.strip():
-                turns.append({"role": "assistant", "content": text})
+                out.append({"role": "assistant", "content": text})
             for call in message.tool_calls:
-                turns.append(
+                out.append(
                     {
                         "role": "tool_call",
                         "name": call["name"],
@@ -276,8 +283,8 @@ def _trace(case: DraftCase, messages: list[Any]) -> list[dict[str, Any]]:
                     }
                 )
         elif isinstance(message, ToolMessage):
-            turns.append({"role": "tool_result", "content": _text(message)})
-    return turns
+            out.append({"role": "tool_result", "content": _text(message)})
+    return out
 
 
 def _expected_model() -> str:

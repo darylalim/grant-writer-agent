@@ -11,6 +11,8 @@ here.**
 |---|---|
 | `scmp-2026-nofo-excerpt.pdf` | A verbatim excerpt of a real, public federal solicitation (below). |
 | `profile-fictional.md` | An invented organization profile, written to fit that solicitation. Some fields are deliberately `UNKNOWN`, so a correct run produces `[NEEDS INPUT]` markers for them. |
+| `rfp-health-fictional.md` | An invented public-health solicitation, shaped like a federal NOFO, for the false-refusal eval (H4). Not a real program. |
+| `profile-health-fictional.md` | An invented rural health district written to fit it. |
 
 ## The solicitation
 
