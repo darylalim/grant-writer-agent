@@ -249,6 +249,10 @@ just a bad draft. So:
   from the model's own estimate.
 - The compliance reviewer cannot edit what it reviews.
 - The scout must cite every verdict; an honest `NONE` beats a hopeful `STRONG`.
+- A turn declined by the model's safety classifier is shown as declined, with
+  the agent and the classifier's category, not as an empty reply. Health and
+  biomedical topics can trigger false refusals; if one does, rephrase the
+  request or retry later. There is no automatic fallback to another model.
 
 Before submitting, check every `[NEEDS INPUT]` marker, every number, and every
 citation.

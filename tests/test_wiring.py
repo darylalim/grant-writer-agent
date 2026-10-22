@@ -1596,3 +1596,75 @@ def test_a_refusal_lands_in_response_metadata(monkeypatch, streamed):
     assert message.response_metadata["stop_reason"] == "refusal"
     assert message.response_metadata["stop_details"] == _REFUSAL_DETAILS
     assert not message.text
+
+
+@pytest.mark.parametrize("roster", ["drafting", "discovery"])
+def test_every_subagent_carries_the_refusal_middleware(roster):
+    """Pins invariant 21.
+
+    A subagent inherits none of the orchestrator's middleware, so one built
+    without its own hands a declined reply up to `task` as an empty result,
+    and the orchestrator carries on short a section with nothing on screen.
+    `_subagent` installs it unconditionally; this pins that every roster
+    member went through it, and that each names itself rather than a
+    neighbour -- the name is what the frontends show as the declined agent.
+    """
+    from grant_writer.refusals import RefusalMiddleware
+
+    specs = build_subagents() if roster == "drafting" else build_discovery_subagents()
+    for spec in specs:
+        installed = [
+            m for m in spec.get("middleware", []) if isinstance(m, RefusalMiddleware)
+        ]
+        assert [m.agent for m in installed] == [spec["name"]], spec["name"]
+
+
+@pytest.mark.parametrize(
+    ("graph", "name"),
+    [("draft", "grant-writer"), ("discover", "opportunity-discovery")],
+)
+def test_a_declined_orchestrator_turn_reaches_the_stream_as_declined(
+    monkeypatch, graph, name
+):
+    """Pins invariant 21.
+
+    The orchestrator's half, through the real graph: an HTTP-200 refusal with
+    empty content comes out of `iter_activity` as one DECLINED event naming
+    the graph and the category, and `response_metadata` still holds what the
+    API said. The subagent half runs through the real graph too, in
+    `test_evals.test_a_refusal_mid_run_is_kept_with_its_category_and_marked_partial`.
+    """
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    from grant_writer import agent as agent_module
+    from grant_writer.activity import DECLINED, iter_activity
+
+    class _Refusing(GenericFakeChatModel):
+        def bind_tools(self, tools, **_kwargs):
+            return self
+
+    def _fake(*_args, **_kwargs):
+        refused = AIMessage(
+            "",
+            response_metadata={
+                "stop_reason": "refusal",
+                "stop_details": dict(_REFUSAL_DETAILS),
+            },
+        )
+        return _Refusing(messages=iter([refused]))
+
+    monkeypatch.setattr(agent_module, "build_model", _fake)
+    build = build_agent if graph == "draft" else build_discovery_agent
+    events = [
+        event
+        for chunk in build(Settings(enable_search=False)).stream(
+            {"messages": [{"role": "user", "content": "hi"}]},
+            config={"configurable": {"thread_id": "t"}},
+            stream_mode="updates",
+        )
+        for event in iter_activity(chunk)
+    ]
+
+    assert [(e.kind, e.label, e.category) for e in events] == [(DECLINED, name, "bio")]
+    assert events[0].detail == _REFUSAL_DETAILS["explanation"]

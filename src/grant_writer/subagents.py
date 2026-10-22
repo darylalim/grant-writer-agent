@@ -51,6 +51,7 @@ from grant_writer.prompts import (
     RESEARCHER_PROMPT,
     SCOUT_PROMPT,
 )
+from grant_writer.refusals import RefusalMiddleware
 from grant_writer.tools import build_measure_tool, build_search_tool
 
 
@@ -85,6 +86,11 @@ def _subagent(
     with a truthiness check (`graph.py`: `if spec.get("skills")`), so an absent
     key and a `None` are already the same thing to the harness. Absent is the
     one that keeps the TypedDict honest.
+
+    `RefusalMiddleware` is installed here, unconditionally, for the reason
+    `skills` is required: a subagent inherits none of the orchestrator's
+    middleware, and one built without it hands a declined reply up to `task`
+    as an empty result (invariant 21). Here, no subagent can be built without.
     """
     subagent: SubAgent = {
         "name": name,
@@ -92,6 +98,7 @@ def _subagent(
         "system_prompt": system_prompt,
         "model": build_model(model_spec, effort=effort),
         "tools": tools or [],
+        "middleware": [RefusalMiddleware(agent=name)],
     }
     if skills is not None:
         subagent["skills"] = skills

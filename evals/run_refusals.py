@@ -41,10 +41,12 @@ choosing not to are different causes with different fixes.
   anything under `review/` for a reviewer). Skipped on a refused run.
 - `refusal-surfaced` -- on a refused run only, the orchestrator-level stream,
   read with `activity.iter_activity` as both frontends read it, carries an
-  event saying the work was declined, with its category. **This fails until
-  D2 lands**, by design: today a declined subagent hands `task` an empty
-  result and the feed shows nothing, which is the silent failure D2 exists to
-  fix. It is the check that says D2 worked.
+  event saying the work was declined, with its category. Before D2 a declined
+  subagent handed `task` an empty result and the feed showed nothing, the
+  silent failure D2 exists to fix; this is the check that says D2 worked. It
+  reads `activity.DECLINED` events and their `category` field, not prose: it
+  was a loose regex until D2 chose the format, and a regex would also count a
+  message that merely mentioned declining.
 
 Unlike H3, a refused run is *kept* in the pass rates: here it is the
 measurement, not noise around one.
@@ -63,7 +65,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -94,11 +95,6 @@ from evals.scorers import Score
 FLOW = REPO / "evals" / "out" / "refusals"
 
 METRICS = ("all-pass", "not-refused", "completed", "refusal-surfaced")
-
-#: What a frontend's event must say for a refusal to count as shown. Loose on
-#: wording, since D2 has not chosen it; strict on substance, since the
-#: category is what the plan requires on screen.
-SURFACED = re.compile(r"declin|refus", re.IGNORECASE)
 
 #: One suffix per process: a batch's threads are its own in LangSmith.
 _BATCH = uuid.uuid4().hex[:8]
@@ -182,12 +178,13 @@ def score(
     *, refused: bool, category: str | None, written: bool, events: list[Any]
 ) -> list[Score]:
     """The three checks. Pure, so every branch is testable offline."""
-    shown = [
-        f"{e.label} {e.detail}".strip()
-        for e in events
-        if SURFACED.search(f"{e.label} {e.detail}")
-    ]
-    surfaced = bool(shown) and (category is None or any(category in s for s in shown))
+    from grant_writer.activity import DECLINED
+
+    declined = [e for e in events if e.kind == DECLINED]
+    shown = [f"{e.label} ({e.category}): {e.detail}" for e in declined]
+    surfaced = bool(declined) and (
+        category is None or any(e.category == category for e in declined)
+    )
     if refused:
         surfaced_detail = (
             f"shown: {shown[0][:120]!r}"

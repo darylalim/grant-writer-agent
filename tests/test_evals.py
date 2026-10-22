@@ -3237,8 +3237,10 @@ def test_an_oracle_drafter_is_not_refused_and_completes(monkeypatch):
 def test_a_refusal_mid_run_is_kept_with_its_category_and_marked_partial(monkeypatch):
     """A drafter declined after writing is a finding: the half-file is kept.
 
-    And `refusal-surfaced` fails, because today nothing reaches the frontend's
-    stream to say so -- the silent failure D2 exists to fix.
+    And `refusal-surfaced` passes: the declined sentence reaches the
+    orchestrator's stream through the `task` result, with the agent and the
+    category. This asserted the opposite until D2 -- nothing reached the
+    frontend's stream at all, which was the silent failure D2 exists to fix.
     """
     case = _refusal_case("testing-linkage")
     record = _run_h4(
@@ -3257,8 +3259,8 @@ def test_a_refusal_mid_run_is_kept_with_its_category_and_marked_partial(monkeypa
     assert by_name["not-refused"]["passed"] is False
     assert by_name["completed"]["skipped"] is True
     assert by_name["refusal-surfaced"]["skipped"] is False
-    assert by_name["refusal-surfaced"]["passed"] is False
-    assert "'bio'" in by_name["refusal-surfaced"]["detail"]
+    assert by_name["refusal-surfaced"]["passed"] is True
+    assert "section-drafter (bio): Biology." in by_name["refusal-surfaced"]["detail"]
 
 
 def test_a_soft_refusal_passes_not_refused_and_fails_completed(monkeypatch):
@@ -3308,11 +3310,12 @@ def test_a_reviewer_served_by_the_drafting_model_is_a_harness_error(monkeypatch)
 
 
 def test_a_refusal_counts_as_surfaced_only_with_its_category():
-    from grant_writer.activity import MESSAGE, Event
+    from grant_writer.activity import DECLINED, MESSAGE, Event
 
-    shown = [Event(MESSAGE, detail="Declined by safety classifier (bio).")]
-    vague = [Event(MESSAGE, detail="The drafter declined.")]
+    shown = [Event(DECLINED, label="section-drafter", category="bio")]
+    vague = [Event(DECLINED, label="section-drafter", category="unspecified")]
     unrelated = [Event(MESSAGE, detail="Delegated.")]
+    prose = [Event(MESSAGE, detail="Declined by the safety classifier (bio).")]
 
     def surfaced(events, category="bio"):
         scores = run_refusals.score(
@@ -3323,6 +3326,7 @@ def test_a_refusal_counts_as_surfaced_only_with_its_category():
     assert surfaced(shown)
     assert not surfaced(vague), "the plan requires the category on screen"
     assert not surfaced(unrelated)
+    assert not surfaced(prose), "prose about declining is not a DECLINED event"
     assert surfaced(vague, category=None), "no category given, none to show"
 
 

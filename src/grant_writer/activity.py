@@ -13,6 +13,7 @@ one function rather than silently drawing an empty label in two frontends.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,11 +24,32 @@ DELEGATE = "delegate"
 PLAN = "plan"
 TOOL = "tool"
 MESSAGE = "message"
+# A reply the API declined. Its own kind, never MESSAGE: a refusal arrives as
+# HTTP 200 with empty content, so drawn as prose it is an empty turn.
+DECLINED = "declined"
 
 # Tool-call argument names that identify *what* a call is acting on, in the
 # order we prefer them. Different tools spell it differently and none of them
 # is guaranteed present.
 _SUBJECT_KEYS = ("file_path", "path", "query")
+
+# The sentence `refusals.RefusalMiddleware` writes into a declined reply, and
+# the parser that reads it back. Both live here, in a leaf, so the writer and
+# the reader are one format rather than two that agree today. Text rather
+# than metadata because text is the only thing `deepagents` carries from a
+# subagent up to its `task` result: it forwards the subagent's last non-empty
+# reply and drops `response_metadata`, so a declined drafter otherwise reaches
+# the orchestrator as an empty result -- or as stale prose from an earlier turn.
+_DECLINED_LEAD = "Declined by the safety classifier"
+_DECLINED_RE = re.compile(
+    rf"^{_DECLINED_LEAD} \(category: (?P<category>[a-z_]+)\) "
+    r"in (?P<agent>[\w-]+)\.(?: Note: (?P<explanation>.*))?\Z",
+    re.DOTALL | re.MULTILINE,
+)
+#: Shown in place of a category the API omitted or spelled unexpectedly. The
+#: category is API output and reaches a markdown renderer, so anything outside
+#: `[a-z_]+` is replaced rather than passed through.
+UNSPECIFIED = "unspecified"
 
 
 @dataclass(frozen=True)
@@ -56,6 +78,41 @@ class Event:
     label: str = ""
     detail: str = ""
     todos: tuple[Todo, ...] = field(default=())
+    #: DECLINED only: the classifier's category. ``label`` is then the agent
+    #: that was declined and ``detail`` the API's explanation, which is model
+    #: output and must be drawn as plain text, never as markdown.
+    category: str = ""
+
+
+def declined_text(agent: str, category: Any, explanation: Any) -> str:
+    """The sentence a declined reply carries, for the model and the parser.
+
+    Written for both readers at once: the orchestrator reads it as a `task`
+    result and learns why a section is missing, and `iter_activity` reads it
+    back as a DECLINED event. A category outside `[a-z_]+` becomes
+    ``unspecified``, so the parser's character class can never fail to match
+    what this wrote.
+    """
+    text = f"{_DECLINED_LEAD} (category: {_category(category)}) in {agent}."
+    note = str(explanation or "").strip()
+    return f"{text} Note: {note}" if note else text
+
+
+def _category(value: Any) -> str:
+    value = str(value or "")
+    return value if re.fullmatch(r"[a-z_]+", value) else UNSPECIFIED
+
+
+def _declined_event(text: str) -> Event | None:
+    match = _DECLINED_RE.search(text)
+    if match is None:
+        return None
+    return Event(
+        DECLINED,
+        label=match["agent"],
+        detail=(match["explanation"] or "").strip(),
+        category=match["category"],
+    )
 
 
 def iter_activity(chunk: dict[str, Any]) -> Iterator[Event]:
@@ -77,6 +134,33 @@ def _message_events(node: str, message: Any) -> Iterator[Event]:
     for call in tool_calls:
         yield _call_event(call)
 
+    metadata = getattr(message, "response_metadata", None) or {}
+    if node == "model" and metadata.get("stop_reason") == "refusal":
+        # The orchestrator's own reply. Read from the sentence the middleware
+        # wrote, which names the agent; failing that, from the metadata, so a
+        # graph built without the middleware still says it was declined.
+        details = metadata.get("stop_details") or {}
+        yield _declined_event(_text_of(message)) or Event(
+            DECLINED,
+            detail=str(details.get("explanation") or "").strip(),
+            category=_category(details.get("category")),
+        )
+        return
+    if getattr(message, "type", None) == "tool" and message.name == "task":
+        # A subagent's result. Keyed on `task` so a `read_file` of a document
+        # that happens to quote the sentence is not mistaken for a refusal.
+        if (event := _declined_event(_text_of(message))) is not None:
+            yield event
+        return
+
+    text = _text_of(message)
+    # Only the orchestrator node's untooled messages are prose worth showing;
+    # a message that carries tool calls has already been rendered as those.
+    if text and node == "model" and not tool_calls:
+        yield Event(MESSAGE, detail=text)
+
+
+def _text_of(message: Any) -> str:
     text = getattr(message, "text", None)
     # `str` first, `callable` second, and the order is the whole point. On
     # langchain-core 1.x `.text` is a property returning a `TextAccessor` --
@@ -90,10 +174,7 @@ def _message_events(node: str, message: Any) -> Iterator[Event]:
     # feed would put `<bound method ...>` on screen where the prose goes.
     if not isinstance(text, str) and callable(text):
         text = text()
-    # Only the orchestrator node's untooled messages are prose worth showing;
-    # a message that carries tool calls has already been rendered as those.
-    if text and node == "model" and not tool_calls:
-        yield Event(MESSAGE, detail=text)
+    return text if isinstance(text, str) else ""
 
 
 def _call_event(call: dict[str, Any]) -> Event:

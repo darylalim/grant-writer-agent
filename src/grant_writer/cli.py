@@ -9,6 +9,7 @@ from pathlib import Path
 from langgraph.types import Command
 
 from grant_writer.activity import (
+    DECLINED,
     DELEGATE,
     MESSAGE,
     PLAN,
@@ -63,6 +64,15 @@ def _print_activity(chunk: dict) -> None:
             print(f"  -> {event.label}{suffix}", flush=True)
         elif event.kind == MESSAGE:
             print(f"\n{event.detail}\n", flush=True)
+        elif event.kind == DECLINED:
+            who = event.label or "the agent"
+            print(
+                f"  !! declined by the safety classifier ({event.category}) "
+                f"in {who}; its output is missing. Rephrase, or retry later.",
+                flush=True,
+            )
+            if event.detail:
+                print(f"     {event.detail}", flush=True)
 
 
 def _resolve_interrupt(agent, config: dict) -> dict | None:
