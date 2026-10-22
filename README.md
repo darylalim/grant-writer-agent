@@ -86,13 +86,14 @@ What those overrides replace:
 | Role | Does | Default model | Default effort |
 |---|---|---|---|
 | `DRAFTING` | Orchestrates a draft; writes sections | Claude Opus 5.5 | `high` |
-| `RESEARCH` | Researches the funder | Claude Sonnet 5.5 | `medium` |
+| `RESEARCH` | Researches the funder | Claude Sonnet 5.5 | `high` |
 | `COMPLIANCE` | Reviews drafts against the RFP | Claude Sonnet 5.5 | `high` |
 | `GRADER` | Scores a draft against `--rubric` | Claude Opus 5.5 | `high` |
 | `DISCOVERY` | Orchestrates a scan; scores candidates | Claude Sonnet 5.5 | `medium` |
 
-The roles that write or judge what gets submitted think hardest. Research and discovery
-gather and sort material that a person reads before anything is submitted.
+Only discovery runs at `medium`: it scores each candidate separately, and a person reads the
+shortlist before acting on it. Funder research stays at `high` because every section is framed
+on it, and it is a small part of a drafting run's cost.
 
 ## Finding opportunities
 

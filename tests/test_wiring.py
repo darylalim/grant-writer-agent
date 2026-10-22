@@ -1030,7 +1030,7 @@ def test_an_explicit_effort_reaches_the_request_and_omitting_one_is_refused():
 def test_each_role_is_built_at_its_own_effort(monkeypatch):
     """Both graphs hand every model its *own* role's effort, not a neighbour's.
 
-    Three roles ship at the same effort, so passing `COMPLIANCE_EFFORT` to the
+    Four roles ship at the same effort, so passing `COMPLIANCE_EFFORT` to the
     drafter would send the very same request today and be invisible to the
     payload case above -- until one role's value moves, when the wrong role
     moves with it and nothing raises. So each role's model and effort are

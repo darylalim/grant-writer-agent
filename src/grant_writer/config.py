@@ -74,16 +74,19 @@ MAX_OUTPUT_TOKENS = 64000
 #
 # Per role, keyed like DEFAULT_MODELS and overridable the same way, because the
 # roles do not need the same depth: a scan that decides whether to apply at all
-# is not a section someone submits. Research and discovery gather and sort;
-# a human reads their output before anything is submitted, so they run at
-# `medium`. Drafting writes what is submitted, and the grader and compliance
-# reviewer judge it -- a judge cheaper than the work it judges passes what it
-# should catch -- so those stay `high`. An override outside
+# is not a section someone submits. Discovery runs at `medium`: one scout call
+# per candidate, a human reads the shortlist, and the scout eval held its
+# citations at 42% less cost. Research stays `high` despite gathering rather
+# than writing: it is under 1% of a drafting run, and at `medium` it dropped
+# the per-criterion framing every section is shaped around (D4, 2026-10-22).
+# Drafting writes what is submitted, and the grader and compliance reviewer
+# judge it -- a judge cheaper than the work it judges passes what it should
+# catch -- so those stay `high` too. An override outside
 # langchain-anthropic's accepted levels fails loudly, at construction: the
 # field is a `Literal`.
 DEFAULT_EFFORT = {
     "drafting": "high",
-    "research": "medium",
+    "research": "high",
     "compliance": "high",
     "grader": "high",
     "discovery": "medium",
