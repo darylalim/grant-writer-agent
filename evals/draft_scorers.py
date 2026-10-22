@@ -395,6 +395,30 @@ def no_blanks(case: DraftCase, out: DraftOutput) -> Score:
     )
 
 
+def no_profile_write(case: DraftCase, out: DraftOutput) -> Score:
+    """The drafter tried to change nothing under `/memories/`.
+
+    Invariant 20: only the orchestrator records a fact in the organization
+    profile, and the drafter's rules now refuse the write. Counted on the
+    attempt, not the outcome, so a refusal still fails here -- the rule held,
+    but the prompt that says to report such a fact instead did not.
+    """
+    del case
+    tried = [
+        name
+        for name, args in out.calls
+        if name in ("write_file", "edit_file", "delete")
+        and str(args.get("file_path") or args.get("path") or "").startswith(
+            "/memories/"
+        )
+    ]
+    if tried:
+        return Score(
+            "no-profile-write", False, f"tried {', '.join(tried)} on /memories/"
+        )
+    return Score("no-profile-write", True, "left the profile alone")
+
+
 def score_programmatically(
     case: DraftCase, out: DraftOutput, sources: str
 ) -> list[Score]:
@@ -409,6 +433,7 @@ def score_programmatically(
         no_leaked_figure(case, out),
         uses_confirmed_figure(case, out),
         no_blanks(case, out),
+        no_profile_write(case, out),
     ]
 
 

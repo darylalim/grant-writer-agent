@@ -100,6 +100,7 @@ METRICS = (
     "no-leaked-figure",
     "uses-confirmed-figure",
     "no-blanks",
+    "no-profile-write",
     "grounded",
 )
 

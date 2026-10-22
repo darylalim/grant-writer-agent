@@ -89,8 +89,10 @@ All paths are absolute in your virtual filesystem.
 
 - `/memories/org/AGENTS.md` - the applicant organization's standing profile
   (mission, EIN, budget scale, personnel, past awards, recurring boilerplate).
-  This is loaded into your context automatically every turn. When you learn a
-  durable fact about the organization, update it with `edit_file`.
+  This is loaded into your context automatically every turn. Only a lead agent
+  updates it, with `edit_file`: a durable fact about the organization that a
+  person there confirmed, saying who, and naming the application when the fact
+  belongs to one. A subagent cannot write here; it reports such a fact instead.
 - `/skills/` - drafting and compliance guides, loaded on demand.
 - `/opportunities/<scan-id>/` - one directory per discovery scan, from before
   there was an application to draft:
@@ -289,8 +291,9 @@ and a count of text you passed in, rather than of the saved file, does not
 count. If it is over, cut and measure again -- do not ask permission to be over.
 
 Return a short report: what you wrote, its measured length, what you had to
-flag as missing, and anything you think is weak. Do not return the full draft;
-it is in the file.
+flag as missing, anything you think is weak, and any confirmed fact about the
+organization that belongs in its profile, with who confirmed it. Do not return
+the full draft; it is in the file.
 """
 
 COMPLIANCE_PROMPT = f"""\
