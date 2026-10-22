@@ -2682,6 +2682,19 @@ def test_measured_needs_the_saved_file_measured_after_its_last_change():
     assert not passes(write, ("measure_text", {"path": path + ".bak"}))
 
 
+def test_no_profile_write_counts_the_attempt_not_the_outcome():
+    """Invariant 20 refuses the write; the check still fails the attempt."""
+    case = _draft_case("confirmed-figure")
+    write = ("write_file", {"file_path": case.section_path, "content": "x"})
+    profile = ("edit_file", {"file_path": "/memories/org/AGENTS.md"})
+    read = ("read_file", {"file_path": "/memories/org/AGENTS.md"})
+
+    assert draft_scorers.no_profile_write(case, _measuring(write, read)).passed
+    assert not draft_scorers.no_profile_write(case, _measuring(write, profile)).passed
+    deleted = ("delete", {"path": "/memories/org/AGENTS.md"})
+    assert not draft_scorers.no_profile_write(case, _measuring(deleted)).passed
+
+
 def test_the_profile_cuts_remove_every_withheld_fact_and_keep_the_rest():
     stripped = draft_cases.STRIPPED_PROFILE
     for gone in (
