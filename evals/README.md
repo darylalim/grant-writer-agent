@@ -187,6 +187,8 @@ measurement. Two routes to one gap — a length of something other than the save
 file — so `measure_text` now takes a `path` and the prompts require measuring
 the file after the last edit. `measured` now passes only on that, so v1 and
 `d1` rescore to 68/84; `v2`, the fix, scored 84/84.
+`no-profile-write` (invariant 20) then rescored v2 to 96/99, and `v3`, with the
+drafter confined to `/applications/`, scored 99/99.
 
 The profiles are cut from `fixtures/profile-fictional.md` at import,
 each cut asserting its target is present, so the shared fixture stays
