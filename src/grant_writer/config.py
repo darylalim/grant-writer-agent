@@ -112,9 +112,20 @@ def build_model(spec: str, *, effort: str) -> BaseChatModel:
     `*_EFFORT`, and the eval judge names its pinned `JUDGE_EFFORT`, so a
     before/after comparison of an effort change is scored by the same judge on
     both sides. It is ignored for non-Anthropic specs, which reject the key.
+
+    It is also put in the model's trace `metadata`, because langchain-anthropic
+    records the model and `max_tokens` on a run but not the effort sent -- and
+    with roles at different efforts on the same model id, the trace is where a
+    surprising cost or a shallow answer gets traced back to its setting. That
+    field labels the run only; it is not the API's request `metadata`.
     """
     if spec.startswith("anthropic:"):
-        return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS, effort=effort)
+        return init_chat_model(
+            spec,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            effort=effort,
+            metadata={"effort": effort},
+        )
     return init_chat_model(spec, max_tokens=MAX_OUTPUT_TOKENS)
 
 

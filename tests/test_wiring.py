@@ -838,6 +838,41 @@ def test_default_model_sends_its_roles_effort(role, spec):
     )
 
 
+@pytest.mark.parametrize(("role", "spec"), sorted(DEFAULT_MODELS.items()))
+def test_a_traced_call_records_the_effort_it_sent(monkeypatch, role, spec):
+    """A model call's trace says which effort it ran at, and the request does not.
+
+    langchain-anthropic records the model and `max_tokens` on a run but not the
+    effort, so with three roles on Sonnet at two efforts a trace could not say
+    which setting produced a cost. Read off `on_chat_model_start`, which is what
+    the LangSmith tracer is handed, through a binding as `create_agent` uses the
+    model. And absent from the payload: the API has a request `metadata` field
+    of its own, and a trace label is not something to send to it.
+    """
+    from langchain_anthropic import ChatAnthropic
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    traced: list[dict] = []
+
+    class _Tracer(BaseCallbackHandler):
+        def on_chat_model_start(self, serialized, messages, *, metadata=None, **kw):
+            del serialized, messages, kw
+            traced.append(metadata or {})
+
+    def _refuse(self, payload):
+        del self, payload
+        raise _FirstRequest
+
+    monkeypatch.setattr(ChatAnthropic, "_create", _refuse)
+    model = build_model(spec, effort=DEFAULT_EFFORT[role])
+    with pytest.raises(_FirstRequest):
+        model.bind(stop=["\n\n"]).invoke("hi", config={"callbacks": [_Tracer()]})
+
+    assert [run.get("effort") for run in traced] == [DEFAULT_EFFORT[role]]
+    payload = model._get_request_payload([("user", "hi")])  # ty: ignore[unresolved-attribute]
+    assert "metadata" not in payload
+
+
 def test_an_explicit_effort_reaches_the_request_and_omitting_one_is_refused():
     """The eval judge pins its own effort through the same construction path.
 
