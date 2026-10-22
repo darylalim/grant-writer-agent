@@ -11,6 +11,7 @@
       "Bash(uv run python -m evals.run_scout *)",
       "Bash(uv run python -m evals.evaluate_scout *)",
       "Bash(uv run python -m evals.run_draft_trajectory *)",
+      "Bash(uv run python -m evals.run_draft_section *)",
       "Bash(rm *.grant_writer/checkpoints*)",
       "Bash(mv *.grant_writer/checkpoints*)"
     ]

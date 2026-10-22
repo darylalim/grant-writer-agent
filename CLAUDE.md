@@ -15,6 +15,8 @@ uvx ruff@0.17.1 format --check src/ tests/ evals/ streamlit_app.py   # ruff's de
 uv run python -m evals.run_scout              # prompt eval: LIVE model, costs money
 uv run python -m evals.push_dataset --dry-run # dataset mirror: plan only; drop the flag to write
 uv run python -m evals.evaluate_scout         # same eval as an experiment: LIVE, needs both keys
+uv run python -m evals.run_draft_section --repeat 3   # drafting eval (H3): LIVE, costs money
+uv run python -m evals.run_draft_section --rescore    # re-grade its saved sections: offline, free
 
 uv run grant-writer discover --scan-id X --focus "rural health"   # before drafting
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
@@ -49,7 +51,8 @@ required-version` in `pyproject.toml`, which setup-uv reads too, so the three jo
 runs `uv audit` and fails on any advisory not ignored there by ID, with a reason. **A ruff or ty
 version bump touches three places in one commit:** `ci.yml`, the hooks in `.claude/settings.json`, and this paragraph. Bump deliberately, and
 re-check the ty baseline when you do. Billed commands (`grant-writer draft`/`discover`/`chat`,
-`evals.run_scout`, `evals.evaluate_scout`) and any `rm`/`mv` of `.grant_writer/checkpoints*` are
+`evals.run_scout`, `evals.evaluate_scout`, `evals.run_draft_trajectory`,
+`evals.run_draft_section`) and any `rm`/`mv` of `.grant_writer/checkpoints*` are
 `permissions.ask` rules there: confirmed by a human, never forbidden. Releases need no separate step: a green push to `main`
 whose `version` in `pyproject.toml` has no `v<version>` tag gets tagged and released with the
 wheel and sdist attached, so **bumping the version is the release**.
