@@ -370,6 +370,58 @@ def test_the_rubric_grader_wakes_when_a_rubric_is_present():
     assert update["_rubric_status"] == "satisfied"
 
 
+class _FirstRequest(Exception):
+    """Raised in place of sending, carrying the request that would have gone."""
+
+
+def _first_grader_request(monkeypatch, spec: str) -> dict:
+    """The payload a rubric round's first grader call would send for `spec`."""
+    from langchain_anthropic import ChatAnthropic
+
+    def _capture(self, payload):
+        del self
+        raise _FirstRequest(payload)
+
+    monkeypatch.setattr(ChatAnthropic, "_create", _capture)
+    grader = RubricMiddleware(
+        model=build_model(spec, effort=GRADER_EFFORT)
+    )._ensure_grader()
+    with pytest.raises(_FirstRequest) as sent:
+        grader.invoke({"messages": [("user", "Grade this.")]})
+    return sent.value.args[0]
+
+
+@pytest.mark.parametrize("spec", sorted(set(DEFAULT_MODELS.values())))
+def test_the_grader_never_forces_a_tool_choice(monkeypatch, spec):
+    """No shipped model is sent a forced `tool_choice` by the rubric grader.
+
+    Opus 5.5 and Sonnet 5.5 answer `tool_choice` `any` or `tool` with a 400, so
+    a forced choice fails the first rubric round of every `--rubric` run. Two
+    upstream decisions keep it off today, and both match on the model *id*:
+    `RubricMiddleware` picks native structured output when the model's profile
+    declares it, and langchain-anthropic's `_supports_forced_tool_choice` lists
+    the 5.x prefixes. Over every shipped id rather than `GRADER_MODEL` alone,
+    because a `GRANT_WRITER_GRADER_MODEL` override may name any of them -- and
+    an id neither list knows (a `claude-opus-5-6`, say) is sent `any`, which is
+    why this is pinned on the request rather than assumed.
+    """
+    payload = _first_grader_request(monkeypatch, spec)
+    assert payload.get("tool_choice", {}).get("type") not in ("any", "tool"), payload
+    assert "format" in payload.get("output_config", {}), (
+        f"{spec!r} no longer uses native structured output for grading"
+    )
+
+
+def test_the_forced_tool_choice_check_can_see_one(monkeypatch):
+    """The case above would notice a forced choice if one were sent.
+
+    An older id that upstream still forces stands in for the regression, so the
+    absence asserted above is a reading, not a capture that never looks.
+    """
+    payload = _first_grader_request(monkeypatch, "anthropic:claude-opus-4-1")
+    assert payload["tool_choice"]["type"] == "any"
+
+
 def test_the_rubric_iteration_cap_comes_from_settings():
     """Pins invariant 8.
 
