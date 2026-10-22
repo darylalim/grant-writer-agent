@@ -191,7 +191,9 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
   - **Item 4, one full run at the new settings (user's choice: one run, not a pair).** `run_draft_trajectory`, search off as always. **4/4**: 14 `section-drafter` calls for 5 files, 8 orchestrator revisions, 3 compliance passes, 4 `write_todos`, reached `final/`. 33 min. **$15.88 per completed run**, against D0's $18.68, $32.26 and $25.21 (from LangSmith, grouped by trace). The thread ids are reused across batches, so grouping by thread merges D0 with Track A's earlier ~$9 "after" runs, which never reached `final/`. One run against three that varied this much is a reading, not a measured saving. Most of the drop is fewer drafter calls (255 vs 228–374), not effort. The org profile was byte-identical to the fixture afterwards.
   - **Research at `medium`: the researcher cost $0.10 vs $0.15–0.20 (under 1% of a run), with 4,617 output tokens vs 8,228–11,740.** The notes were noticeably thinner: 2,886 words vs 3,715–4,297. The per-criterion framing section (all five scored criteria in D0) was gone, and the per-subsection verified/unverified labels became one "Could not verify" list. **Decided by the user: research back to `high`.** Saving cents per run isn't worth weaker notes that every section is framed on. Discovery stays at `medium` (item 1: -42%, 2.5x faster, citations held).
   - Not observable in item 4: the orchestrator's rule labelling search figures as unverified, since the trajectory eval runs with `enable_search=False`. A live `draft` with search on is the only place it can show up.
+- [x] **Release 0.3.0** (user's choice, 2026-10-22, skipping the D4.3 draft skim): PR #16, merged as `e4c265e`, tagged `v0.3.0` with the wheel and sdist attached: https://github.com/darylalim/grant-writer-agent/releases/tag/v0.3.0. Notes hand-edited; known issues listed there: refusals still show as empty turns (D2 pending), and search-figure labelling is unverified.
 - [ ] H4: false-refusal case (commit: `       `)
+  - 2026-10-22, scope agreed with the user: `section-drafter` and `compliance-checker`, `--repeat 5`, built offline first and the live run asked for separately. `evals/run_refusals.py` + `refusal_cases.py`: five cases on a gradient (H3's `genuine-section` control; CHW evaluation, low; testing and PrEP, medium; wastewater pathogen surveillance, high; a compliance review of that section, high) over new fictional health fixtures. Three code checks: `not-refused`, `completed` (catches a soft refusal), and `refusal-surfaced`, which **fails until D2** by design. Offline tests in `tests/test_evals.py`. Live run: not yet.
 - [ ] D2: refusals shown, labelled, accessible (commit: `       `)
 - [ ] F: theme: test loosened → config → re-pinned (commits: `       `)
 - [ ] G1–G4: layout (commits: `       `)
@@ -741,7 +743,7 @@ That makes it a new silent failure of exactly the kind `CLAUDE.md` lists.
    `server-side-fallback-2026-07-01` beta with `fallbacks: "default"`). That changes what every
    request sends and how it is billed, so it is a product decision; do not slip it into this
    commit.
-4. If D2.2 lands, add it as a **new invariant** (the next free number, 20 as of 2026-10-19) with a
+4. If D2.2 lands, add it as a **new invariant** (the next free number: 21 as of 2026-10-22, since invariant 20 went to the drafter-memory rule) with a
    test that claims it.
 5. **README:** add a "Guardrails" bullet saying that a turn declined by a safety classifier is
    shown as declined, with its category, and not as an empty reply. Say that health and biomedical

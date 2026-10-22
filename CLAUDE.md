@@ -17,6 +17,7 @@ uv run python -m evals.push_dataset --dry-run # dataset mirror: plan only; drop 
 uv run python -m evals.evaluate_scout         # same eval as an experiment: LIVE, needs both keys
 uv run python -m evals.run_draft_section --repeat 3   # drafting eval (H3): LIVE, costs money
 uv run python -m evals.run_draft_section --rescore    # re-grade its saved sections: offline, free
+uv run python -m evals.run_refusals --repeat 5        # false-refusal rate (H4): LIVE, costs money
 
 uv run grant-writer discover --scan-id X --focus "rural health"   # before drafting
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
@@ -52,7 +53,7 @@ runs `uv audit` and fails on any advisory not ignored there by ID, with a reason
 version bump touches three places in one commit:** `ci.yml`, the hooks in `.claude/settings.json`, and this paragraph. Bump deliberately, and
 re-check the ty baseline when you do. Billed commands (`grant-writer draft`/`discover`/`chat`,
 `evals.run_scout`, `evals.evaluate_scout`, `evals.run_draft_trajectory`,
-`evals.run_draft_section`) and any `rm`/`mv` of `.grant_writer/checkpoints*` are
+`evals.run_draft_section`, `evals.run_refusals`) and any `rm`/`mv` of `.grant_writer/checkpoints*` are
 `permissions.ask` rules there: confirmed by a human, never forbidden. Releases need no separate step: a green push to `main`
 whose `version` in `pyproject.toml` has no `v<version>` tag gets tagged and released with the
 wheel and sdist attached, so **bumping the version is the release**.
