@@ -97,7 +97,7 @@ without stopping to ask.
 | 3 | How CI pins uv | `required-version` / `version:` inputs | **Decided 2026-10-20: `required-version`** (`==0.13.4`): one place, local and CI | C3 |
 | 4 | Effort per role | values | **Decided 2026-10-22: as recommended**: drafting, grader, compliance `high`; research, discovery `medium`, to be confirmed by D4. **Revised by the user the same day, after D4 item 4: research back to `high`.** Only discovery runs at `medium` | D1 step 3 |
 | 5 | Scout model | Sonnet 5.5 / Haiku 5.5 | Keep Sonnet unless Haiku matches on citation and invention scores over 3 repeats | D4 |
-| 6 | Server-side refusal fallback | off / `fallbacks: "default"` | Decide from H4's measured rate; off if it's zero | D2 step 3 |
+| 6 | Server-side refusal fallback | off / `fallbacks: "default"` | **Decided 2026-10-22: off.** H4 measured 0/25 refused (upper bound about 11% pooled). Revisit if D2's display or E's refusal-rate alert shows refusals in real use | D2 step 3 |
 | 7 | Input-border contrast | pass ≥3:1 / documented exception | Pass | F |
 | 8 | Serif headings | keep / drop | Keep, unless the screenshots look fussy at 14px | F |
 | 9 | CLI thread ids under E2 | unprefixed / fixed local user | Unprefixed: the CLI stays single-user | E2 |
