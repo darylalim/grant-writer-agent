@@ -2514,6 +2514,59 @@ def test_a_run_that_hits_the_step_limit_is_still_scored(tmp_path, monkeypatch):
     assert verdicts["no-inline-drafting"] is False
 
 
+def test_two_trajectory_batches_never_share_a_thread(tmp_path, monkeypatch):
+    """A batch's runs are their own threads in LangSmith.
+
+    Every batch used to reuse `trajectory-<repeat>`, so a query grouped by
+    thread merged D0's baseline with Track A's earlier runs and read $27-42
+    for what was $18-32. Nothing raised; the number was just wrong.
+    """
+    threads = []
+
+    class _Recorded:
+        def stream(self, *_args, config, **_kwargs):
+            threads.append(config["configurable"]["thread_id"])
+            return iter(DELEGATING)
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a: _Recorded())
+    for batch in ("aaaa", "bbbb"):
+        monkeypatch.setattr(run_draft_trajectory, "_BATCH", batch)
+        for repeat in range(2):
+            run_draft_trajectory.run_once(
+                tmp_path / f"{batch}-{repeat}", repeat=repeat, recursion_limit=5
+            )
+
+    assert len(set(threads)) == 4
+    assert all(t.endswith(("-aaaa", "-bbbb")) for t in threads)
+
+
+def test_two_draft_section_batches_never_share_a_thread(tmp_path, monkeypatch):
+    """`run_draft_trajectory`'s thread-reuse bug, in the H3 runner too."""
+    threads = []
+
+    class _Stop(Exception):
+        pass
+
+    def _record(_graph, config):
+        threads.append(config["configurable"]["thread_id"])
+        raise _Stop
+
+    monkeypatch.setattr(run_draft_section, "_drafter_messages", _record)
+    case = draft_cases.CASES[0]
+    for batch in ("aaaa", "bbbb"):
+        monkeypatch.setattr(run_draft_section, "_BATCH", batch)
+        with pytest.raises(_Stop):
+            run_draft_section.run_case(
+                case,
+                judge=False,
+                repeat=0,
+                recursion_limit=5,
+                root=tmp_path / batch,
+            )
+
+    assert threads == [f"{case.app_id}-0-aaaa", f"{case.app_id}-0-bbbb"]
+
+
 # ---- H3: the drafting eval, scorers and harness -------------------------------
 #
 # Same contract as the scout's: each case hands a scorer one specific failure.

@@ -76,6 +76,7 @@ import re
 import shutil
 import sys
 import time
+import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -98,6 +99,10 @@ APP_ID = "trajectory"
 #: The fixture's name in pass-rate tables. One fixture today; a second is a
 #: second key here, not a second runner.
 CASE = "scmp-2026"
+#: One suffix per process: a batch's threads are its own in LangSmith. Without
+#: it every batch reused `trajectory-<repeat>`, and grouping by thread merged
+#: D0's baseline with Track A's earlier runs ($27-42 read for $18-32).
+_BATCH = uuid.uuid4().hex[:8]
 OUT = REPO / "evals" / "out" / "trajectory"
 
 _SECTIONS = re.compile(r"^/applications/[^/]+/sections/")
@@ -214,7 +219,7 @@ def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]
         agent = build_agent(Settings(root=root, enable_search=False))
         brief = draft_request(APP_ID, rfp_path=str(RFP), funder=FUNDER)
         run_config: Any = {
-            "configurable": {"thread_id": f"{APP_ID}-{repeat}"},
+            "configurable": {"thread_id": f"{APP_ID}-{repeat}-{_BATCH}"},
             "recursion_limit": recursion_limit,
             "run_name": f"trajectory:{CASE}",
             "tags": ["eval", "draft-trajectory", f"case:{CASE}"],

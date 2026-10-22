@@ -50,6 +50,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
@@ -80,6 +81,10 @@ from evals.scorers import Score, pass_rates, render_rates
 
 REPO = Path(__file__).resolve().parents[1]
 FLOW = REPO / "evals" / "out" / "draft-section"
+
+#: One suffix per process, as in `run_refusals`: a batch's threads are its own
+#: in LangSmith rather than merged with every earlier batch's `<app>-<repeat>`.
+_BATCH = uuid.uuid4().hex[:8]
 
 # Pinned, for run_scout's reason: the ruler must not move with what it measures.
 # And not the drafter's model -- Opus 5.5 grading Opus 5.5's prose shares its
@@ -381,7 +386,7 @@ def run_case(
         graph = agent_module.build_agent(Settings(root=root, enable_search=False))
 
     config: dict[str, Any] = {
-        "configurable": {"thread_id": f"{case.app_id}-{repeat}"},
+        "configurable": {"thread_id": f"{case.app_id}-{repeat}-{_BATCH}"},
         "recursion_limit": recursion_limit,
         "run_name": f"draft-section:{case.key}",
         "tags": ["eval", "draft-section", f"case:{case.key}"],
