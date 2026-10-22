@@ -47,6 +47,7 @@ from grant_writer.config import (
     Settings,
     build_model,
     discovery_thread_id,
+    trace_config,
 )
 from grant_writer.subagents import (
     _subagent,
@@ -1668,3 +1669,73 @@ def test_a_declined_orchestrator_turn_reaches_the_stream_as_declined(
 
     assert [(e.kind, e.label, e.category) for e in events] == [(DECLINED, name, "bio")]
     assert events[0].detail == _REFUSAL_DETAILS["explanation"]
+
+
+def test_a_refusal_is_a_filterable_run_inside_the_turns_trace(monkeypatch):
+    """D2.7: refused replies can be counted in LangSmith.
+
+    The turn's own metadata is fixed by `trace_config` before the turn runs,
+    and a refusal is only known after the reply, so the middleware records it
+    as a child run instead. Pinned through a tracer on the real graph: one
+    `declined` run, in the same trace, under the model node, tagged with its
+    category -- and carrying the turn's labels, which is what lets a count be
+    broken down by frontend or command without joining anything.
+    """
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.tracers.base import BaseTracer
+
+    from grant_writer import agent as agent_module
+
+    runs: dict = {}
+
+    class _Tracer(BaseTracer):
+        def _persist_run(self, run):
+            del run
+
+        def _on_run_create(self, run):
+            runs[run.id] = run
+
+    class _Refusing(GenericFakeChatModel):
+        def bind_tools(self, tools, **_kwargs):
+            return self
+
+    def _fake(*_args, **_kwargs):
+        refused = AIMessage(
+            "",
+            response_metadata={
+                "stop_reason": "refusal",
+                "stop_details": dict(_REFUSAL_DETAILS),
+            },
+        )
+        return _Refusing(messages=iter([refused]))
+
+    monkeypatch.setattr(agent_module, "build_model", _fake)
+    settings = Settings(enable_search=False)
+    turn = trace_config(
+        settings,
+        command="draft",
+        frontend="cli",
+        ref="app-1",
+        thread_id="app-1",
+        recursion_limit=25,
+    )
+    turn["callbacks"] = [_Tracer()]
+    list(
+        build_agent(settings).stream(
+            {"messages": [{"role": "user", "content": "hi"}]},
+            config=turn,
+            stream_mode="updates",
+        )
+    )
+
+    (declined,) = [r for r in runs.values() if r.name == "declined"]
+    root = next(r for r in runs.values() if r.parent_run_id is None)
+    assert declined.trace_id == root.trace_id
+    assert runs[declined.parent_run_id].name == "model"
+    assert {"declined", "declined:bio"} <= set(declined.tags or [])
+    metadata = declined.extra["metadata"]
+    assert metadata["stop_reason"] == "refusal"
+    assert metadata["refusal_category"] == "bio"
+    assert metadata["declined_agent"] == "grant-writer"
+    assert metadata["frontend"] == "cli" and metadata["command"] == "draft"

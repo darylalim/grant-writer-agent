@@ -93,12 +93,13 @@ def declined_text(agent: str, category: Any, explanation: Any) -> str:
     ``unspecified``, so the parser's character class can never fail to match
     what this wrote.
     """
-    text = f"{_DECLINED_LEAD} (category: {_category(category)}) in {agent}."
+    text = f"{_DECLINED_LEAD} (category: {declined_category(category)}) in {agent}."
     note = str(explanation or "").strip()
     return f"{text} Note: {note}" if note else text
 
 
-def _category(value: Any) -> str:
+def declined_category(value: Any) -> str:
+    """The API's category if it is `[a-z_]+`, else ``unspecified``."""
     value = str(value or "")
     return value if re.fullmatch(r"[a-z_]+", value) else UNSPECIFIED
 
@@ -143,7 +144,7 @@ def _message_events(node: str, message: Any) -> Iterator[Event]:
         yield _declined_event(_text_of(message)) or Event(
             DECLINED,
             detail=str(details.get("explanation") or "").strip(),
-            category=_category(details.get("category")),
+            category=declined_category(details.get("category")),
         )
         return
     if getattr(message, "type", None) == "tool" and message.name == "task":
