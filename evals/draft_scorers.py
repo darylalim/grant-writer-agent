@@ -76,6 +76,8 @@ class DraftOutput:
     section: str | None
     #: Names of every tool the drafter called, in order.
     tool_calls: tuple[str, ...] = ()
+    #: The same calls with their arguments, for checks that need the target.
+    calls: tuple[tuple[str, dict], ...] = ()
     #: The drafter's closing report to the orchestrator.
     report: str = ""
 
@@ -217,9 +219,9 @@ def untraceable_numbers(
 
 def _measured_words(text: str) -> int:
     """Words, counted by the same code the drafter's `measure_text` uses."""
-    from grant_writer.tools import measure_text
+    from grant_writer.tools import measure
 
-    reply = str(measure_text.invoke({"text": text}))
+    reply = measure(text)
     found = re.search(r"\bwords=(\d+)", reply)
     if found is None:  # pragma: no cover - measure_text's format is pinned
         raise ValueError(f"measure_text reply has no words=: {reply!r}")
@@ -248,9 +250,29 @@ def within_limit(case: DraftCase, out: DraftOutput) -> Score:
 
 
 def measured(case: DraftCase, out: DraftOutput) -> Score:
-    del case
-    calls = out.tool_calls.count("measure_text")
-    return Score("measured", calls > 0, f"measure_text called {calls}x")
+    """The saved section was measured by `path` after its last write or edit.
+
+    Merely calling `measure_text` passed both runs whose length check failed:
+    one measured a re-typed copy, one edited twice after measuring. A count is
+    of the file only if it read the file, and only if nothing changed it since.
+    """
+
+    def _target(args: dict, key: str) -> bool:
+        value = args.get(key)
+        return isinstance(value, str) and "/" + value.lstrip("/") == case.section_path
+
+    last_change = last_measure = -1
+    for i, (name, args) in enumerate(out.calls):
+        if name in ("write_file", "edit_file") and _target(args, "file_path"):
+            last_change = i
+        elif name == "measure_text" and _target(args, "path"):
+            last_measure = i
+    total = out.tool_calls.count("measure_text")
+    if last_measure < 0:
+        return Score("measured", False, f"saved file never measured ({total} calls)")
+    if last_measure < last_change:
+        return Score("measured", False, "section changed after its last measurement")
+    return Score("measured", True, f"saved file measured last ({total} calls)")
 
 
 def uses_profile(case: DraftCase, out: DraftOutput) -> Score:

@@ -647,8 +647,9 @@ real one, so `SCOUT_PROMPT` requires a quoted citation per verdict and says plai
 `TBD`) stands in for one, since gap collection cannot find it; a figure that appears only in a
 delegation brief, attributed to no one at the organization, is asked about rather than stated or
 budgeted — the drafting side of invariant 16, measured by H3's `leaky-delegation` and its twin
-`confirmed-figure`; lengths come from `measure_text`, never from eyeballing; the compliance reviewer
-writes only to `/applications/*/review/` and cannot edit what it reviews; `final/` files are written
+`confirmed-figure`; lengths come from `measure_text` of the saved file (its `path`, after the
+last edit), never from eyeballing or from a re-typed copy; the compliance reviewer writes only
+to `/applications/*/review/` and cannot edit what it reviews; `final/` files are written
 once as a complete `write_file`, never built up by `edit_file` (each write there may be a separate
 human approval).
 

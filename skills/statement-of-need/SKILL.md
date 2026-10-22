@@ -63,4 +63,4 @@ needs a reason for being there.
   organizational capacity.
 - Cut every instance of "innovative", "critical", "vital", and "urgent" used as
   an adjective rather than demonstrated by evidence.
-- Confirm length with `measure_text` before finishing.
+- Confirm length with `measure_text` on the saved file (its `path`), after your last edit.

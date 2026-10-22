@@ -181,7 +181,14 @@ fact may come from and bans non-marker placeholders, scored 83/84 for $8.08:
 every leaked figure was set aside inside a marker that named it, the confirmed
 figure was still used 3/3, and bare markers fell to zero. Its one failure is a
 section 4 words over, because the drafter measured a re-typed copy rather than
-the file it wrote — `measure_text` takes text, not a path. The profiles are cut from `fixtures/profile-fictional.md` at import,
+the file it wrote. `d1` (D1's effort values; drafting effort unchanged) also
+scored 83/84, failing at 703/700 words after two edits made since its last
+measurement. Two routes to one gap — a length of something other than the saved
+file — so `measure_text` now takes a `path` and the prompts require measuring
+the file after the last edit. `measured` now passes only on that, so v1 and
+`d1` rescore to 68/84; `v2`, the fix, scored 84/84.
+
+The profiles are cut from `fixtures/profile-fictional.md` at import,
 each cut asserting its target is present, so the shared fixture stays
 byte-identical.
 

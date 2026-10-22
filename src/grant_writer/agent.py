@@ -39,8 +39,8 @@ from grant_writer.subagents import build_discovery_subagents, build_subagents
 from grant_writer.tools import (
     build_extract_pdf_tool,
     build_fetch_opportunity_tool,
+    build_measure_tool,
     build_search_tool,
-    measure_text,
     search_grants_gov,
 )
 
@@ -103,7 +103,10 @@ def build_agent(settings: Settings | None = None):
     """
     settings = settings or Settings()
 
-    tools = [build_extract_pdf_tool(settings.root), measure_text]
+    # One backend for the graph and for `measure_text`, which reads a section
+    # through it -- in the server profile a draft exists only in graph state.
+    backend = build_backend(settings)
+    tools = [build_extract_pdf_tool(settings.root), build_measure_tool(backend)]
     if (search := build_search_tool(enabled=settings.enable_search)) is not None:
         tools.append(search)
 
@@ -119,10 +122,10 @@ def build_agent(settings: Settings | None = None):
         model=build_model(DRAFTING_MODEL, effort=DRAFTING_EFFORT),
         tools=tools,
         system_prompt=ORCHESTRATOR_PROMPT,
-        subagents=build_subagents(settings),
+        subagents=build_subagents(settings, backend),
         skills=[SKILLS_DIR],
         memory=[MEMORY_FILE],
-        backend=build_backend(settings),
+        backend=backend,
         permissions=build_permissions(settings),
         middleware=[
             # Passed explicitly since deepagents 0.7, which stopped installing
