@@ -29,6 +29,7 @@ from deepagents.backends.protocol import BackendProtocol
 from grant_writer.backends import (
     build_backend,
     compliance_permissions,
+    drafting_subagent_permissions,
     scouting_permissions,
 )
 from grant_writer.config import (
@@ -110,6 +111,8 @@ def build_subagents(
     settings = settings or Settings()
     search = build_search_tool(enabled=settings.enable_search)
     measure = build_measure_tool(backend or build_backend(settings))
+    # Neither may write the organization profile; see the function's docstring.
+    confined = drafting_subagent_permissions(settings)
 
     researcher = _subagent(
         name="funder-researcher",
@@ -122,6 +125,7 @@ def build_subagents(
         model_spec=RESEARCH_MODEL,
         effort=RESEARCH_EFFORT,
         tools=[search] if search else [],
+        permissions=confined,
         # It writes prose into a file the drafter reads; the section guides are
         # for whoever turns that into a section, not for gathering it.
         skills=None,
@@ -139,6 +143,7 @@ def build_subagents(
         effort=DRAFTING_EFFORT,
         tools=[measure],
         skills=[SKILLS_DIR],
+        permissions=confined,
     )
 
     reviewer = _subagent(

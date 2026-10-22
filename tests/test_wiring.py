@@ -8,6 +8,7 @@ makes it work.
 
 from __future__ import annotations
 
+import functools
 import inspect
 import re
 from pathlib import Path
@@ -32,6 +33,7 @@ from grant_writer.backends import (
     build_permissions,
     compliance_permissions,
     discovery_permissions,
+    drafting_subagent_permissions,
     scouting_permissions,
 )
 from grant_writer.config import (
@@ -464,6 +466,11 @@ def test_the_rubric_iteration_cap_comes_from_settings():
         (discovery_permissions(), "discovery"),
         (scouting_permissions(), "scout"),
         (compliance_permissions(), "compliance"),
+        (drafting_subagent_permissions(Settings(approve_final=False)), "subagent"),
+        (
+            drafting_subagent_permissions(Settings(approve_final=True)),
+            "subagent --approve",
+        ),
     ],
 )
 def test_every_permission_set_ends_in_the_catch_all_deny(rules, label):
@@ -532,6 +539,34 @@ def test_a_subagent_cannot_be_built_without_deciding_about_skills():
             model_spec=DEFAULT_MODELS["drafting"],
             effort=DEFAULT_EFFORT["drafting"],
         )
+
+
+@pytest.mark.parametrize("approve", [False, True])
+def test_no_drafting_subagent_can_write_the_org_profile(approve):
+    """Pins invariant 20.
+
+    Asserted on the specs the graph is built from, not only the rule function:
+    a subagent with no `permissions` key inherits the orchestrator's rules,
+    `/memories/**` allow included, so dropping the key at the call site is the
+    regression -- and it would leave this function's own test green. The rule
+    set replaces the parent's, so the `final/` interrupt must be in it too.
+    """
+    settings = Settings(approve_final=approve)
+    subs = {s["name"]: s for s in build_subagents(settings)}
+    for name in ("funder-researcher", "section-drafter"):
+        rules = subs[name].get("permissions")
+        assert rules is not None, f"{name} inherits the orchestrator's rules"
+        check = functools.partial(_check_fs_permission, rules, "write")
+        assert check("/memories/org/AGENTS.md") == "deny", name
+        assert check("/opportunities/s/scored/a.md") == "deny", name
+        assert check("/applications/x/sections/need.md") == "allow", name
+        assert check("/applications/x/research/funder.md") == "allow", name
+        final = check("/applications/x/final/proposal.md")
+        assert final == ("interrupt" if approve else "allow"), name
+        assert _check_fs_permission(rules, "read", "/memories/org/AGENTS.md") == "allow"
+    # The orchestrator keeps the profile: it is who records a confirmed fact.
+    lead = build_permissions(settings)
+    assert _check_fs_permission(lead, "write", "/memories/org/AGENTS.md") == "allow"
 
 
 def test_reviewer_cannot_edit_what_it_reviews():

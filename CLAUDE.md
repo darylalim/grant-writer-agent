@@ -510,6 +510,22 @@ runs, and still produces plausible output.
     a failed comparison, so `== ""` puts a live key in the terminal and in the CI log of the very
     run that caught the regression. Observed while mutation-testing this entry, not theorised.
 
+20. **Only an orchestrator writes the organization profile.** `funder-researcher` and
+    `section-drafter` get `backends.drafting_subagent_permissions`, which allows
+    `/applications/**` and nothing else. Two facts make this one silent. A subagent's
+    `permissions` *replace* the parent's, so a subagent given none inherits the
+    orchestrator's `/memories/**` allow, and nothing about the roster shows it. And the
+    profile is the source the drafter's provenance rule trusts most — a figure found there
+    is stated as fact, where one found only in a brief is asked about — so a subagent's
+    write there turns a brief's or a web search's figure into the organization's own
+    record for every application after this one: the drafting side of invariant 16, made
+    permanent. H3 caught a drafter doing exactly that 3 times in 15, attributed and in good
+    faith, because `WORKSPACE_CONVENTIONS` told every agent to record durable facts. Only
+    an orchestrator, in the conversation with someone who can confirm a fact, records one;
+    a subagent reports it. Replacing rather than adding also means the `final/` interrupt
+    is restated in the subagent set — left out, `--approve` stops gating anything a
+    subagent writes.
+
 ## Backend profiles
 
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files

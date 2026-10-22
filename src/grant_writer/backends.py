@@ -164,6 +164,29 @@ def build_permissions(settings: Settings) -> list[FilesystemPermission]:
     )
 
 
+def drafting_subagent_permissions(settings: Settings) -> list[FilesystemPermission]:
+    """The drafting orchestrator's rules, minus `/memories/` and `/opportunities/`.
+
+    For `funder-researcher` and `section-drafter`, which would otherwise inherit
+    the orchestrator's set whole. The organization profile is the most trusted
+    source a drafter has -- a figure found there is stated as fact, where one
+    found only in a brief is asked about -- so a subagent writing to it turns
+    whatever its brief or its web search said into the organization's own
+    record, for every application after this one. H3 caught a drafter doing
+    exactly that, in good faith, 3 times in 15. Only the orchestrator, which is
+    in the conversation with a person who can confirm a fact, records one; a
+    subagent reports it instead.
+
+    A subagent's `permissions` replace the parent's rather than adding to them,
+    so the `final/` interrupt is carried over here explicitly -- leave it off and
+    `--approve` stops gating anything a subagent writes.
+    """
+    return _write_rules(
+        allow=["/applications/**"],
+        interrupt=["/applications/*/final/**"] if settings.approve_final else (),
+    )
+
+
 def discovery_permissions() -> list[FilesystemPermission]:
     """Write rules for the discovery graph. **Never returns an interrupt rule.**
 
