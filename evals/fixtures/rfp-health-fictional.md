@@ -9,8 +9,7 @@ real thing. No agency, program number, or deadline below is real.
 # Rural Communicable Disease Prevention and Surveillance Program
 
 **Notice of Funding Opportunity, Fiscal Year 2027**
-**Funding opportunity number:** RCDPS-27-001 (fictional)
-**Assistance listing:** fictional
+**Funding opportunity number:** RCDPS-27-001
 **Instrument:** Cooperative agreement
 
 ## 1. Program purpose

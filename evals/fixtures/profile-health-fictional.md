@@ -8,10 +8,10 @@ organization. This directory is tracked, so it must never hold real data.
 
 ## Identity
 
-- **Legal name:** Three Rivers Rural Health District (fictional)
+- **Legal name:** Three Rivers Rural Health District
 - **Entity type:** Multi-county local health department
 - **UEI (SAM.gov):** UNKNOWN
-- **Headquarters:** Calder, a fictional county seat
+- **Headquarters:** Calder
 - **Service area:** Four counties, 92% rural, total population about 61,000
 
 ## Mission

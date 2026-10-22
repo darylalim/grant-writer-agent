@@ -3127,7 +3127,10 @@ def test_the_health_fixtures_reach_the_agent_without_saying_they_are_fictional()
     """A real document never calls itself invented; that framing could move a
     classifier, so it is stripped -- and the substance is still there."""
     for text in (refusal_cases.HEALTH_RFP, refusal_cases.HEALTH_PROFILE):
-        assert "FICTIONAL" not in text and "<!--" not in text
+        # Any case: the first pilot found "(fictional)" left in the body text
+        # after a check for the comment's capitals had passed.
+        assert not re.search(r"fictional|invented", text, re.IGNORECASE)
+        assert "<!--" not in text
     assert "influenza A(H5)" in refusal_cases.HEALTH_RFP
     assert "Dr. Ama Mensah" in refusal_cases.HEALTH_PROFILE
 
