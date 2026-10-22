@@ -24,6 +24,7 @@ comment wrong.
 
 from __future__ import annotations
 
+import colorsys
 import tomllib
 from pathlib import Path
 
@@ -152,14 +153,101 @@ def test_dark_primary_serves_both_of_its_jobs() -> None:
     Streamlit hardcodes primary-button labels to white and draws a lit segmented
     control in `primaryColor` over a 10% wash of itself, so the token is pinned
     from both sides at once. No value clears AA on both (the curves cross near
-    4.4:1 on a zinc-950 page), so this asserts the split actually chosen: AA on
-    the button label, above the 3:1 large-text floor on the segment.
+    4.4:1 on any near-black page, whatever the hue), so this asserts the split
+    actually chosen: AA on the button label, above the 3:1 large-text floor on
+    the segment -- on the sidebar too, whose lighter surface eats into the
+    segment's margin.
     """
-    primary = _theme()["dark"]["primaryColor"]
-    label = _contrast("#FFFFFF", primary)
-    segment = _contrast(primary, _composite(primary, DARK_PAGE, 0.10))
-    assert label >= 4.5, f"white button label on {primary} is {label:.2f}:1"
-    assert segment >= 3.0, f"lit segment label on its wash is {segment:.2f}:1"
+    theme = _theme()
+    for section in (theme["dark"], theme["dark"]["sidebar"]):
+        primary = section["primaryColor"]
+        surface = section["backgroundColor"]
+        label = _contrast("#FFFFFF", primary)
+        segment = _contrast(primary, _composite(primary, surface, 0.10))
+        assert label >= 4.5, f"white button label on {primary} is {label:.2f}:1"
+        assert segment >= 3.0, (
+            f"lit segment on its wash over {surface} is {segment:.2f}:1"
+        )
+
+
+def _hue(hex_colour: str) -> float:
+    rgb = [int(hex_colour.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    return colorsys.rgb_to_hls(*rgb)[0] * 360
+
+
+def test_light_and_dark_share_one_accent() -> None:
+    """The modes are one design mirrored, not two unrelated palettes.
+
+    Dark lifts the accent's lightness so it stays vivid on a dark page, and has
+    to search for it (see the test above), but the hue is the identity: the
+    primary action is "the indigo one" in either mode. A dark primary drifted to
+    another hue still passes every contrast check here, which is why this is
+    pinned separately. Each sidebar uses its own mode's accent unchanged.
+    """
+    theme = _theme()
+    light, dark = theme["light"], theme["dark"]
+    assert light["sidebar"]["primaryColor"] == light["primaryColor"]
+    assert dark["sidebar"]["primaryColor"] == dark["primaryColor"]
+    drift = abs(_hue(light["primaryColor"]) - _hue(dark["primaryColor"]))
+    assert drift <= 10, (
+        f"light {light['primaryColor']} and dark {dark['primaryColor']} differ "
+        f"by {drift:.1f} degrees of hue"
+    )
+
+
+def test_input_borders_clear_three_to_one_on_every_surface() -> None:
+    """Pins decision 7 of the Track F plan: input outlines pass WCAG 1.4.11.
+
+    An input is identified by its outline, and Streamlit draws that outline and
+    every decorative `st.container(border=True)` from the one `borderColor`, so
+    the heavier boxes are the price of findable fields -- chosen deliberately
+    (see the borders note in the config). A tidy-up that lightens the boxes back
+    to the template's 1.27:1 looks like an improvement and fails here instead.
+    Each section's border is measured against both fills an input can sit on
+    in that section, the page and the secondary surface.
+    """
+    theme = _theme()
+    for mode in ("light", "dark"):
+        for where, section in (("", theme[mode]), (".sidebar", theme[mode]["sidebar"])):
+            border = section["borderColor"]
+            for token in ("backgroundColor", "secondaryBackgroundColor"):
+                ratio = _contrast(border, section[token])
+                assert ratio >= 3.0, (
+                    f"[theme.{mode}{where}] borderColor {border} is {ratio:.2f}:1 "
+                    f"on {token} {section[token]}"
+                )
+
+
+def test_focus_ring_clears_three_to_one_on_every_surface() -> None:
+    """A keyboard user finds the focused control by `primaryColor`'s ring.
+
+    That the ring follows `primaryColor` is checked by tabbing through the
+    running app, not here; what this pins is that wherever it is drawn, it reads.
+    """
+    theme = _theme()
+    for mode in ("light", "dark"):
+        for where, section in (("", theme[mode]), (".sidebar", theme[mode]["sidebar"])):
+            ring = section["primaryColor"]
+            for token in ("backgroundColor", "secondaryBackgroundColor"):
+                ratio = _contrast(ring, section[token])
+                assert ratio >= 3.0, (
+                    f"[theme.{mode}{where}] focus ring {ring} is {ratio:.2f}:1 "
+                    f"on {token} {section[token]}"
+                )
+
+
+def test_heading_font_is_set_where_streamlit_reads_it() -> None:
+    """Serif headings are the third of Track F's three changes.
+
+    Kept in [theme] like `font` and `codeFont`, since typography does not depend
+    on the mode. If the screenshots show the serif reads as fussy at 14px, the
+    plan's fallback is to drop it -- delete this test in the same commit, which
+    is the point: it makes that a decision rather than a quiet regression.
+    """
+    theme = _theme()
+    assert "Source Serif 4" in theme["headingFont"]
+    for section in ("light", "dark"):
+        assert "headingFont" not in theme[section]
 
 
 def test_dark_mirrors_the_light_half_s_surface_boundaries() -> None:
@@ -168,13 +256,13 @@ def test_dark_mirrors_the_light_half_s_surface_boundaries() -> None:
     A border equal to the fill it encloses is an invisible boundary, and the
     layout is built almost entirely from `st.container(border=True)`. Stated as a
     *mirror* of the light half rather than as blanket distinctness, because the
-    vendored template itself sets the light sidebar's `codeBackgroundColor` and
-    `borderColor` to the same zinc-200 -- so demanding all pairs differ would fail
-    on a collision inherited from upstream and say nothing about this diff. What
-    is this diff's business is not *introducing* one: an earlier dark half used
-    zinc-800 for `borderColor`, colliding with `codeBackgroundColor` in
-    [theme.dark] and `secondaryBackgroundColor` in [theme.dark.sidebar], both of
-    which are distinct in light.
+    light half is where the design decides which boundaries exist; dark's job is
+    not to lose one. That framing dates from the zinc template, whose light
+    sidebar set `codeBackgroundColor` and `borderColor` to the same zinc-200 (the
+    stone redesign separates them), and it caught a real regression: an earlier
+    dark half used zinc-800 for `borderColor`, colliding with
+    `codeBackgroundColor` in [theme.dark] and `secondaryBackgroundColor` in
+    [theme.dark.sidebar], both of which are distinct in light.
     """
     theme = _theme()
     tokens = (
@@ -199,13 +287,13 @@ def test_dark_mirrors_the_light_half_s_surface_boundaries() -> None:
 
 
 def test_chart_ramp_clears_three_to_one_on_both_pages() -> None:
-    """The reason the ramp deviates from the template at all.
+    """The reason the ramp left the zinc template's.
 
     `chartCategoricalColors` is set once, in [theme], so one ramp serves both modes
     and every entry has to clear the non-text-graphics floor on each page. (Since
     Streamlit 1.62 it could be set per mode; the config's comment says why it
-    isn't.) The
-    template's zinc-forward ramp does not, which is what this deviation buys.
+    isn't.) The template's zinc-forward ramp did not. On the stone-950 page the
+    worst entry clears by only 0.05, so a darker dark page fails here first.
     """
     ramp = _theme()["chartCategoricalColors"]
     assert len(ramp) == 7
