@@ -60,7 +60,8 @@ from grant_writer.tools import (
     _resolve_output_path,
     build_extract_pdf_tool,
     build_fetch_opportunity_tool,
-    measure_text,
+    build_measure_tool,
+    measure,
 )
 
 
@@ -560,10 +561,111 @@ def test_execute_tool_is_not_a_permission_bypass():
     assert supports_execution(backend) is False
 
 
-def test_measure_text_counts_accurately():
-    out = measure_text.invoke({"text": "one two three four five"})
+def test_measure_counts_accurately():
+    out = measure("one two three four five")
     assert "words=5" in out
     assert "est_pages_single_spaced" in out
+
+
+def _measure_tool(root: Path):
+    from deepagents.backends import FilesystemBackend
+
+    return build_measure_tool(FilesystemBackend(root_dir=root, virtual_mode=True))
+
+
+def test_measure_text_measures_the_saved_file(tmp_path):
+    """A `path` is read back from the backend, so the count is the file's.
+
+    The drafting eval caught a drafter reporting the length of what it *passed*
+    -- a re-typed copy once, a pre-edit version once -- while the file it saved
+    was over the limit. Text measurement stays for a draft not yet saved.
+    """
+    section = tmp_path / "applications" / "x" / "sections" / "a.md"
+    section.parent.mkdir(parents=True)
+    section.write_text("one two\nthree four five\n")
+    tool = _measure_tool(tmp_path)
+
+    out = tool.invoke({"path": "/applications/x/sections/a.md"})
+    assert out == "/applications/x/sections/a.md: " + measure(section.read_text())
+    assert "words=5" in out
+    assert tool.invoke({"text": "one two"}) == measure("one two")
+
+
+@pytest.mark.parametrize(
+    ("args", "says"),
+    [
+        ({}, "exactly one"),
+        ({"text": "a", "path": "/applications/x/a.md"}, "exactly one"),
+        ({"path": "/applications/../src/x.py"}, "traversal"),
+        ({"path": "/applications/x/missing.md"}, "cannot read"),
+        ({"path": "/applications"}, "cannot read"),
+    ],
+)
+def test_measure_text_refuses_rather_than_raises(tmp_path, args, says):
+    """A tool that raises reaches the model as a framework error it cannot act on."""
+    (tmp_path / "applications").mkdir()
+    out = _measure_tool(tmp_path).invoke(args)
+    assert out.startswith("Error:")
+    assert says in out
+
+
+def test_measure_text_reads_a_draft_that_exists_only_in_graph_state(monkeypatch):
+    """In the server profile a draft lives in graph state, not on disk.
+
+    So the tool must read through the graph's own backend -- the reason it is
+    built per graph -- and that backend has to be the one `write_file` wrote
+    through. Driven through a real graph: the orchestrator writes a section,
+    then measures it by path, and the count must be of what was written.
+    """
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from grant_writer import agent as agent_module
+
+    path = "/applications/x/sections/a.md"
+    body = "one two three"
+    script = iter(
+        [
+            AIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "name": "write_file",
+                        "args": {"file_path": path, "content": body},
+                        "id": "w",
+                    }
+                ],
+            ),
+            AIMessage(
+                "",
+                tool_calls=[
+                    {"name": "measure_text", "args": {"path": path}, "id": "m"}
+                ],
+            ),
+            AIMessage("done"),
+        ]
+    )
+
+    class _Scripted(GenericFakeChatModel):
+        def bind_tools(self, tools, **_kwargs):
+            del tools
+            return self
+
+    monkeypatch.setattr(
+        agent_module, "build_model", lambda *_a, **_k: _Scripted(messages=script)
+    )
+    graph = build_agent(Settings(backend_profile="server", enable_search=False))
+    out = graph.invoke(
+        {"messages": [{"role": "user", "content": "go"}]},
+        config={"configurable": {"thread_id": "t"}},
+    )
+
+    measured = [
+        m.content
+        for m in out["messages"]
+        if isinstance(m, ToolMessage) and m.name == "measure_text"
+    ]
+    assert measured == [f"{path}: " + measure(body)]
 
 
 def test_extract_pdf_text_reports_missing_file(tmp_path):

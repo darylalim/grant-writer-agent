@@ -244,7 +244,8 @@ just a bad draft. So:
 
 - Prompts forbid inventing facts. Unknowns become `[NEEDS INPUT: <question>]`
   and are collected in `review/gaps.md`.
-- Lengths come from the `measure_text` tool, never from the model's own estimate.
+- Lengths come from the `measure_text` tool, run on the saved file after its last edit, never
+  from the model's own estimate.
 - The compliance reviewer cannot edit what it reviews.
 - The scout must cite every verdict; an honest `NONE` beats a hopeful `STRONG`.
 

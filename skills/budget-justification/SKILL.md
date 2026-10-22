@@ -72,4 +72,4 @@ organization has not agreed to.
 - Never invent salary figures, fringe rates, or indirect rates. Unknown
   values become `[NEEDS INPUT: <question>]`.
 - State the total and confirm it falls within the award ceiling and floor.
-- Confirm length with `measure_text` before finishing.
+- Confirm length with `measure_text` on the saved file (its `path`), after your last edit.

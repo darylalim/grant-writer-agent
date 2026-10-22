@@ -64,4 +64,4 @@ budget.
 - Never claim a validated instrument without naming it.
 - Targets must match the numbers used in the project design and budget exactly.
 - Missing baselines are `[NEEDS INPUT: <question>]`, never estimated.
-- Confirm length with `measure_text` before finishing.
+- Confirm length with `measure_text` on the saved file (its `path`), after your last edit.

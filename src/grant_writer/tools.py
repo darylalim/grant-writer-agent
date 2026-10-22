@@ -21,9 +21,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
+from deepagents.backends.utils import validate_path
 from langchain.tools import tool
 
 if TYPE_CHECKING:
+    from deepagents.backends.protocol import BackendProtocol
     from langchain_core.tools import BaseTool
 
 # Rough conversions used for page-limit estimates. Funders specify limits in
@@ -212,17 +214,11 @@ def _extract_pdf_text(
     return out
 
 
-@tool
-def measure_text(text: str) -> str:
-    """Count words and characters and estimate page length.
+def measure(text: str) -> str:
+    """Count words and characters and estimate pages: the one counting rule.
 
-    Use this before declaring any section complete. Language models cannot
-    count reliably by inspection, and an over-length narrative is one of the
-    most common causes of a proposal being rejected without review.
-
-    Args:
-        text: The exact section text to measure. Pass the real content, not a
-            summary of it.
+    Plain rather than a tool so the drafting eval grades a section's length
+    with exactly the code the drafter measured it with.
     """
     words = len(re.findall(r"\S+", text))
     chars = len(text)
@@ -234,6 +230,53 @@ def measure_text(text: str) -> str:
         f"(page estimates assume ~{WORDS_PER_PAGE_SINGLE}/~{WORDS_PER_PAGE_DOUBLE} "
         f"words per page; confirm against the funder's formatting rules)"
     )
+
+
+def build_measure_tool(backend: BackendProtocol) -> BaseTool:
+    """Return `measure_text`, reading `path` through the graph's own backend.
+
+    It took text only, so the length a drafter reported was of whatever it
+    passed -- twice in the drafting eval that was not the file it saved: once a
+    re-typed copy (898 measured, 904 saved), once a version edited twice more
+    after measuring (698, then 703 against a 700 limit). Reading the saved file
+    closes both. Through the backend rather than the disk so the `server`
+    profile, whose drafts live in graph state, measures them too; every rule
+    set here restricts writes only, so this reads nothing `read_file` cannot.
+    """
+
+    @tool
+    def measure_text(text: str = "", path: str = "") -> str:
+        """Count words and characters and estimate page length.
+
+        Use this before declaring any section complete. Language models cannot
+        count reliably by inspection, and an over-length narrative is one of the
+        most common causes of a proposal being rejected without review.
+
+        Args:
+            path: A saved file to measure, e.g.
+                "/applications/nsf-26/sections/02-need.md". Prefer this: the
+                length that counts is the file's, so measure it after your LAST
+                write or edit to it. Any edit after measuring means measuring again.
+            text: Text not yet saved anywhere, measured exactly as passed. Give
+                `path` or `text`, not both.
+        """
+        if bool(text) == bool(path):
+            return "Error: give exactly one of `path` or `text`."
+        if not path:
+            return measure(text)
+        try:
+            path = validate_path(path)
+        except ValueError as e:
+            return f"Error: {e}"
+        (got,) = backend.download_files([path])
+        if got.error or got.content is None:
+            return f"Error: cannot read {path}: {got.error or 'no content'}"
+        try:
+            return f"{path}: " + measure(got.content.decode("utf-8"))
+        except UnicodeDecodeError:
+            return f"Error: {path} is not a text file."
+
+    return measure_text
 
 
 _GRANTS_GOV_BASE = "https://api.grants.gov/v1/api"

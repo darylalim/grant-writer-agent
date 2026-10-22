@@ -70,4 +70,4 @@ transferring capacity. "We will seek additional funding" is not a plan.
 - Never invent staff, partners, awards, audit results, or outcome figures.
 - Percent effort must reconcile with the budget justification exactly.
 - Unverified partner commitments are `[NEEDS INPUT: <question>]`.
-- Confirm length with `measure_text` before finishing.
+- Confirm length with `measure_text` on the saved file (its `path`), after your last edit.

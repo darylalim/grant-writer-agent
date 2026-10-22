@@ -24,8 +24,13 @@ from __future__ import annotations
 from typing import Any
 
 from deepagents import FilesystemPermission, SubAgent
+from deepagents.backends.protocol import BackendProtocol
 
-from grant_writer.backends import compliance_permissions, scouting_permissions
+from grant_writer.backends import (
+    build_backend,
+    compliance_permissions,
+    scouting_permissions,
+)
 from grant_writer.config import (
     COMPLIANCE_EFFORT,
     COMPLIANCE_MODEL,
@@ -45,7 +50,7 @@ from grant_writer.prompts import (
     RESEARCHER_PROMPT,
     SCOUT_PROMPT,
 )
-from grant_writer.tools import build_search_tool, measure_text
+from grant_writer.tools import build_measure_tool, build_search_tool
 
 
 def _subagent(
@@ -94,10 +99,17 @@ def _subagent(
     return subagent
 
 
-def build_subagents(settings: Settings | None = None) -> list[SubAgent]:
-    """Assemble the subagent roster for the current environment."""
+def build_subagents(
+    settings: Settings | None = None, backend: BackendProtocol | None = None
+) -> list[SubAgent]:
+    """Assemble the subagent roster for the current environment.
+
+    `backend` is the graph's, which `measure_text` reads a section through;
+    `build_agent` passes its own so the drafter measures the file it wrote.
+    """
     settings = settings or Settings()
     search = build_search_tool(enabled=settings.enable_search)
+    measure = build_measure_tool(backend or build_backend(settings))
 
     researcher = _subagent(
         name="funder-researcher",
@@ -125,7 +137,7 @@ def build_subagents(settings: Settings | None = None) -> list[SubAgent]:
         system_prompt=DRAFTER_PROMPT,
         model_spec=DRAFTING_MODEL,
         effort=DRAFTING_EFFORT,
-        tools=[measure_text],
+        tools=[measure],
         skills=[SKILLS_DIR],
     )
 
@@ -139,7 +151,7 @@ def build_subagents(settings: Settings | None = None) -> list[SubAgent]:
         system_prompt=COMPLIANCE_PROMPT,
         model_spec=COMPLIANCE_MODEL,
         effort=COMPLIANCE_EFFORT,
-        tools=[measure_text],
+        tools=[measure],
         # It audits sections against the guides that produced them, so it needs
         # the same guides in hand to say what a section was supposed to contain.
         skills=[SKILLS_DIR],

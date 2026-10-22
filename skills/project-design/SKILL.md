@@ -78,4 +78,4 @@ weakness.
 - Do not claim an evidence base for a model you cannot cite.
 - Unknown capacity, cost, or partner commitment becomes
   `[NEEDS INPUT: <question>]`, never a plausible guess.
-- Confirm length with `measure_text` before finishing.
+- Confirm length with `measure_text` on the saved file (its `path`), after your last edit.
