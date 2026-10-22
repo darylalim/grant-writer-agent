@@ -185,7 +185,8 @@ the file it wrote. `d1` (D1's effort values; drafting effort unchanged) also
 scored 83/84, failing at 703/700 words after two edits made since its last
 measurement. Two routes to one gap — a length of something other than the saved
 file — so `measure_text` now takes a `path` and the prompts require measuring
-the file after the last edit.
+the file after the last edit. `measured` now passes only on that, so v1 and
+`d1` rescore to 68/84; `v2`, the fix, scored 84/84.
 
 The profiles are cut from `fixtures/profile-fictional.md` at import,
 each cut asserting its target is present, so the shared fixture stays
