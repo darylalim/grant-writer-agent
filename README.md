@@ -78,8 +78,21 @@ Set these in `.env` (see `.env.example`):
 | `TAVILY_API_KEY` | Unless `--no-search` | Web search for funder research and non-federal opportunities |
 | `LANGSMITH_API_KEY` | Recommended | Tracing; a multi-agent run is hard to debug from stdout alone |
 | `GRANT_WRITER_*_MODEL` | No | Override the model for a role (`DRAFTING`, `RESEARCH`, `COMPLIANCE`, `GRADER`, `DISCOVERY`) |
-| `GRANT_WRITER_*_EFFORT` | No | Override the reasoning effort for a role, same role names (`low` to `max`; every role ships at `high`) |
+| `GRANT_WRITER_*_EFFORT` | No | Override the reasoning effort for a role, same role names (`low`, `medium`, `high`, `xhigh`, `max`) |
 | `GRANT_WRITER_ROOT` | No | Project root, when the console script is installed outside the repo |
+
+What those overrides replace:
+
+| Role | Does | Default model | Default effort |
+|---|---|---|---|
+| `DRAFTING` | Orchestrates a draft; writes sections | Claude Opus 5.5 | `high` |
+| `RESEARCH` | Researches the funder | Claude Sonnet 5.5 | `medium` |
+| `COMPLIANCE` | Reviews drafts against the RFP | Claude Sonnet 5.5 | `high` |
+| `GRADER` | Scores a draft against `--rubric` | Claude Opus 5.5 | `high` |
+| `DISCOVERY` | Orchestrates a scan; scores candidates | Claude Sonnet 5.5 | `medium` |
+
+The roles that write or judge what gets submitted think hardest. Research and discovery
+gather and sort material that a person reads before anything is submitted.
 
 ## Finding opportunities
 

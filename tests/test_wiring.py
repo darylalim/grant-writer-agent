@@ -740,6 +740,32 @@ def test_every_model_role_has_an_effort_and_no_other():
     assert DEFAULT_EFFORT.keys() == DEFAULT_MODELS.keys()
 
 
+@pytest.mark.parametrize("judge", ["grader", "compliance"])
+def test_no_judge_ships_cheaper_than_the_drafter_it_judges(judge):
+    """The grader and the compliance reviewer think at least as hard as drafting.
+
+    Lowering effort is the obvious lever when a run costs too much, and the
+    judges are the roles a cost-cutting pass reaches for first, because their
+    output is not what gets submitted. That is backwards: a judge shallower than
+    the work it judges passes what it should catch, and the only symptom is a
+    review that reads as satisfied.
+
+    The order is written out here because a `Literal` promises membership, not
+    a ranking -- but its *members* are checked against the installed
+    langchain-anthropic, so a level added upstream fails this rather than
+    falling outside a scale nobody updated.
+    """
+    from typing import get_args
+
+    from langchain_anthropic import ChatAnthropic
+
+    scale = ("low", "medium", "high", "xhigh", "max")
+    annotation = ChatAnthropic.model_fields["reasoning_effort"].annotation
+    (accepted,) = (arg for arg in get_args(annotation) if arg is not type(None))
+    assert set(get_args(accepted)) == set(scale)
+    assert scale.index(DEFAULT_EFFORT[judge]) >= scale.index(DEFAULT_EFFORT["drafting"])
+
+
 @pytest.mark.parametrize(("role", "spec"), sorted(DEFAULT_MODELS.items()))
 def test_default_model_sends_its_roles_effort(role, spec):
     """Every shipped model must carry its own role's effort in the request.
@@ -780,7 +806,7 @@ def test_an_explicit_effort_reaches_the_request_and_omitting_one_is_refused():
 def test_each_role_is_built_at_its_own_effort(monkeypatch):
     """Both graphs hand every model its *own* role's effort, not a neighbour's.
 
-    Every role ships at the same effort, so passing `RESEARCH_EFFORT` to the
+    Three roles ship at the same effort, so passing `COMPLIANCE_EFFORT` to the
     drafter would send the very same request today and be invisible to the
     payload case above -- until one role's value moves, when the wrong role
     moves with it and nothing raises. So each role's model and effort are
