@@ -1,6 +1,6 @@
 [project]
 name = "grant-writer"
-version = "0.3.0"
+version = "0.4.0"
 description = "AI grant-writing agent on LangChain Deep Agents: finds funding opportunities, fit-scores them with quoted evidence, and drafts proposals with human approval of final files. Marks unknowns for input instead of inventing data."
 readme = "README.md"
 license = "MIT"
