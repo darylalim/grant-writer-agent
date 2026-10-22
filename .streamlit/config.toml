@@ -95,6 +95,17 @@
 # `dataframeBorderColor` keeps the lighter stone steps: a grid line marks no
 # control, so it carries no 3:1 obligation.
 #
+# ## Focus: inputs pass, buttons are a documented exception
+#
+# A focused input redraws its border in solid `primaryColor`, which clears 3:1
+# on every surface. A focused *button* is drawn differently by Streamlit: a ring
+# of `primaryColor` at a fixed 50% alpha, which lands halfway to the page --
+# 2.50:1 light, 1.82:1 dark. No value here fixes that: a dark primary light
+# enough for a 3:1 ring fails the white button label (see `primaryColor` under
+# [theme.dark]), and CSS is ruled out. Accepted in Track F because the focused
+# button also darkens its fill, a second cue. `tests/test_theme_config.py` pins
+# the measured ratios, so a palette change that moves them gets re-decided.
+#
 # ## The chart ramp, the one value not changed by the redesign
 #
 # The template ramp opened on a zinc scale tuned for a white page: #18181B scored

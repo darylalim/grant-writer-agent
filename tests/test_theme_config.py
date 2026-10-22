@@ -218,11 +218,12 @@ def test_input_borders_clear_three_to_one_on_every_surface() -> None:
                 )
 
 
-def test_focus_ring_clears_three_to_one_on_every_surface() -> None:
-    """A keyboard user finds the focused control by `primaryColor`'s ring.
+def test_focused_input_border_clears_three_to_one_on_every_surface() -> None:
+    """A focused input redraws its border in solid `primaryColor`.
 
-    That the ring follows `primaryColor` is checked by tabbing through the
-    running app, not here; what this pins is that wherever it is drawn, it reads.
+    Observed by tabbing through the running app (Streamlit 1.66): the Reason
+    input's border computed to `primaryColor` exactly. Buttons draw their ring
+    differently -- see the next test, which is the exception to this one.
     """
     theme = _theme()
     for mode in ("light", "dark"):
@@ -234,6 +235,43 @@ def test_focus_ring_clears_three_to_one_on_every_surface() -> None:
                     f"[theme.{mode}{where}] focus ring {ring} is {ratio:.2f}:1 "
                     f"on {token} {section[token]}"
                 )
+
+
+# Measured 2026-10-22, recorded here so a change to either is a decision.
+BUTTON_RING_RATIOS = {
+    ("light", "backgroundColor"): 2.50,
+    ("light", "sidebar.backgroundColor"): 2.48,
+    ("dark", "backgroundColor"): 1.82,
+    ("dark", "sidebar.backgroundColor"): 1.81,
+}
+
+
+def test_button_focus_ring_is_a_documented_exception() -> None:
+    """A focused button's ring is under 3:1, and no theme value can fix it.
+
+    Streamlit draws it as a box-shadow of `primaryColor` at a fixed 50% alpha
+    (observed: `rgba(96, 94, 239, 0.5) 0 0 0 2.8px` on the dark page), so the
+    ring sits halfway between the accent and the page. Raising it to 3:1 on the
+    dark page needs a primary too light for the white label Streamlit hardcodes
+    on the button -- the same squeeze as the label/segment split above -- and
+    CSS is ruled out for this app. Accepted as an exception in Track F: the
+    focused button also darkens its fill (to #2F2791 in light), a second cue the
+    ring does not depend on.
+
+    Pinned at the measured ratios, not at a floor, so a palette change that moves
+    them is noticed and re-decided rather than drifting. If Streamlit makes the
+    ring solid, the previous test's 3:1 applies to buttons too: delete this one.
+    """
+    theme = _theme()
+    for (mode, where), expected in BUTTON_RING_RATIOS.items():
+        section = theme[mode]["sidebar"] if where.startswith("sidebar") else theme[mode]
+        surface = section["backgroundColor"]
+        ring = _composite(section["primaryColor"], surface, 0.5)
+        ratio = _contrast(ring, surface)
+        assert round(ratio, 2) == expected, (
+            f"[theme.{mode}] button focus ring on {where} is now {ratio:.2f}:1, "
+            f"recorded as {expected}. Re-decide the exception, then update it."
+        )
 
 
 def test_heading_font_is_set_where_streamlit_reads_it() -> None:
