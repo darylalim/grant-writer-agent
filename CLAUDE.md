@@ -302,9 +302,10 @@ runs, and still produces plausible output.
    to `medium` where Opus 5 defaulted to `high`. The upgrade alone would have made drafting
    think less, with nothing raised. The rule is unchanged by effort now being per role:
    **set explicitly, never inherited.** `DEFAULT_EFFORT` is keyed like `DEFAULT_MODELS` and
-   overridable the same way (`GRANT_WRITER_*_EFFORT`): research and discovery ship at
-   `medium`, drafting, grader and compliance at `high`, because a judge cheaper than the work
-   it judges passes what it should catch. `build_model(spec, *, effort)` takes it as a
+   overridable the same way (`GRANT_WRITER_*_EFFORT`): discovery ships at `medium`, every
+   other role at `high` — research because it is under 1% of a run and thinned out at
+   `medium`, the grader and compliance because a judge cheaper than the work it judges
+   passes what it should catch. `build_model(spec, *, effort)` takes it as a
    **required** argument with no default, since a default is how a new call site would
    inherit another role's depth without anyone choosing it. The tests assert each role's own
    value on the outgoing request payload rather than the constructor, since an
