@@ -1512,3 +1512,87 @@ def test_no_system_block_is_whitespace_only(graph, monkeypatch):
     # ...and the tool itself is still there.
     tools = build(Settings(enable_search=False)).nodes["tools"].bound.tools_by_name
     assert "write_todos" in tools
+
+
+_REFUSAL_DETAILS = {
+    "type": "refusal",
+    "category": "bio",
+    "explanation": "This request may relate to dangerous pathogens.",
+}
+
+
+def _refusal_message():
+    """An HTTP-200 refusal as the API returns it: no content, no exception."""
+    from anthropic.types import Message
+
+    return Message.model_validate(
+        {
+            "id": "msg_refused",
+            "type": "message",
+            "role": "assistant",
+            "model": DEFAULT_MODELS["drafting"].split(":", 1)[-1],
+            "content": [],
+            "stop_reason": "refusal",
+            "stop_sequence": None,
+            "stop_details": _REFUSAL_DETAILS,
+            "usage": {"input_tokens": 10, "output_tokens": 0},
+        }
+    )
+
+
+def _refusal_events():
+    """The same refusal as a stream: a start event, then the delta that ends it."""
+    from anthropic.types import RawMessageDeltaEvent, RawMessageStartEvent
+
+    started = _refusal_message().model_dump()
+    started.update(stop_reason=None, stop_details=None)
+    return [
+        RawMessageStartEvent.model_validate(
+            {"type": "message_start", "message": started}
+        ),
+        RawMessageDeltaEvent.model_validate(
+            {
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": "refusal",
+                    "stop_sequence": None,
+                    "stop_details": _REFUSAL_DETAILS,
+                },
+                "usage": {"output_tokens": 0},
+            }
+        ),
+    ]
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["invoke", "stream"])
+def test_a_refusal_lands_in_response_metadata(monkeypatch, streamed):
+    """Where a declined turn's reason ends up on the `AIMessage` (D2.1).
+
+    The API declines with HTTP 200, `stop_reason: "refusal"` and empty
+    content, and nothing in langchain-anthropic raises or even names it. The
+    two fields survive by different routes: a plain call copies the whole
+    response, minus its content, into `llm_output`, which langchain-core merges
+    into `response_metadata`; a streamed call puts them there from the final
+    `message_delta`. The graph calls the model unstreamed today, but either
+    route reaching a different key would blank a declined turn's explanation
+    with nothing raised, so both are pinned.
+    """
+    from langchain_anthropic import ChatAnthropic
+
+    def _respond(self, payload):
+        # `_create` returns the SDK's raw-response wrapper; the body is `.parse()`.
+        del self
+        body = iter(_refusal_events()) if payload.get("stream") else _refusal_message()
+        return SimpleNamespace(parse=lambda: body, headers={})
+
+    monkeypatch.setattr(ChatAnthropic, "_create", _respond)
+    model = build_model(DEFAULT_MODELS["drafting"], effort=DEFAULT_EFFORT["drafting"])
+    if streamed:
+        chunks = list(model.stream("hi"))
+        message = functools.reduce(lambda a, b: a + b, chunks)
+    else:
+        message = model.invoke("hi")
+
+    assert message.response_metadata["stop_reason"] == "refusal"
+    assert message.response_metadata["stop_details"] == _REFUSAL_DETAILS
+    assert not message.text
