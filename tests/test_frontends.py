@@ -18,11 +18,14 @@ from types import SimpleNamespace
 import pytest
 
 from grant_writer.activity import (
+    DECLINED,
     DELEGATE,
     MESSAGE,
     PLAN,
     TOOL,
+    Event,
     approval_decisions,
+    declined_text,
     is_parked,
     iter_activity,
     pending_action_requests,
@@ -120,6 +123,90 @@ def test_interrupt_chunks_yield_no_events():
     assert list(iter_activity({"__interrupt__": ()})) == []
 
 
+def _refused_reply(content="", *, category="bio", explanation="Pathogen work."):
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content,
+        response_metadata={
+            "stop_reason": "refusal",
+            "stop_details": {"category": category, "explanation": explanation},
+        },
+    )
+
+
+def test_a_declined_orchestrator_turn_is_one_declined_event_not_an_empty_one():
+    """Read from the sentence `RefusalMiddleware` wrote, which names the agent.
+
+    A refusal is HTTP 200 with empty content, so before D2 this chunk drew
+    nothing at all. And it is DECLINED only, never also MESSAGE: the sentence
+    is for the model and the parser, and the frontends draw it their own way.
+    """
+    sentence = declined_text("grant-writer", "bio", "Pathogen work.")
+    (event,) = iter_activity({"model": {"messages": [_refused_reply(sentence)]}})
+    assert event == Event(
+        DECLINED, label="grant-writer", detail="Pathogen work.", category="bio"
+    )
+
+
+def test_a_declined_turn_without_the_sentence_still_says_declined():
+    """A graph built without the middleware degrades to an anonymous event."""
+    (event,) = iter_activity(
+        {"model": {"messages": [_refused_reply(category="**bold**")]}}
+    )
+    assert event.kind == DECLINED
+    assert event.label == ""
+    assert event.category == "unspecified", "API output never reaches markdown raw"
+    assert event.detail == "Pathogen work."
+
+
+def test_a_declined_subagent_is_read_from_its_task_result():
+    """The only route a subagent's refusal has to the orchestrator's stream.
+
+    `deepagents` forwards a subagent's last non-empty reply as the `task`
+    result and drops its `response_metadata`, so the sentence is all that
+    arrives -- here after stale prose from an earlier turn, which is what a
+    drafter declined mid-run hands up.
+    """
+    from langchain_core.messages import ToolMessage
+
+    sentence = declined_text("section-drafter", "bio", "Line one.\nLine two.")
+    result = ToolMessage(f"Wrote the first half.\n\n{sentence}", tool_call_id="t")
+    result.name = "task"
+    (event,) = iter_activity({"tools": {"messages": [result]}})
+    assert event.label == "section-drafter"
+    assert event.category == "bio"
+    assert event.detail == "Line one.\nLine two."
+
+
+@pytest.mark.parametrize("name", ["read_file", None])
+def test_a_tool_result_quoting_the_sentence_is_not_a_refusal(name):
+    """Keyed on `task`: reading a file that quotes the sentence is not one."""
+    from langchain_core.messages import ToolMessage
+
+    quoted = ToolMessage(declined_text("section-drafter", "bio", ""), tool_call_id="t")
+    quoted.name = name
+    assert list(iter_activity({"tools": {"messages": [quoted]}})) == []
+
+
+def test_orchestrator_prose_quoting_the_sentence_is_still_prose():
+    """Only a reply the API actually refused becomes DECLINED."""
+    from langchain_core.messages import AIMessage
+
+    relayed = AIMessage(declined_text("section-drafter", "bio", "x"))
+    (event,) = iter_activity({"model": {"messages": [relayed]}})
+    assert event.kind == MESSAGE
+
+
+def test_declined_text_never_writes_a_category_the_parser_cannot_read():
+    for raw in (None, "", "Bio", "bio) in x. Note: y", "general_harms"):
+        (event,) = iter_activity(
+            {"model": {"messages": [_refused_reply(declined_text("a", raw, ""))]}}
+        )
+        assert event.label == "a"
+        assert event.category == (raw if raw == "general_harms" else "unspecified")
+
+
 def test_cli_output_is_unchanged_by_the_shared_parser(capsys):
     """The terminal trace is a user-facing surface; the refactor must not move it."""
     _print_activity(
@@ -143,6 +230,16 @@ def test_cli_output_is_unchanged_by_the_shared_parser(capsys):
         "  -> plan (1 steps)\n"
         "     [x] Plan\n"
         "  -> write_file /a/b.md\n"
+    )
+
+
+def test_the_cli_says_a_turn_was_declined_in_words(capsys):
+    sentence = declined_text("section-drafter", "bio", "Pathogen work.")
+    _print_activity({"model": {"messages": [_refused_reply(sentence)]}})
+    assert capsys.readouterr().out == (
+        "  !! declined by the safety classifier (bio) in section-drafter; "
+        "its output is missing. Rephrase, or retry later.\n"
+        "     Pathogen work.\n"
     )
 
 
@@ -425,6 +522,31 @@ def test_every_activity_event_kind_renders():
     assert "/applications/x/sections/need.md" in rendered
     assert "Draft complete." in rendered
     assert "Tighten the need section." in rendered
+
+
+def test_a_declined_event_is_an_alert_in_words_with_its_explanation_as_text():
+    """D2's accessibility and security rules, on the rendered page.
+
+    The outcome and category are in the alert's sentence, so it is announced
+    like any other alert rather than conveyed by colour. The explanation is API
+    output: it reaches the page through `st.text`, never as markdown.
+    """
+    from grant_writer.activity import Event
+
+    explanation = "**not bold** [link](http://example.invalid)"
+    app = _app_test()
+    app.run()
+    app.session_state["activity"] = [
+        Event(DECLINED, label="section-drafter", detail=explanation, category="bio")
+    ]
+    app.run()
+
+    assert not app.exception
+    (alert,) = app.warning
+    assert "Declined by the safety classifier" in alert.value
+    assert "`bio`" in alert.value and "section-drafter" in alert.value
+    assert [t.value for t in app.text] == [explanation]
+    assert all(explanation not in block.value for block in app.markdown)
 
 
 def test_a_run_cannot_start_without_an_application_id(monkeypatch):

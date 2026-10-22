@@ -23,6 +23,7 @@ import streamlit as st
 from langgraph.types import Command
 
 from grant_writer.activity import (
+    DECLINED,
     DELEGATE,
     MESSAGE,
     PLAN,
@@ -350,6 +351,23 @@ def render_event(event: Event) -> None:
     elif event.kind == MESSAGE:
         with st.container(border=True):
             st.markdown(event.detail)
+    elif event.kind == DECLINED:
+        # The outcome is stated in words, not left to the alert's colour or
+        # icon, so it is announced like any other alert. The sentence is built
+        # only from parts `activity` has already validated -- the agent name
+        # `[\w-]+`, the category `[a-z_]+` -- because `st.warning` renders
+        # markdown. The explanation is API output with no such guarantee, so it
+        # goes through `st.text`, which interprets nothing.
+        who = f"**{event.label}**" if event.label else "the agent"
+        st.warning(
+            f"Declined by the safety classifier (category `{event.category}`) "
+            f"in {who}, so its output is missing from this turn. Health and "
+            "biomedical topics can trigger this falsely: rephrase the request, "
+            "or retry later.",
+            icon=":material/block:",
+        )
+        if event.detail:
+            st.text(event.detail)
     elif event.kind == PROMPT:
         # The one thing in the feed that came from the human, so it gets the
         # native chat bubble rather than another bordered container -- the

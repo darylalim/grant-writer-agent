@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from deepagents import RubricMiddleware, create_deep_agent
 from langchain.agents.middleware import (
+    AgentMiddleware,
     ModelRequest,
     ModelResponse,
     TodoListMiddleware,
@@ -35,6 +37,7 @@ from grant_writer.config import (
     build_model,
 )
 from grant_writer.prompts import DISCOVERY_PROMPT, ORCHESTRATOR_PROMPT
+from grant_writer.refusals import RefusalMiddleware
 from grant_writer.subagents import build_discovery_subagents, build_subagents
 from grant_writer.tools import (
     build_extract_pdf_tool,
@@ -144,6 +147,10 @@ def build_agent(settings: Settings | None = None):
                 model=build_model(GRADER_MODEL, effort=GRADER_EFFORT),
                 max_iterations=settings.max_rubric_iterations,
             ),
+            # Says so when the API declines a reply, which it does with HTTP
+            # 200 and empty content (invariant 21). Not inherited by
+            # subagents, so `_subagent` installs its own on each of them.
+            RefusalMiddleware(agent="grant-writer"),
         ],
         checkpointer=checkpointer,
         store=store,
@@ -193,6 +200,16 @@ def build_discovery_agent(settings: Settings | None = None):
     if settings.backend_profile == "server":
         seed_store_from_disk(store, settings)
 
+    # Annotated so ty does not infer a union from the elements. A lone
+    # `[PlainTodoListMiddleware()]` took its type from the parameter; adding a
+    # second class made it `list[A | B]`, which surfaced the upstream arity
+    # mismatch CLAUDE.md describes here as well, doubling the ty baseline with
+    # no new cause. `build_agent`'s list is left unannotated on purpose: it is
+    # where that one upstream diagnostic is kept visible until langchain fixes it.
+    discovery_middleware: list[AgentMiddleware[Any, Any, Any]] = [
+        PlainTodoListMiddleware(),
+        RefusalMiddleware(agent="opportunity-discovery"),
+    ]
     return create_deep_agent(
         model=build_model(DISCOVERY_MODEL, effort=DISCOVERY_EFFORT),
         tools=tools,
@@ -209,7 +226,7 @@ def build_discovery_agent(settings: Settings | None = None):
         # candidates -- a scan that quietly stops after four of eleven looks
         # exactly like a scan that found four. See build_agent for why it is
         # passed here at all and why the prompt is left out.
-        middleware=[PlainTodoListMiddleware()],
+        middleware=discovery_middleware,
         backend=build_backend(settings),
         permissions=discovery_permissions(),
         checkpointer=checkpointer,

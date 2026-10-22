@@ -119,6 +119,7 @@ Module dependencies flow one way:
 config.py  →  tools.py, backends.py  →  subagents.py  →  agent.py  →  cli.py
 opportunities.py ─→ prompts.py, workspace.py, cli.py ─────────────────────↗
               activity.py, workspace.py  ──────────────────────────────────↗  streamlit_app.py
+activity.py ─→ refusals.py ─→ subagents.py, agent.py
 ```
 
 **`opportunities.py`** is a pure leaf — the fit rubric, the grammar a scout writes, the parser, and
@@ -137,7 +138,9 @@ was duplicated logic waiting to happen:
   A renamed `deepagents` key blanks a frontend's labels silently; a decision list whose length
   disagrees with the interrupted calls leaves the graph stuck with no exception raised. Like
   `opportunities.py` it imports nothing from the package — the three leaves in the diagram above
-  are `config.py`, `opportunities.py`, and this.
+  are `config.py`, `opportunities.py`, and this. It also owns the declined-reply sentence that
+  `refusals.py` writes into the graph (invariant 21), which is the one arrow running from it
+  back toward the agent: a leaf can be imported by both sides, so the format has one home.
 - **`workspace.py`** reads an application directory back — file listing, `[NEEDS INPUT]` count,
   compliance verdict. Not presentation logic, and putting it here is what makes it testable: a
   Streamlit script cannot be imported without executing it.
@@ -527,6 +530,29 @@ runs, and still produces plausible output.
     a subagent reports it. Replacing rather than adding also means the `final/` interrupt
     is restated in the subagent set — left out, `--approve` stops gating anything a
     subagent writes.
+
+21. **A declined reply is HTTP 200 with empty content, and only `RefusalMiddleware` makes it
+    say so.** Opus 5.5 and Sonnet 5.5 run safety classifiers that can falsely decline a
+    health or biomedical request, and the API answers with `stop_reason: "refusal"`, a
+    `stop_details` category and explanation, and no exception; langchain-anthropic files
+    both under `response_metadata` and names neither. Left alone, a declined orchestrator
+    turn draws nothing, and a declined subagent is worse: `deepagents` builds the `task`
+    result from the subagent's last *non-empty* reply and drops its metadata, so it
+    arrives as an empty string or as stale prose from an earlier turn, and the
+    orchestrator assembles a proposal short a section while both frontends show a
+    successful delegation. `refusals.RefusalMiddleware` appends one fixed sentence,
+    written by `activity.declined_text`, to any refused reply — text, because text is the
+    only thing that crosses the `task` boundary. `activity.iter_activity` reads it back as
+    a `DECLINED` event (agent, category, explanation) from the orchestrator's own reply,
+    gated on `stop_reason`, or from a `task` result, gated on the tool name, so prose or a
+    `read_file` that merely quotes the sentence is not mistaken for one. Writer and parser
+    share one module so they cannot drift. **A subagent inherits no middleware** — the
+    same trap as invariant 3 — so `_subagent` installs it unconditionally and both
+    orchestrators list it explicitly. The category and agent name reach `st.warning`, which
+    renders markdown, so both are restricted to `[a-z_]+` / `[\w-]+` on the way in; the
+    explanation has no such guarantee and is drawn only with `st.text`. H4's
+    `refusal-surfaced` check is the end-to-end proof and can only pass offline: the live
+    run declined 0 of 25.
 
 ## Backend profiles
 

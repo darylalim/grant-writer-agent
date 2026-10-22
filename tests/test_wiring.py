@@ -47,6 +47,7 @@ from grant_writer.config import (
     Settings,
     build_model,
     discovery_thread_id,
+    trace_config,
 )
 from grant_writer.subagents import (
     _subagent,
@@ -1512,3 +1513,229 @@ def test_no_system_block_is_whitespace_only(graph, monkeypatch):
     # ...and the tool itself is still there.
     tools = build(Settings(enable_search=False)).nodes["tools"].bound.tools_by_name
     assert "write_todos" in tools
+
+
+_REFUSAL_DETAILS = {
+    "type": "refusal",
+    "category": "bio",
+    "explanation": "This request may relate to dangerous pathogens.",
+}
+
+
+def _refusal_message():
+    """An HTTP-200 refusal as the API returns it: no content, no exception."""
+    from anthropic.types import Message
+
+    return Message.model_validate(
+        {
+            "id": "msg_refused",
+            "type": "message",
+            "role": "assistant",
+            "model": DEFAULT_MODELS["drafting"].split(":", 1)[-1],
+            "content": [],
+            "stop_reason": "refusal",
+            "stop_sequence": None,
+            "stop_details": _REFUSAL_DETAILS,
+            "usage": {"input_tokens": 10, "output_tokens": 0},
+        }
+    )
+
+
+def _refusal_events():
+    """The same refusal as a stream: a start event, then the delta that ends it."""
+    from anthropic.types import RawMessageDeltaEvent, RawMessageStartEvent
+
+    started = _refusal_message().model_dump()
+    started.update(stop_reason=None, stop_details=None)
+    return [
+        RawMessageStartEvent.model_validate(
+            {"type": "message_start", "message": started}
+        ),
+        RawMessageDeltaEvent.model_validate(
+            {
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": "refusal",
+                    "stop_sequence": None,
+                    "stop_details": _REFUSAL_DETAILS,
+                },
+                "usage": {"output_tokens": 0},
+            }
+        ),
+    ]
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["invoke", "stream"])
+def test_a_refusal_lands_in_response_metadata(monkeypatch, streamed):
+    """Where a declined turn's reason ends up on the `AIMessage` (D2.1).
+
+    The API declines with HTTP 200, `stop_reason: "refusal"` and empty
+    content, and nothing in langchain-anthropic raises or even names it. The
+    two fields survive by different routes: a plain call copies the whole
+    response, minus its content, into `llm_output`, which langchain-core merges
+    into `response_metadata`; a streamed call puts them there from the final
+    `message_delta`. The graph calls the model unstreamed today, but either
+    route reaching a different key would blank a declined turn's explanation
+    with nothing raised, so both are pinned.
+    """
+    from langchain_anthropic import ChatAnthropic
+
+    def _respond(self, payload):
+        # `_create` returns the SDK's raw-response wrapper; the body is `.parse()`.
+        del self
+        body = iter(_refusal_events()) if payload.get("stream") else _refusal_message()
+        return SimpleNamespace(parse=lambda: body, headers={})
+
+    monkeypatch.setattr(ChatAnthropic, "_create", _respond)
+    model = build_model(DEFAULT_MODELS["drafting"], effort=DEFAULT_EFFORT["drafting"])
+    if streamed:
+        chunks = list(model.stream("hi"))
+        message = functools.reduce(lambda a, b: a + b, chunks)
+    else:
+        message = model.invoke("hi")
+
+    assert message.response_metadata["stop_reason"] == "refusal"
+    assert message.response_metadata["stop_details"] == _REFUSAL_DETAILS
+    assert not message.text
+
+
+@pytest.mark.parametrize("roster", ["drafting", "discovery"])
+def test_every_subagent_carries_the_refusal_middleware(roster):
+    """Pins invariant 21.
+
+    A subagent inherits none of the orchestrator's middleware, so one built
+    without its own hands a declined reply up to `task` as an empty result,
+    and the orchestrator carries on short a section with nothing on screen.
+    `_subagent` installs it unconditionally; this pins that every roster
+    member went through it, and that each names itself rather than a
+    neighbour -- the name is what the frontends show as the declined agent.
+    """
+    from grant_writer.refusals import RefusalMiddleware
+
+    specs = build_subagents() if roster == "drafting" else build_discovery_subagents()
+    for spec in specs:
+        installed = [
+            m for m in spec.get("middleware", []) if isinstance(m, RefusalMiddleware)
+        ]
+        assert [m.agent for m in installed] == [spec["name"]], spec["name"]
+
+
+@pytest.mark.parametrize(
+    ("graph", "name"),
+    [("draft", "grant-writer"), ("discover", "opportunity-discovery")],
+)
+def test_a_declined_orchestrator_turn_reaches_the_stream_as_declined(
+    monkeypatch, graph, name
+):
+    """Pins invariant 21.
+
+    The orchestrator's half, through the real graph: an HTTP-200 refusal with
+    empty content comes out of `iter_activity` as one DECLINED event naming
+    the graph and the category, and `response_metadata` still holds what the
+    API said. The subagent half runs through the real graph too, in
+    `test_evals.test_a_refusal_mid_run_is_kept_with_its_category_and_marked_partial`.
+    """
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    from grant_writer import agent as agent_module
+    from grant_writer.activity import DECLINED, iter_activity
+
+    class _Refusing(GenericFakeChatModel):
+        def bind_tools(self, tools, **_kwargs):
+            return self
+
+    def _fake(*_args, **_kwargs):
+        refused = AIMessage(
+            "",
+            response_metadata={
+                "stop_reason": "refusal",
+                "stop_details": dict(_REFUSAL_DETAILS),
+            },
+        )
+        return _Refusing(messages=iter([refused]))
+
+    monkeypatch.setattr(agent_module, "build_model", _fake)
+    build = build_agent if graph == "draft" else build_discovery_agent
+    events = [
+        event
+        for chunk in build(Settings(enable_search=False)).stream(
+            {"messages": [{"role": "user", "content": "hi"}]},
+            config={"configurable": {"thread_id": "t"}},
+            stream_mode="updates",
+        )
+        for event in iter_activity(chunk)
+    ]
+
+    assert [(e.kind, e.label, e.category) for e in events] == [(DECLINED, name, "bio")]
+    assert events[0].detail == _REFUSAL_DETAILS["explanation"]
+
+
+def test_a_refusal_is_a_filterable_run_inside_the_turns_trace(monkeypatch):
+    """D2.7: refused replies can be counted in LangSmith.
+
+    The turn's own metadata is fixed by `trace_config` before the turn runs,
+    and a refusal is only known after the reply, so the middleware records it
+    as a child run instead. Pinned through a tracer on the real graph: one
+    `declined` run, in the same trace, under the model node, tagged with its
+    category -- and carrying the turn's labels, which is what lets a count be
+    broken down by frontend or command without joining anything.
+    """
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.tracers.base import BaseTracer
+
+    from grant_writer import agent as agent_module
+
+    runs: dict = {}
+
+    class _Tracer(BaseTracer):
+        def _persist_run(self, run):
+            del run
+
+        def _on_run_create(self, run):
+            runs[run.id] = run
+
+    class _Refusing(GenericFakeChatModel):
+        def bind_tools(self, tools, **_kwargs):
+            return self
+
+    def _fake(*_args, **_kwargs):
+        refused = AIMessage(
+            "",
+            response_metadata={
+                "stop_reason": "refusal",
+                "stop_details": dict(_REFUSAL_DETAILS),
+            },
+        )
+        return _Refusing(messages=iter([refused]))
+
+    monkeypatch.setattr(agent_module, "build_model", _fake)
+    settings = Settings(enable_search=False)
+    turn = trace_config(
+        settings,
+        command="draft",
+        frontend="cli",
+        ref="app-1",
+        thread_id="app-1",
+        recursion_limit=25,
+    )
+    turn["callbacks"] = [_Tracer()]
+    list(
+        build_agent(settings).stream(
+            {"messages": [{"role": "user", "content": "hi"}]},
+            config=turn,
+            stream_mode="updates",
+        )
+    )
+
+    (declined,) = [r for r in runs.values() if r.name == "declined"]
+    root = next(r for r in runs.values() if r.parent_run_id is None)
+    assert declined.trace_id == root.trace_id
+    assert runs[declined.parent_run_id].name == "model"
+    assert {"declined", "declined:bio"} <= set(declined.tags or [])
+    metadata = declined.extra["metadata"]
+    assert metadata["stop_reason"] == "refusal"
+    assert metadata["refusal_category"] == "bio"
+    assert metadata["declined_agent"] == "grant-writer"
+    assert metadata["frontend"] == "cli" and metadata["command"] == "draft"
