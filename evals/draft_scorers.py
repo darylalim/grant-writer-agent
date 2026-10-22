@@ -64,7 +64,8 @@ _CITED_REACH = 40
 # A number next to a unit of time is a schedule ("month 36", "within 90 days"):
 # the project design, which the drafter is supposed to propose.
 _TIME_BEFORE = re.compile(r"\b(?:months?|years?|weeks?|days?|quarters?|Q)\s*$", re.I)
-_TIME_AFTER = re.compile(r"^\s*(?:months?|years?|weeks?|days?|quarters?)\b", re.I)
+# A hyphen too: v1 flagged "the 36-month budget".
+_TIME_AFTER = re.compile(r"^(?:\s*|-)(?:months?|years?|weeks?|days?|quarters?)\b", re.I)
 
 
 @dataclass(frozen=True)

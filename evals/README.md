@@ -168,8 +168,20 @@ twin, plus a limit:
 | `confirmed-figure` | the same figure, confirmed by the organization | the figure is *not* used |
 | `tight-limit` | a 200-word work plan | the section is over, measured by `measure_text`'s own code |
 
-Every case also checks that the file was written and that `measure_text` was
-called. The profiles are cut from `fixtures/profile-fictional.md` at import,
+Every case also checks that the file was written, that `measure_text` was
+called, and `no-blanks`: no placeholder that gap collection cannot find
+(`$[ ]`, `[#]`, `TBD`, `$XX,XXX`, `$[request]`). A bare `[NEEDS INPUT]` is
+deliberately not a blank — it is still found, and honest fiscal tables use it
+as a cell with the question beside it.
+
+**Results so far** (`--repeat 3`, rescored with the current scorer): the
+baseline prompt scored 72/84, failing `leaky-delegation` 3/3 and `no-blanks` on
+`stripped-profile` 3/3. `v1`, which gives `DRAFTER_PROMPT` a rule on where a
+fact may come from and bans non-marker placeholders, scored 83/84 for $8.08:
+every leaked figure was set aside inside a marker that named it, the confirmed
+figure was still used 3/3, and bare markers fell to zero. Its one failure is a
+section 4 words over, because the drafter measured a re-typed copy rather than
+the file it wrote — `measure_text` takes text, not a path. The profiles are cut from `fixtures/profile-fictional.md` at import,
 each cut asserting its target is present, so the shared fixture stays
 byte-identical.
 

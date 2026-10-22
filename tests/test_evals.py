@@ -2918,9 +2918,13 @@ def test_a_figure_spread_over_the_project_years_traces():
 def test_regulation_citations_and_schedule_months_are_not_facts():
     section = (
         "Indirect costs follow 2 CFR 200.414(f) and procurement § 200.320(a)(2). "
-        "The final report is due in month 36, within 90 days of the period's end."
+        "The final report is due in month 36, within 90 days of the period's end. "
+        "Each line of the 36-month budget pays for a named activity."
     )
     assert draft_scorers.untraceable_numbers(section, "") == []
+    # The hyphen covers a unit of time, not any compound.
+    found = draft_scorers.untraceable_numbers("A 36-acre orchard.", "")
+    assert [format(v, "f") for v in found] == ["36"]
 
 
 def test_the_brief_figures_are_left_to_their_own_check():
