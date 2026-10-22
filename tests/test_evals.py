@@ -2648,6 +2648,40 @@ def test_the_limit_is_counted_by_measure_text_itself():
     assert draft_scorers.within_limit(case, _out(exact)).passed
 
 
+def _measuring(*calls: tuple[str, dict]) -> draft_scorers.DraftOutput:
+    return draft_scorers.DraftOutput(
+        section="text",
+        tool_calls=tuple(name for name, _ in calls),
+        calls=calls,
+    )
+
+
+def test_measured_needs_the_saved_file_measured_after_its_last_change():
+    """Both shapes the live runs failed in are failures here, beside passes.
+
+    A text measurement is a count of whatever was passed, and an edit after the
+    last measurement makes it stale; either way the count is not the file's.
+    """
+    case = _draft_case("confirmed-figure")
+    path = case.section_path
+    write = ("write_file", {"file_path": path, "content": "x"})
+    edit = ("edit_file", {"file_path": path, "old_string": "a", "new_string": "b"})
+    by_path = ("measure_text", {"path": path})
+    by_text = ("measure_text", {"text": "x"})
+    other = ("edit_file", {"file_path": "/memories/org/AGENTS.md"})
+
+    def passes(*calls):
+        return draft_scorers.measured(case, _measuring(*calls)).passed
+
+    assert passes(write, by_path)
+    assert passes(write, edit, by_path, other)
+    assert passes(write, ("measure_text", {"path": path.lstrip("/")}))
+    assert not passes(write, by_text)
+    assert not passes(write, by_path, edit)
+    assert not passes(write, by_path, edit, by_text)
+    assert not passes(write, ("measure_text", {"path": path + ".bak"}))
+
+
 def test_the_profile_cuts_remove_every_withheld_fact_and_keep_the_rest():
     stripped = draft_cases.STRIPPED_PROFILE
     for gone in (
@@ -2781,7 +2815,7 @@ def test_the_harness_scores_an_oracle_drafter_as_passing(monkeypatch):
         case,
         [
             _reply(("write_file", {"file_path": case.section_path, "content": body})),
-            _reply(("measure_text", {"text": body})),
+            _reply(("measure_text", {"path": case.section_path})),
             _reply(text="Wrote the section.", stop="end_turn"),
         ],
     )
@@ -2969,7 +3003,13 @@ def test_rescoring_rewrites_the_grades_from_disk_and_keeps_the_judge(tmp_path):
             {"name": "gap-marked", "passed": False, "detail": "", "skipped": False},
             {"name": "grounded", "passed": True, "detail": "ok", "skipped": False},
         ],
-        "trace": [{"role": "tool_call", "name": "measure_text", "content": "{}"}],
+        "trace": [
+            {
+                "role": "tool_call",
+                "name": "measure_text",
+                "content": json.dumps({"path": case.section_path}),
+            }
+        ],
     }
     run_draft_section.write_result(tmp_path, case, record)
     records = run_draft_section.rescore(tmp_path)

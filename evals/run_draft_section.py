@@ -410,8 +410,11 @@ def run_case(
 
     file = root / case.section_path.lstrip("/")
     section = file.read_text(encoding="utf-8") if file.is_file() else None
-    tool_calls = tuple(c["name"] for m in replies for c in m.tool_calls)
-    out = DraftOutput(section=section, tool_calls=tool_calls, report=_text(replies[-1]))
+    calls = tuple((c["name"], c["args"]) for m in replies for c in m.tool_calls)
+    tool_calls = tuple(name for name, _ in calls)
+    out = DraftOutput(
+        section=section, tool_calls=tool_calls, calls=calls, report=_text(replies[-1])
+    )
 
     # The documents only, not the brief: the brief is an input but not a
     # source, so a figure it alone carries does not trace (DRAFT_JUDGE_PROMPT
@@ -553,6 +556,11 @@ def rescore(variant: Path) -> list[dict[str, Any]]:
         out = DraftOutput(
             section=section_file.read_text("utf-8") if section_file.is_file() else None,
             tool_calls=tuple(t["name"] for t in trace if t["role"] == "tool_call"),
+            calls=tuple(
+                (t["name"], json.loads(t["content"]))
+                for t in trace
+                if t["role"] == "tool_call"
+            ),
         )
         scores = score_programmatically(case, out, "\n".join((rfp, case.profile)))
         if "grounded" in row["grade"]:
