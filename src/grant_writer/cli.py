@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from grant_writer.config import (
     persistent_settings,
     require_api_keys,
     trace_config,
+    user_thread_id,
 )
 from grant_writer.opportunities import rank_opportunities
 from grant_writer.prompts import discovery_request, draft_request
@@ -36,6 +38,15 @@ from grant_writer.workspace import (
     unverifiable_citations,
 )
 
+logger = logging.getLogger(__name__)
+
+# The CLI is single-user (decision 9): its thread ids and directories are the
+# unprefixed ones, so `--app-id X` is thread `X` and `applications/X/` exactly as
+# before per-user ids existed, and a run started in the local UI -- which passes
+# the same None until sign-in supplies a user -- still resumes here. Named so the
+# call sites say which tree they chose rather than passing a bare None.
+CLI_USER: str | None = None
+
 
 def _settings_from_args(args: argparse.Namespace) -> Settings:
     """Build Settings from parsed CLI flags."""
@@ -44,6 +55,37 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
         approve_final=args.approve,
         enable_search=not args.no_search,
     )
+
+
+def _refuses_shared_database(settings: Settings, args: argparse.Namespace) -> bool:
+    """Whether to refuse a turn against the deployment's database (decision 18).
+
+    The CLI has no sign-in and unprefixed thread ids, which is right on one
+    laptop. With `DATABASE_URL` set it would reach the *shared* checkpoint
+    instead, where `--app-id` names any thread at all -- including a raw
+    per-user one, `user:<someone>:<app>`, which `--app-id` cannot spell but
+    `chat` would happily resume if it could. So it refuses unless an operator
+    says otherwise, and that override is logged, never silent.
+
+    `db-setup` does not come through here: it is the deploy step that needs
+    the URL, and it reads and writes no thread.
+    """
+    if settings.database_url is None:
+        return False
+    if not args.operator:
+        print(
+            "DATABASE_URL is set, so this would run against the shared deployment "
+            "database with no sign-in. Unset it to work locally, or pass "
+            "--operator if you are operating that deployment.",
+            file=sys.stderr,
+        )
+        return True
+    logger.warning(
+        "operator override: grant-writer %s against the shared database (%s)",
+        args.command,
+        getattr(args, "app_id", None) or getattr(args, "scan_id", None),
+    )
+    return False
 
 
 def _print_activity(chunk: dict) -> None:
@@ -120,6 +162,8 @@ def _run(agent, payload: dict | Command, config: dict) -> None:
 
 def _draft(args: argparse.Namespace) -> int:
     settings = _settings_from_args(args)
+    if _refuses_shared_database(settings, args):
+        return 1
     missing = require_api_keys(needs_search=settings.enable_search)
     if missing:
         print(f"Missing environment variables: {', '.join(missing)}", file=sys.stderr)
@@ -162,7 +206,7 @@ def _draft(args: argparse.Namespace) -> int:
         command="draft",
         frontend="cli",
         ref=args.app_id,
-        thread_id=args.app_id,
+        thread_id=user_thread_id(CLI_USER, args.app_id),
         recursion_limit=args.recursion_limit,
         details={
             "app_id": args.app_id,
@@ -177,6 +221,8 @@ def _draft(args: argparse.Namespace) -> int:
 
 def _chat(args: argparse.Namespace) -> int:
     settings = _settings_from_args(args)
+    if _refuses_shared_database(settings, args):
+        return 1
     missing = require_api_keys(needs_search=settings.enable_search)
     if missing:
         print(f"Missing environment variables: {', '.join(missing)}", file=sys.stderr)
@@ -196,7 +242,7 @@ def _chat(args: argparse.Namespace) -> int:
         command="chat",
         frontend="cli",
         ref=args.app_id,
-        thread_id=args.app_id,
+        thread_id=user_thread_id(CLI_USER, args.app_id),
         recursion_limit=args.recursion_limit,
         details={"app_id": args.app_id},
     )
@@ -290,6 +336,8 @@ def _db_setup(args: argparse.Namespace) -> int:
 
 def _discover(args: argparse.Namespace) -> int:
     settings = _settings_from_args(args)
+    if _refuses_shared_database(settings, args):
+        return 1
     missing = require_api_keys(needs_search=settings.enable_search)
     if missing:
         print(f"Missing environment variables: {', '.join(missing)}", file=sys.stderr)
@@ -300,7 +348,7 @@ def _discover(args: argparse.Namespace) -> int:
         # The same boundary the drafting side applies to `--app-id`. A scan id
         # names a directory the UI later joins onto a real path, so it is
         # checked here rather than trusted because it came from a flag.
-        scan_dir = opportunities_dir(settings, args.scan_id)
+        scan_dir = opportunities_dir(settings, args.scan_id, user_id=CLI_USER)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -320,7 +368,7 @@ def _discover(args: argparse.Namespace) -> int:
         # scanning and then drafting under the same name do not resume each
         # other -- see `config.discovery_thread_id` and invariant 12.
         ref=args.scan_id,
-        thread_id=discovery_thread_id(args.scan_id),
+        thread_id=user_thread_id(CLI_USER, discovery_thread_id(args.scan_id)),
         recursion_limit=args.recursion_limit,
         details={
             "scan_id": args.scan_id,
@@ -359,6 +407,11 @@ def _add_common_flags(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=150,
         help="max graph steps per turn (default: 150)",
+    )
+    parser.add_argument(
+        "--operator",
+        action="store_true",
+        help="allow a run against DATABASE_URL's shared database (logged)",
     )
 
 

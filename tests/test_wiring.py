@@ -773,7 +773,7 @@ def test_a_discovery_graph_on_another_root_archives_candidates_there(
     ],
 )
 def test_output_paths_inside_a_tools_own_dirs_are_allowed(out_path, allowed, tmp_path):
-    resolved = _resolve_output_path(out_path, allowed, tmp_path)
+    resolved = _resolve_output_path(out_path, allowed, tmp_path, user_id=None)
     assert resolved.is_relative_to(tmp_path.resolve())
 
 
@@ -800,7 +800,9 @@ def test_the_discovery_tool_cannot_write_into_an_application(out_path):
     A tool gets its own graph's directories, not the union of everyone's.
     """
     with pytest.raises(ValueError, match=re.escape("refusing to write outside")):
-        _resolve_output_path(out_path, _DISCOVERY_WRITE_DIRS, PROJECT_ROOT)
+        _resolve_output_path(
+            out_path, _DISCOVERY_WRITE_DIRS, PROJECT_ROOT, user_id=None
+        )
 
 
 def test_the_drafting_tool_cannot_write_into_a_scan():
@@ -812,7 +814,10 @@ def test_the_drafting_tool_cannot_write_into_a_scan():
     """
     with pytest.raises(ValueError, match=re.escape("refusing to write outside")):
         _resolve_output_path(
-            "/opportunities/s/candidates/x.md", _DRAFTING_WRITE_DIRS, PROJECT_ROOT
+            "/opportunities/s/candidates/x.md",
+            _DRAFTING_WRITE_DIRS,
+            PROJECT_ROOT,
+            user_id=None,
         )
 
 
@@ -852,7 +857,7 @@ def test_output_paths_outside_content_dirs_are_refused(out_path):
         ValueError,
         match=re.escape("refusing to write outside /applications/ or /memories/"),
     ):
-        _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS, PROJECT_ROOT)
+        _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS, PROJECT_ROOT, user_id=None)
 
 
 def test_content_dirs_agrees_with_the_settings_paths():

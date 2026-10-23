@@ -45,7 +45,9 @@ from grant_writer.config import (
     persistent_settings,
     require_api_keys,
     trace_config,
+    user_thread_id,
 )
+from grant_writer.identity import current_user
 from grant_writer.opportunities import (
     MAX_TOTAL_POINTS,
     Citation,
@@ -305,17 +307,24 @@ def _active_thread_id() -> str:
     One expression, read by the run block and by the approval panel, so those
     two can never disagree about which thread they are addressing. A scan runs
     under a namespaced id (see `config.discovery_thread_id`) precisely so it
-    cannot land on the checkpoint row an identically-named application uses.
+    cannot land on the checkpoint row an identically-named application uses,
+    and both run under the user's own (see `identity.current_user`).
     """
     if st.session_state.active_kind == DISCOVER:
-        return discovery_thread_id(st.session_state.active_scan_id)
-    return st.session_state.active_app_id
+        thread_id = discovery_thread_id(st.session_state.active_scan_id)
+    else:
+        thread_id = st.session_state.active_app_id
+    return user_thread_id(current_user(), thread_id)
 
 
 def parked_state(
     app_id: str, profile: BackendProfile, approve: bool, search: bool
 ) -> tuple[bool | None, str]:
     """Ask the checkpoint whether `app_id`'s thread is parked on an interrupt.
+
+    Takes the application id, not a thread id, and applies `current_user`
+    itself, so neither caller can hand it a bare id: read against the wrong
+    row, it would report another user's pending write -- or miss this one's.
 
     Returns `(parked, cause)`, where `parked` is None when the read itself
     failed and `cause` names why. None rather than False, and the distinction is
@@ -342,7 +351,8 @@ def parked_state(
     """
     try:
         agent = get_agent(profile, approve, search)
-        return is_parked(agent, {"configurable": {"thread_id": app_id}}), ""
+        thread_id = user_thread_id(current_user(), app_id)
+        return is_parked(agent, {"configurable": {"thread_id": thread_id}}), ""
     except Exception as exc:  # noqa: BLE001 - the caller refuses the turn
         return None, f"{type(exc).__name__}: {exc}"
 
@@ -998,11 +1008,15 @@ settings = persistent_settings(
 # it structurally cannot perform, and still retarget the thread id on the way to
 # refusing. Disk is not the source of truth in that profile, so it is not
 # offered as one.
-existing_ids = application_ids(settings) if profile == "local" else []
+existing_ids = (
+    application_ids(settings, user_id=current_user()) if profile == "local" else []
+)
 # The scan-side counterpart, gated on the profile for the same reason: under
 # `server` a scan's files live in ephemeral graph state, so a picker over disk
 # would offer reads it structurally cannot perform.
-existing_scan_ids = opportunity_scan_ids(settings) if profile == "local" else []
+existing_scan_ids = (
+    opportunity_scan_ids(settings, user_id=current_user()) if profile == "local" else []
+)
 
 # --- Header and run form -----------------------------------------------------
 
@@ -1274,7 +1288,7 @@ if discover_submitted:
         # an application id: this id names a directory the shortlist below
         # joins onto a real path, and pathlib discards the base for an absolute
         # right operand.
-        opportunities_dir(settings, scan_id)
+        opportunities_dir(settings, scan_id, user_id=current_user())
     except ValueError as exc:
         st.session_state.error = str(exc)
         st.session_state.phase = FAILED
@@ -1335,7 +1349,7 @@ if submitted:
         # `application_dir` is the boundary. Joining the raw id would escape
         # `applications/` outright: pathlib discards the left operand for an
         # absolute right one, so an id of "/Users/me/.ssh" writes there.
-        app_dir = application_dir(settings, app_id)
+        app_dir = application_dir(settings, app_id, user_id=current_user())
 
         # Ask the graph, not the phase. `turn_locked` greys this button out
         # whenever *this* session remembers parking on an interrupt, but that
@@ -1770,7 +1784,9 @@ with discovery_slot:
             # Same boundary as the write side. Without it a scan id of ".."
             # lists the repo root, and `render_file`'s download branch would
             # hand `.env` -- live API keys -- to the browser.
-            scan_dir = opportunities_dir(settings, browse_scan_id)
+            scan_dir = opportunities_dir(
+                settings, browse_scan_id, user_id=current_user()
+            )
         except ValueError as exc:
             st.warning(str(exc), icon=":material/warning:")
         else:
@@ -1861,7 +1877,7 @@ with results_slot:
             # Same boundary as the write side, and it matters more here: without
             # it an id of ".." lists the repo root, and the download branch
             # below would hand `.env` -- live API keys -- to the browser.
-            app_dir = application_dir(settings, browse_id)
+            app_dir = application_dir(settings, browse_id, user_id=current_user())
         except ValueError as exc:
             st.warning(str(exc), icon=":material/warning:")
         else:

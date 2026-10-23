@@ -24,6 +24,12 @@ import httpx
 from deepagents.backends.utils import validate_path
 from langchain.tools import tool
 
+# A runtime import, not a TYPE_CHECKING one: `@tool` reads the annotation to
+# recognise the parameter it injects and hides from the model's schema.
+from langchain_core.runnables import RunnableConfig
+
+from grant_writer.config import thread_user_id, user_content_root
+
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
     from langchain_core.tools import BaseTool
@@ -74,7 +80,7 @@ def _parse_page_spec(spec: str, n_pages: int) -> list[int]:
 
 
 def _resolve_output_path(
-    out_path: str, allowed_dirs: tuple[str, ...], root: Path
+    out_path: str, allowed_dirs: tuple[str, ...], root: Path, *, user_id: str | None
 ) -> Path:
     """Map a virtual write path onto disk under `root`, refusing anything
     outside `allowed_dirs`.
@@ -103,6 +109,14 @@ def _resolve_output_path(
     `root` is required for the same reason: it is the graph's `Settings.root`,
     and a default would be `PROJECT_ROOT`, which is right only for a graph that
     happens to be built on this checkout.
+
+    `user_id` is required for the same reason again (invariant 23). The graph
+    is cached and shared by every session, so the tool cannot know who is
+    calling except from the run, and a user's write lands in that user's own
+    directory: `/applications/x/rfp.md` becomes `applications/@<user>/x/rfp.md`.
+    The agent never names a user directory -- the mapping adds it -- so a path
+    with an `@` segment of its own is refused outright rather than nested,
+    which also keeps the single-user tree out of everyone's.
     """
     root = root.resolve()
     allowed = tuple(root / name for name in allowed_dirs)
@@ -120,7 +134,32 @@ def _resolve_output_path(
         listed = " or ".join(f"/{name}/" for name in allowed_dirs)
         msg = f"refusing to write outside {listed}: {out_path!r}"
         raise ValueError(msg)
-    return resolved
+
+    base = next(base for base in allowed if resolved.is_relative_to(base))
+    relative = resolved.relative_to(base)
+    if any(part.startswith("@") for part in relative.parts):
+        msg = f"refusing to write into a user directory: {out_path!r}"
+        raise ValueError(msg)
+    if user_id is None:
+        return resolved
+    # Re-resolved under the user's root and re-checked, for invariant 2's
+    # reason: a symlink inside the user's directory must not carry the write
+    # back out of it.
+    user_base = user_content_root(base, user_id).resolve()
+    target = (user_base / relative).resolve()
+    if not target.is_relative_to(user_base):
+        msg = f"refusing to write outside your own directory: {out_path!r}"
+        raise ValueError(msg)
+    return target
+
+
+def _run_user_id(config: RunnableConfig) -> str | None:
+    """The user the current run belongs to, read from its thread id.
+
+    See `config.thread_user_id` for why the thread id carries it rather than a
+    key of its own.
+    """
+    return thread_user_id(config.get("configurable", {}).get("thread_id"))
 
 
 def build_extract_pdf_tool(root: Path) -> BaseTool:
@@ -128,7 +167,11 @@ def build_extract_pdf_tool(root: Path) -> BaseTool:
 
     @tool
     def extract_pdf_text(
-        pdf_path: str, pages: str = "", max_chars: int = 20000, out_path: str = ""
+        config: RunnableConfig,
+        pdf_path: str,
+        pages: str = "",
+        max_chars: int = 20000,
+        out_path: str = "",
     ) -> str:
         """Extract text from a PDF solicitation, RFP, or funder guideline document.
 
@@ -149,13 +192,25 @@ def build_extract_pdf_tool(root: Path) -> BaseTool:
             A write receipt when `out_path` is set, otherwise the extracted text
             with an explicit notice if it was truncated.
         """
-        return _extract_pdf_text(root, pdf_path, pages, max_chars, out_path)
+        try:
+            user_id = _run_user_id(config)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        return _extract_pdf_text(
+            root, pdf_path, pages, max_chars, out_path, user_id=user_id
+        )
 
     return extract_pdf_text
 
 
 def _extract_pdf_text(
-    root: Path, pdf_path: str, pages: str, max_chars: int, out_path: str
+    root: Path,
+    pdf_path: str,
+    pages: str,
+    max_chars: int,
+    out_path: str,
+    *,
+    user_id: str | None,
 ) -> str:
     """The body of `extract_pdf_text`; its docstring is the model's, above."""
     path = Path(pdf_path).expanduser()
@@ -192,7 +247,9 @@ def _extract_pdf_text(
 
     if out_path:
         try:
-            target = _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS, root)
+            target = _resolve_output_path(
+                out_path, _DRAFTING_WRITE_DIRS, root, user_id=user_id
+            )
         except ValueError as exc:
             return f"Error: {exc}"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -522,7 +579,10 @@ def build_fetch_opportunity_tool(root: Path) -> BaseTool:
 
     @tool
     def fetch_grants_gov_opportunity(
-        opportunity_id: str, max_chars: int = 12000, out_path: str = ""
+        config: RunnableConfig,
+        opportunity_id: str,
+        max_chars: int = 12000,
+        out_path: str = "",
     ) -> str:
         """Read one grants.gov opportunity in full: eligibility, award size,
         deadline, and synopsis. No API key needed.
@@ -546,13 +606,24 @@ def build_fetch_opportunity_tool(root: Path) -> BaseTool:
             text with an explicit notice if it was truncated. Starts with
             "Error: " on failure.
         """
-        return _fetch_grants_gov_opportunity(root, opportunity_id, max_chars, out_path)
+        try:
+            user_id = _run_user_id(config)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        return _fetch_grants_gov_opportunity(
+            root, opportunity_id, max_chars, out_path, user_id=user_id
+        )
 
     return fetch_grants_gov_opportunity
 
 
 def _fetch_grants_gov_opportunity(
-    root: Path, opportunity_id: str, max_chars: int, out_path: str
+    root: Path,
+    opportunity_id: str,
+    max_chars: int,
+    out_path: str,
+    *,
+    user_id: str | None,
 ) -> str:
     """The body of `fetch_grants_gov_opportunity`; its docstring is above."""
     identifier = str(opportunity_id).strip()
@@ -576,7 +647,9 @@ def _fetch_grants_gov_opportunity(
 
     if out_path:
         try:
-            target = _resolve_output_path(out_path, _DISCOVERY_WRITE_DIRS, root)
+            target = _resolve_output_path(
+                out_path, _DISCOVERY_WRITE_DIRS, root, user_id=user_id
+            )
         except ValueError as exc:
             return f"Error: {exc}"
         target.parent.mkdir(parents=True, exist_ok=True)

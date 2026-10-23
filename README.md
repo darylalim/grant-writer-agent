@@ -79,6 +79,7 @@ Flags go **after** the subcommand, e.g. `grant-writer draft --app-id X --approve
 | `--no-search` | all | Skip web search; no `TAVILY_API_KEY` needed |
 | `--profile server` | all | Keep drafts in graph state instead of on disk |
 | `--recursion-limit N` | all | Max graph steps per turn (default: `150`) |
+| `--operator` | all | Allow a run while `DATABASE_URL` is set; without it the CLI refuses the shared database (logged) |
 
 ### Configuration
 
@@ -92,7 +93,7 @@ Set these in `.env` (see `.env.example`):
 | `GRANT_WRITER_*_MODEL` | No | Override the model for a role (`DRAFTING`, `RESEARCH`, `COMPLIANCE`, `GRADER`, `DISCOVERY`) |
 | `GRANT_WRITER_*_EFFORT` | No | Override the reasoning effort for a role, same role names (`low`, `medium`, `high`, `xhigh`, `max`) |
 | `GRANT_WRITER_ROOT` | No | Project root, when the console script is installed outside the repo |
-| `DATABASE_URL` | Deployments only | Postgres for checkpoints and the `Store`. Unset means SQLite |
+| `DATABASE_URL` | Deployments only | Postgres for checkpoints and the `Store`. Unset means SQLite. While set, `draft`/`chat`/`discover` need `--operator` |
 | `GRANT_WRITER_DB_POOL_MAX_SIZE` | No | Most Postgres connections per process (default 10) |
 | `GRANT_WRITER_DB_POOL_TIMEOUT` | No | Seconds to wait for a free connection before failing (default 30) |
 

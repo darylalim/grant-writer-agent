@@ -1922,7 +1922,9 @@ def test_the_empty_browser_caption_does_not_point_at_an_absent_picker(monkeypatc
     developer's real directory and is gitignored, so a case that waits for it to
     be empty passes on CI and fails on any machine that has run the app once.
     """
-    monkeypatch.setattr("grant_writer.config.application_ids", lambda _s: [])
+    monkeypatch.setattr(
+        "grant_writer.config.application_ids", lambda _s, *, user_id: []
+    )
     app = _app_test()
     app.run()
 
