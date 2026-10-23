@@ -61,6 +61,12 @@ os.environ["LANGCHAIN_API_KEY"] = ""
 os.environ["DATABASE_URL"] = ""
 os.environ["GRANT_WRITER_DB_POOL_MAX_SIZE"] = ""
 os.environ["GRANT_WRITER_DB_POOL_TIMEOUT"] = ""
+# The limits (invariant 26), for both reasons at once: parsed at import, and
+# read by `persistent_settings`, so a developer's own budget would change what
+# the AppTest cases are refused.
+os.environ["GRANT_WRITER_DAILY_BUDGET_USD"] = ""
+os.environ["GRANT_WRITER_MAX_CONCURRENT_RUNS"] = ""
+os.environ["GRANT_WRITER_SEARCH_COST_USD"] = ""
 
 # Non-empty on purpose: if a run ever does escape, it lands somewhere visibly
 # wrong rather than in `default` or in the real `grant-writer`.

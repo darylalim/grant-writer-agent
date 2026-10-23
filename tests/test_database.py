@@ -23,6 +23,7 @@ from psycopg_pool import ConnectionPool
 
 from grant_writer import agent, cli, config
 from grant_writer.config import Settings
+from grant_writer.runs import PostgresRunLedger
 
 URL = "postgresql://nobody@127.0.0.1:1/never"
 
@@ -155,10 +156,12 @@ def test_db_setup_refuses_without_a_url(monkeypatch, capsys):
     assert "DATABASE_URL is not set" in capsys.readouterr().err
 
 
-def test_db_setup_migrates_both_savers_on_one_pool(monkeypatch, unopened_pool) -> None:
+def test_db_setup_migrates_every_table_on_one_pool(monkeypatch, unopened_pool) -> None:
+    """The savers and the run table (invariant 26), all on the one pool."""
     monkeypatch.setattr(config, "DATABASE_URL", URL)
     seen = []
     monkeypatch.setattr(PostgresSaver, "setup", lambda self: seen.append(self.conn))
     monkeypatch.setattr(PostgresStore, "setup", lambda self: seen.append(self.conn))
+    monkeypatch.setattr(PostgresRunLedger, "setup", lambda self: seen.append(self.pool))
     assert _run_cli(monkeypatch, "db-setup") == 0
-    assert len(seen) == 2 and seen[0] is seen[1]
+    assert len(seen) == 3 and seen[0] is seen[1] is seen[2]

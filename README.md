@@ -96,6 +96,9 @@ Set these in `.env` (see `.env.example`):
 | `DATABASE_URL` | Deployments only | Postgres for checkpoints and the `Store`. Unset means SQLite. While set, `draft`/`chat`/`discover` need `--operator` |
 | `GRANT_WRITER_DB_POOL_MAX_SIZE` | No | Most Postgres connections per process (default 10) |
 | `GRANT_WRITER_DB_POOL_TIMEOUT` | No | Seconds to wait for a free connection before failing (default 30) |
+| `GRANT_WRITER_DAILY_BUDGET_USD` | No | Estimated spend each signed-in user may reach per UTC day (default 10) |
+| `GRANT_WRITER_MAX_CONCURRENT_RUNS` | No | Signed-in turns in flight at once, across the deployment (default 3) |
+| `GRANT_WRITER_SEARCH_COST_USD` | No | Estimated cost of one web search, counted toward the daily limit (default 0.008) |
 
 What those overrides replace:
 
@@ -191,6 +194,43 @@ The follow-up chat box is disabled while a turn is running or waiting for
 approval. Sending a message in either state would discard the write waiting
 for approval.
 
+### Sign-in and limits
+
+With an `[auth]` section in `.streamlit/secrets.toml`, the app requires sign-in
+through Streamlit's OIDC support (`st.login`), which works with any OpenID Connect
+provider. For a single provider:
+
+```toml
+[auth]
+redirect_uri = "https://your-host/oauth2callback"
+cookie_secret = "a long random string"
+client_id = "..."
+client_secret = "..."
+server_metadata_url = "https://your-provider/.well-known/openid-configuration"
+```
+
+Signed in, each person gets their own threads and folders, and every run uses
+the `server` profile. You are identified by a digest of the provider's
+issuer and subject, never by your email address. A deployment with
+`DATABASE_URL` set and no `[auth]` refuses to start, since anyone with the link
+could otherwise read every thread.
+
+Two limits apply to signed-in users, checked before each turn starts, including
+the turn that resumes an approval:
+
+- **A daily spending limit per user**, $10 by default, in estimated model and
+  web-search cost. The estimate uses list prices, and any model the price table
+  doesn't know is charged at the most expensive known rate. A turn already
+  running is allowed to finish, so the limit stops the next turn rather than
+  cutting one off. It resets at 00:00 UTC.
+- **A limit on turns running at once**, 3 by default across the whole deployment.
+  At the limit you're asked to try again shortly, instead of starting a run that
+  would fail partway on rate limits.
+
+Each signed-in turn adds one row to a run table: who ran it, on which thread,
+when, how it ended, and its tokens, searches and estimated cost. The row holds
+no proposal content.
+
 The theme (`.streamlit/config.toml`) follows the desktop's light or dark mode, and
 the settings menu can override it. Text, links, input outlines and focused
 inputs meet WCAG AA contrast in both modes, and `tests/test_theme_config.py`
@@ -226,6 +266,7 @@ judges the drafts without seeing the drafter's reasoning.
 | `opportunities/<scan-id>/` | One scan | Candidate texts and scores |
 | `applications/<app-id>/` | One application | RFP, requirements, research, drafts, reviews |
 | `.grant_writer/checkpoints.sqlite` | Until deleted | Conversation state, plans, and writes awaiting approval |
+| `.grant_writer/runs.sqlite` | Until deleted | Run table for signed-in turns: usage and cost, no content (Postgres when `DATABASE_URL` is set) |
 
 Back up the checkpoint file before upgrading dependencies. It is the one piece
 of state a library upgrade can make unreadable. Close the CLI and the UI first,
@@ -243,10 +284,12 @@ sqlite3 .grant_writer/checkpoints.sqlite ".backup .grant_writer/checkpoints.pre-
 | `local` (default) | Real files on disk | Real files on disk | CLI and local UI |
 | `server` | Graph state | `Store` seeded from disk at startup | Web deployments |
 
-Never use `local` inside a web server. Without `DATABASE_URL`, the `server`
+Never use `local` inside a web server; once sign-in is on, the UI only offers
+`server`. Without `DATABASE_URL`, the `server`
 profile's Store is in memory and is lost when the process exits. With it set,
-checkpoints and the Store both live in Postgres; run `grant-writer db-setup`
-once per deploy, before the app starts, to create or migrate the tables.
+checkpoints, the Store and the run table all live in Postgres; run
+`grant-writer db-setup` once per deploy, before the app starts, to create or
+migrate the tables.
 
 On every start, skills are refreshed from disk, while the organization profile
 is only seeded when the Store has none, so edits made through the app survive

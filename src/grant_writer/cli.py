@@ -343,7 +343,7 @@ def _db_setup(args: argparse.Namespace) -> int:
         )
         return 1
     setup_database(settings)
-    print("Checkpoint and Store tables are up to date.")
+    print("Checkpoint, Store and run tables are up to date.")
     return 0
 
 

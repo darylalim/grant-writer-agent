@@ -113,6 +113,15 @@ DATABASE_URL = os.getenv("DATABASE_URL") or None
 DB_POOL_MAX_SIZE = int(os.getenv("GRANT_WRITER_DB_POOL_MAX_SIZE") or 10)
 DB_POOL_TIMEOUT = float(os.getenv("GRANT_WRITER_DB_POOL_TIMEOUT") or 30)
 
+# The limits a signed-in session is held to (decision 13, invariant 26): an
+# estimated spend per user per UTC day, and the turns in flight at once across
+# the deployment. Conservative by default -- sized for a low Anthropic
+# rate-limit tier -- and parsed at import for the pool sizes' reason. They
+# reach a `Settings` only through `persistent_settings`, like the database.
+DAILY_BUDGET_USD = float(os.getenv("GRANT_WRITER_DAILY_BUDGET_USD") or 10)
+MAX_CONCURRENT_RUNS = int(os.getenv("GRANT_WRITER_MAX_CONCURRENT_RUNS") or 3)
+SEARCH_COST_USD = float(os.getenv("GRANT_WRITER_SEARCH_COST_USD") or 0.008)
+
 
 def build_model(spec: str, *, effort: str) -> BaseChatModel:
     """Resolve a `provider:model` spec into a chat model with a real ceiling.
@@ -232,6 +241,18 @@ class Settings:
     so an exhausted pool or an unreachable database fails with a message
     rather than hanging a run."""
 
+    daily_budget_usd: float = 10.0
+    """Estimated model and search spend one signed-in user may reach per UTC
+    day before a turn is refused. Single-user runs are not limited."""
+
+    max_concurrent_runs: int = 3
+    """Signed-in turns that may be in flight at once across the deployment, so
+    a busy hour is told to wait rather than failing part-way on HTTP 429."""
+
+    search_cost_usd: float = 0.008
+    """What one web search is estimated to cost, for the daily limit. Tavily
+    bills per search credit, and a basic search is one."""
+
     max_rubric_iterations: int = 3
 
     @property
@@ -260,6 +281,15 @@ class Settings:
     @property
     def default_checkpoint_db(self) -> Path:
         return self.root / ".grant_writer" / "checkpoints.sqlite"
+
+    @property
+    def run_table_db(self) -> Path:
+        """The run table's SQLite file, when there is no ``database_url``.
+
+        A file of its own rather than a table in the checkpoint file, so a
+        limit check never waits on the lock `grant-writer chat` holds there.
+        """
+        return self.root / ".grant_writer" / "runs.sqlite"
 
     def ensure_dirs(self) -> None:
         """Create the directories the agent expects to write into.
@@ -590,6 +620,8 @@ def persistent_settings(
 
     It is also the one place ``DATABASE_URL`` reaches a ``Settings``: set, both
     the checkpoint and the Store go to Postgres and the SQLite path is unused.
+    The spending and concurrency limits arrive here too, for the same reason:
+    a library caller or a test is never limited by its shell's environment.
     """
     base = Settings(
         backend_profile=backend_profile,
@@ -598,6 +630,9 @@ def persistent_settings(
         database_url=DATABASE_URL,
         db_pool_max_size=DB_POOL_MAX_SIZE,
         db_pool_timeout=DB_POOL_TIMEOUT,
+        daily_budget_usd=DAILY_BUDGET_USD,
+        max_concurrent_runs=MAX_CONCURRENT_RUNS,
+        search_cost_usd=SEARCH_COST_USD,
     )
     return replace(base, checkpoint_db=base.default_checkpoint_db)
 

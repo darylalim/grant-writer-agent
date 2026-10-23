@@ -44,6 +44,7 @@ from grant_writer.config import (
 )
 from grant_writer.prompts import DISCOVERY_PROMPT, ORCHESTRATOR_PROMPT
 from grant_writer.refusals import RefusalMiddleware
+from grant_writer.runs import PostgresRunLedger, RunLedger, SqliteRunLedger
 from grant_writer.subagents import build_discovery_subagents, build_subagents
 from grant_writer.tools import (
     build_fetch_opportunity_tool,
@@ -190,12 +191,26 @@ def _build_store(settings: Settings) -> BaseStore:
     return store
 
 
+def build_run_ledger(settings: Settings) -> RunLedger:
+    """The run table the limits read (invariant 26), beside the checkpoints.
+
+    Postgres on the checkpointer's pool when ``database_url`` is set, so every
+    replica counts the same runs; otherwise a SQLite file of its own, which
+    still holds across the processes of one machine. Never in memory: a limit
+    that resets with the process is not a limit.
+    """
+    if settings.database_url is not None:
+        return PostgresRunLedger(_pool_for(settings))
+    return SqliteRunLedger(settings.run_table_db)
+
+
 def setup_database(settings: Settings) -> None:
-    """Create or migrate the checkpoint and Store tables. Idempotent.
+    """Create or migrate the checkpoint, Store and run tables. Idempotent.
 
     What ``grant-writer db-setup`` runs, once per deploy, before any graph is
     built against the database. Both `setup()`s apply only migrations not yet
-    recorded, so running it on every deploy is safe and is the intended use.
+    recorded, and the run table is `CREATE ... IF NOT EXISTS`, so running it
+    on every deploy is safe and is the intended use.
     """
     if settings.database_url is None:
         raise ValueError("DATABASE_URL is not set; there is no database to set up.")
@@ -205,6 +220,7 @@ def setup_database(settings: Settings) -> None:
     pool = _pool_for(settings)
     PostgresSaver(pool).setup()
     PostgresStore(pool).setup()
+    PostgresRunLedger(pool).setup()
 
 
 def build_agent(settings: Settings | None = None):

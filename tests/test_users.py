@@ -327,8 +327,27 @@ def _app_test(monkeypatch, user: str | None):
 
     streamlit.cache_resource.clear()
     monkeypatch.setattr("grant_writer.config.require_api_keys", lambda **_kwargs: [])
-    monkeypatch.setattr("grant_writer.identity.current_user", lambda: user)
+    monkeypatch.setattr("grant_writer.identity.current_user", lambda *_: user)
+    # Signed in forces `server` (`identity.profile_for`), which would hide the
+    # disk this file exists to prove is per-user: the real-disk tools and the
+    # `@<user>/` directories still separate users under any profile, and
+    # these cases were mutation-checked against exactly those routes. So the
+    # choice is passed through here, and `test_sign_in.py` pins the forcing.
+    monkeypatch.setattr("grant_writer.identity.profile_for", lambda _u, chosen: chosen)
+    # And a signed-in turn claims a run-table slot (invariant 26). Never the
+    # project's own `.grant_writer/runs.sqlite`, which is the developer's.
+    monkeypatch.setattr("grant_writer.agent.build_run_ledger", lambda _s: _NoLimits())
     return AppTest.from_file(str(PROJECT_ROOT / "streamlit_app.py"), default_timeout=60)
+
+
+class _NoLimits:
+    """A run table that admits every turn and records nothing."""
+
+    def begin(self, **_kwargs):
+        return "run"
+
+    def finish(self, *_args, **_kwargs):
+        return None
 
 
 class _Checkpoints:

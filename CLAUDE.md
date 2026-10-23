@@ -122,6 +122,7 @@ opportunities.py ─→ prompts.py, workspace.py, cli.py ───────�
 config.py  →  solicitation.py  ─────────────────────────────────→  cli.py, streamlit_app.py
               activity.py, workspace.py, identity.py  ─────────────────────↗  streamlit_app.py
 activity.py ─→ refusals.py ─→ subagents.py, agent.py
+runs.py ─→ agent.py ─────────────────────────────────────────────────↗  streamlit_app.py
 ```
 
 **`opportunities.py`** is a pure leaf — the fit rubric, the grammar a scout writes, the parser, and
@@ -139,8 +140,9 @@ was duplicated logic waiting to happen:
 - **`activity.py`** parses the `stream_mode="updates"` chunks and builds the approval decisions.
   A renamed `deepagents` key blanks a frontend's labels silently; a decision list whose length
   disagrees with the interrupted calls leaves the graph stuck with no exception raised. Like
-  `opportunities.py` it imports nothing from the package — the four leaves in the diagram above
-  are `config.py`, `opportunities.py`, `identity.py` (invariant 23), and this. It also owns the declined-reply sentence that
+  `opportunities.py` it imports nothing from the package — the five leaves in the diagram above
+  are `config.py`, `opportunities.py`, `identity.py` (invariants 23 and 26; its one `config`
+  import is under `TYPE_CHECKING`), `runs.py` (invariant 26), and this. It also owns the declined-reply sentence that
   `refusals.py` writes into the graph (invariant 21), which is the one arrow running from it
   back toward the agent: a leaf can be imported by both sides, so the format has one home.
 - **`workspace.py`** reads an application directory back — file listing, `[NEEDS INPUT]` count,
@@ -586,8 +588,8 @@ runs, and still produces plausible output.
     The fix is the same construction: `config.user_thread_id` prefixes `user:<id>:`, and
     `_SAFE_ID` forbids `:` in user ids and application ids alike, so no typed id can spell
     another user's thread; it composes with `discovery_thread_id`. `None` is single-user and
-    returns the id unchanged — the CLI always passes it (decision 9) and the UI does until
-    sign-in, so existing checkpoints resume and UI↔CLI continuity holds.
+    returns the id unchanged — the CLI always passes it (decision 9) and the UI does whenever
+    no `[auth]` is configured, so existing checkpoints resume and UI↔CLI continuity holds.
 
     Thread ids alone would have left the disk shared, since `applications/` and
     `opportunities/` are written past the permission rules (invariant 2): user B's scan `x`
@@ -606,8 +608,8 @@ runs, and still produces plausible output.
     than a script function only because AppTest cannot patch a function the script redefines
     each run. Every thread id — `_active_thread_id`, `parked_state` (which takes the
     application id and applies the user itself, so neither caller can hand it a bare id) — and
-    every directory goes through it. When sign-in fills it, the id must come only from the
-    provider's verified session, never from anything the client can set.
+    every directory goes through it. Sign-in now fills it from `st.user`, the provider's
+    verified claims and nothing the client can set; see invariant 26.
     `tests/test_users.py` impersonates two users through every entry point — run form,
     follow-up, approval panel, file browser and picker — and each case was mutation-checked
     against reverting one of those routes to the bare id.
@@ -653,6 +655,45 @@ runs, and still produces plausible output.
     permission rules as the only route to it — a real-disk writer allowed `memories/` would
     route around this gate entirely (invariant 2).
 
+26. **A signed-in turn starts only through one limit check, and every way that check can fail
+    refuses the turn.** Sign-in is Streamlit's OIDC (`st.login`, decision 14), and
+    `identity.current_user(st.user)` turns its three states into one answer: no
+    `is_logged_in` key (no `[auth]`) is single-user `None`; anything but a literal `True`
+    **raises** `NotSignedIn`, because returning `None` there would put an unauthenticated
+    visitor in the shared tree with no budget; `True` is `u` + a digest of `iss` and `sub` —
+    pseudonymous (E2 finding 3), stable where an email is not, and inside `_SAFE_ID`. The
+    page's gate draws only the sign-in prompt on `NotSignedIn`, and refuses to run at all
+    with `DATABASE_URL` set and no sign-in: decision 18's rule for the UI. Signed in, the
+    profile is always `server` (`identity.profile_for`, the one place that decides), since
+    `local` writes every user's drafts into one tree.
+
+    The limits (decision 13: estimated USD per user per UTC day, and runs in flight across
+    the deployment) are checked in the **run block**, not in the handlers, because that is
+    where the two forms, the follow-up box and the approval panel all meet; gating each
+    handler is how one gets missed. `runs.RunLedger.begin` checks both and inserts the run
+    in **one locked transaction** (`BEGIN IMMEDIATE`, or a Postgres advisory lock), so
+    concurrent sessions cannot all see two runs and start a third. A `LimitReached` and a
+    ledger that raised are both refusals — unknown cannot have passed, the `parked_state`
+    rule — and a refused **resume** returns to AWAITING, not FAILED, because FAILED's banner
+    invites a fresh brief over the committed interrupt (invariant 11). A refused follow-up
+    is popped from the feed: it was never sent.
+
+    Cost is metered by `runs.UsageMeter` in the turn's `callbacks`, which LangChain carries
+    into the subagents a `task` call runs; their messages never reach the stream, so a
+    meter fed from the stream would miss most of a draft. `input_tokens` already includes
+    cache reads and writes, so they are subtracted before the input rate applies. An
+    unknown model id is priced as the dearest known one, so a rename tightens the cap
+    rather than switching it off. The callback is attached **only** to a metered turn, so a
+    single-user turn's config stays key-for-key the CLI's (§⑥). The run table holds who,
+    which thread, which graph, when, how it ended, tokens, searches and cost, and **no
+    content**: it is the record that outlives E7's tracing decision, and
+    `test_the_run_table_holds_no_content` makes a new column argue for itself. It is never
+    in memory, since a limit that resets with the process is not one: Postgres on the
+    shared pool when `DATABASE_URL` is set (created by `db-setup`), otherwise
+    `.grant_writer/runs.sqlite`. `finish` runs in a `finally`, so a Streamlit Stop is
+    recorded as `stopped`; a process that dies mid-turn holds its slot for
+    `runs.STALE_AFTER_S` and no longer.
+
 ## Backend profiles
 
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files
@@ -677,6 +718,8 @@ With `DATABASE_URL` set, `draft`, `chat` and `discover` **refuse to run** unless
 `--operator`, and log the override at WARNING (decision 18). The CLI has no sign-in and
 unprefixed thread ids (decision 9), so against the shared database it would reach any thread at
 all. `db-setup` is exempt: it is the deploy step that needs the URL, and it touches no thread.
+The UI has the matching rule: with `DATABASE_URL` set and no `[auth]`, it refuses to start
+(invariant 26). Signed in, it always builds `server`.
 
 ## Testing conventions
 
@@ -688,7 +731,11 @@ developer's real key straight back and the suite behaved one way locally and ano
 checkout. Every consumer tests it with `if not os.getenv(...)`, so an empty string reads as absent.
 `DATABASE_URL` and the two `GRANT_WRITER_DB_POOL_*` sizes are blanked the same way: the AppTest
 cases build on `persistent_settings`, so a developer's URL would aim the offline suite at a real
-Postgres. `tests/test_database.py` pins the Postgres wiring with the pool's `open()` patched out.
+Postgres. The three limit variables (`GRANT_WRITER_DAILY_BUDGET_USD`,
+`GRANT_WRITER_MAX_CONCURRENT_RUNS`, `GRANT_WRITER_SEARCH_COST_USD`) are blanked for the same reason.
+`tests/test_database.py` pins the Postgres wiring with the pool's `open()` patched out. Any AppTest
+case that signs a user in must patch `agent.build_run_ledger` too, as `tests/test_users.py` and
+`tests/test_sign_in.py` do, or its turns land in the developer's own `.grant_writer/runs.sqlite`.
 Tests that want a key set it with `monkeypatch`.
 
 **Two modules call `load_dotenv()`**, and both reach this suite: `config.py` at import, which every

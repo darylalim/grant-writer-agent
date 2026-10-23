@@ -34,7 +34,7 @@ from grant_writer.activity import (
     iter_activity,
     pending_action_requests,
 )
-from grant_writer.agent import build_agent, build_discovery_agent
+from grant_writer.agent import build_agent, build_discovery_agent, build_run_ledger
 from grant_writer.config import (
     BackendProfile,
     application_dir,
@@ -47,7 +47,7 @@ from grant_writer.config import (
     trace_config,
     user_thread_id,
 )
-from grant_writer.identity import current_user
+from grant_writer.identity import NotSignedIn, current_user, profile_for
 from grant_writer.opportunities import (
     MAX_TOTAL_POINTS,
     Citation,
@@ -55,6 +55,7 @@ from grant_writer.opportunities import (
     rank_opportunities,
 )
 from grant_writer.prompts import discovery_request, draft_request
+from grant_writer.runs import LimitReached, Limits, Outcome, UsageMeter
 from grant_writer.solicitation import (
     MAX_PAGES,
     MAX_UPLOAD_MB,
@@ -76,6 +77,40 @@ st.set_page_config(
     page_icon=":material/history_edu:",
     layout="wide",
 )
+
+# --- Sign-in -----------------------------------------------------------------
+#
+# Before anything else on the page, and before any session state is touched:
+# every thread id and directory below is derived from the user (invariant 23),
+# so nothing may run until it is known. `current_user` reads Streamlit's own
+# three states for `st.user` -- no `[auth]` configured, configured but not
+# signed in, signed in -- and *raises* on the middle one rather than returning
+# the single-user None, so a page that forgot this gate would fail closed.
+#
+# A database with no sign-in is refused outright (decision 13's other half,
+# and the UI's twin of decision 18): `DATABASE_URL` means a shared
+# deployment, where single-user mode would put every visitor in one tree with
+# no budget at all. "No sign-in, no deployment" is enforced here, not hoped.
+try:
+    _session_user = current_user(st.user)
+except NotSignedIn:
+    st.title("Grant writer", anchor=False)
+    st.write("Sign in to draft proposals and find opportunities.")
+    st.button("Sign in", on_click=st.login, type="primary", icon=":material/login:")
+    st.stop()
+except ValueError as exc:
+    st.error(f"Sign-in did not identify you: {exc}.", icon=":material/error:")
+    st.button("Sign out", on_click=st.logout)
+    st.stop()
+if _session_user is None and persistent_settings().database_url is not None:
+    st.error(
+        "This deployment has a shared database but no sign-in, so it will not "
+        "run: anyone with the link could read every thread and spend without a "
+        "limit. Configure `[auth]` in `.streamlit/secrets.toml`, or unset "
+        "`DATABASE_URL` to work locally.",
+        icon=":material/lock:",
+    )
+    st.stop()
 
 # One turn's phases. The CLI runs this as a `while True` loop that blocks on
 # input() when an interrupt arrives (see cli._run); Streamlit reruns the script
@@ -178,17 +213,6 @@ st.session_state.setdefault("active_kind", DRAFT)
 # that brief. Set beside every payload this app queues, except a resume --
 # see `resume_with`.
 st.session_state.setdefault("active_command", "draft")
-# The metadata facets describing the run on that thread: funder and rubric
-# for a draft, focus and agencies for a scan. An `active_*` key, assigned
-# only by the submit handlers, for the reason `active_app_id` is one
-# (invariants 10 and 11) -- the run block builds its trace config while the
-# form widgets are live, so reading them there would label a turn with
-# values nobody submitted, and a follow-up or a post-reload Reject starts a
-# turn with no submit behind it at all. Defaulted here because those paths
-# reach the run block regardless: without it they raise AttributeError
-# inside the run block's `except Exception`, landing on FAILED with the
-# interrupt still committed -- invariant 11's own failure.
-st.session_state.setdefault("active_details", {})
 # The metadata facets describing the run on that thread: funder and rubric
 # for a draft, focus and agencies for a scan. An `active_*` key, assigned
 # only by the submit handlers, for the reason `active_app_id` is one
@@ -319,7 +343,7 @@ def _active_thread_id() -> str:
         thread_id = discovery_thread_id(st.session_state.active_scan_id)
     else:
         thread_id = st.session_state.active_app_id
-    return user_thread_id(current_user(), thread_id)
+    return user_thread_id(current_user(st.user), thread_id)
 
 
 def parked_state(
@@ -356,7 +380,7 @@ def parked_state(
     """
     try:
         agent = get_agent(profile, approve, search)
-        thread_id = user_thread_id(current_user(), app_id)
+        thread_id = user_thread_id(current_user(st.user), app_id)
         return is_parked(agent, {"configurable": {"thread_id": thread_id}}), ""
     except Exception as exc:  # noqa: BLE001 - the caller refuses the turn
         return None, f"{type(exc).__name__}: {exc}"
@@ -955,16 +979,31 @@ with st.sidebar:
     # list it with `on_change` and `label_visibility` as excluded. The keys are
     # what makes the whole set safe to gate rather than a fact about 1.60 that
     # a later parameter change could take back.
-    profile = st.selectbox(
-        "Backend profile",
-        ("local", "server"),
-        key="profile_select",
-        disabled=turn_locked,
-        help=(
-            "`local` writes real files under `applications/`. `server` keeps "
-            "drafts in ephemeral graph state, so the file browser stays empty."
-        ),
-    )
+    # Signed in, there is no choice to offer: `local` would write every
+    # user's drafts into one shared tree (see `identity.profile_for`), so the
+    # selectbox is not drawn at all rather than drawn disabled on a value the
+    # run would not use.
+    if _session_user is None:
+        chosen_profile = st.selectbox(
+            "Backend profile",
+            ("local", "server"),
+            key="profile_select",
+            disabled=turn_locked,
+            help=(
+                "`local` writes real files under `applications/`. `server` keeps "
+                "drafts in ephemeral graph state, so the file browser stays empty."
+            ),
+        )
+    else:
+        # Not "server" here: `profile_for` is the one place that decides, and
+        # a second literal is a second decider to fall out of step with it.
+        chosen_profile = "local"
+    profile = profile_for(current_user(st.user), chosen_profile)
+    if _session_user is not None:
+        st.caption(
+            f"Backend profile: `{profile}`, which every signed-in session uses. "
+            "Drafts live in the run's own state, so the file browser stays empty."
+        )
     # The CLI defaults --approve off; a UI where approving is one click has no
     # reason to. Every write under final/ is submission-bound, and the whole
     # point of the narrow rule is that you actually read the ones you get.
@@ -994,10 +1033,19 @@ with st.sidebar:
         disabled=turn_locked,
         help="Maximum graph steps per turn.",
     )
-    st.caption(
-        "Drafts land in `applications/<app-id>/`. State persists to "
-        "`.grant_writer/checkpoints.sqlite`, shared with the CLI."
-    )
+    if _session_user is None:
+        st.caption(
+            "Drafts land in `applications/<app-id>/`. State persists to "
+            "`.grant_writer/checkpoints.sqlite`, shared with the CLI."
+        )
+    else:
+        # `st.text`, not a caption: the address is the provider's, and a
+        # caption would render any markdown in it.
+        st.text(f"Signed in as {st.user.get('email') or st.user.get('name') or 'you'}")
+        # Gated on `busy` like every widget, since touching one mid-stream
+        # aborts the turn; not on AWAITING, where the pending write is safe in
+        # the checkpoint and signing out starts nothing.
+        st.button("Sign out", on_click=st.logout, disabled=busy, key="sign_out")
 
 # Value-equal to the Settings inside `get_agent` -- same function, same args --
 # but built here without constructing any models, so paths are available before
@@ -1017,13 +1065,17 @@ settings = persistent_settings(
 # refusing. Disk is not the source of truth in that profile, so it is not
 # offered as one.
 existing_ids = (
-    application_ids(settings, user_id=current_user()) if profile == "local" else []
+    application_ids(settings, user_id=current_user(st.user))
+    if profile == "local"
+    else []
 )
 # The scan-side counterpart, gated on the profile for the same reason: under
 # `server` a scan's files live in ephemeral graph state, so a picker over disk
 # would offer reads it structurally cannot perform.
 existing_scan_ids = (
-    opportunity_scan_ids(settings, user_id=current_user()) if profile == "local" else []
+    opportunity_scan_ids(settings, user_id=current_user(st.user))
+    if profile == "local"
+    else []
 )
 
 # --- Header and run form -----------------------------------------------------
@@ -1301,7 +1353,7 @@ if discover_submitted:
         # an application id: this id names a directory the shortlist below
         # joins onto a real path, and pathlib discards the base for an absolute
         # right operand.
-        opportunities_dir(settings, scan_id, user_id=current_user())
+        opportunities_dir(settings, scan_id, user_id=current_user(st.user))
     except ValueError as exc:
         st.session_state.error = str(exc)
         st.session_state.phase = FAILED
@@ -1325,10 +1377,6 @@ if discover_submitted:
         st.session_state.active_scan_id = scan_id
         st.session_state.active_kind = DISCOVER
         st.session_state.active_command = "discover"
-        st.session_state.active_details = {
-            "focus": focus.strip(),
-            "agencies": agencies.strip(),
-        }
         st.session_state.active_details = {
             "focus": focus.strip(),
             "agencies": agencies.strip(),
@@ -1362,7 +1410,7 @@ if submitted:
         # `application_dir` is the boundary. Joining the raw id would escape
         # `applications/` outright: pathlib discards the left operand for an
         # absolute right one, so an id of "/Users/me/.ssh" writes there.
-        application_dir(settings, app_id, user_id=current_user())
+        application_dir(settings, app_id, user_id=current_user(st.user))
 
         # Ask the graph, not the phase. `turn_locked` greys this button out
         # whenever *this* session remembers parking on an interrupt, but that
@@ -1445,7 +1493,7 @@ if submitted:
             with st.spinner(f"Reading {filename}…"):
                 text = extract_solicitation(rfp.getvalue(), filename)
             preload = preload_solicitation(
-                settings, app_id, text, user_id=current_user()
+                settings, app_id, text, user_id=current_user(st.user)
             )
 
         payload: dict[str, Any] = {
@@ -1643,62 +1691,155 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
     turn_payload = st.session_state.payload
     # Consume before running: a crash must not leave a payload that replays.
     st.session_state.payload = None
+    # A resume is the parked turn continuing; anything else starts one. The
+    # difference decides where a refusal below lands.
+    resuming = isinstance(turn_payload, Command)
+    run_user = current_user(st.user)
     with feed, st.spinner("Agent is working…", show_time=True):
+        # The limits (invariant 26), checked here and nowhere else because this
+        # is where every way of starting a turn meets: the two forms, the
+        # follow-up box, and Approve or Reject on the panel. Gating each
+        # handler instead is how one of them would be missed. Server-side by
+        # construction -- a Streamlit script runs on the server, and the slot
+        # is claimed in the same locked transaction that checks it.
+        #
+        # Signed-in sessions only. A single-user app spends its owner's own
+        # key, and a shared database without sign-in never gets this far.
+        run_id: str | None = None
+        refused = ""
+        if run_user is not None:
+            try:
+                ledger = build_run_ledger(settings)
+                run_id = ledger.begin(
+                    user_id=run_user,
+                    thread_id=_active_thread_id(),
+                    kind="discover" if active_discovering else "draft",
+                    limits=Limits(
+                        daily_budget_usd=settings.daily_budget_usd,
+                        max_concurrent_runs=settings.max_concurrent_runs,
+                    ),
+                )
+            except LimitReached as exc:
+                refused = str(exc)
+            except Exception as exc:  # noqa: BLE001 - unknown is refused
+                # The same rule `parked_state` keeps: a check that could not be
+                # read cannot be taken to have passed, so the turn is refused
+                # rather than run unmetered.
+                refused = (
+                    f"Could not check this deployment's limits "
+                    f"({type(exc).__name__}: {exc}). Nothing was started; try "
+                    "again shortly."
+                )
+        if refused:
+            st.session_state.error = refused
+            if resuming:
+                # Back to the panel, not FAILED: the interrupt is still
+                # committed, the panel is the way out of it, and FAILED's banner
+                # would invite a fresh brief over it (invariant 11). The
+                # decision can be sent again once a slot or the budget frees.
+                st.session_state.phase = AWAITING
+            else:
+                # The follow-up box echoed its message into the feed before
+                # this pass; it was never sent, so it must not read as one the
+                # agent is answering.
+                if st.session_state.activity and (
+                    st.session_state.activity[-1].kind == PROMPT
+                ):
+                    st.session_state.activity.pop()
+                st.session_state.phase = FAILED
+            st.rerun()
+        meter = UsageMeter(search_cost_usd=settings.search_cost_usd)
+        first_event = len(st.session_state.activity)
+        # What the record says if nothing below assigns it: the turn was
+        # aborted by Streamlit's Stop or a widget, which arrive as
+        # BaseException and skip both handlers but not the `finally`.
+        outcome: Outcome = "stopped"
         try:
-            # `get_agent` inside the try, the third site to need it and the one
-            # that had it outside: it builds models and opens the SQLite
-            # connection, so a read-only `.grant_writer/` or a dropped key
-            # raises here rather than in `stream_turn`. That mattered most on
-            # the path the blind approval panel opens. AWAITING has no enabled
-            # way out but that panel, its Reject needs no readable request to
-            # send -- and Reject lands *here*, phase already RUNNING with the
-            # payload consumed. Outside the try the raise escaped as a
-            # traceback, the resume Command was gone, and the next pass
-            # inferred STOPPED, whose banner invites re-submitting the same id
-            # over an interrupt still sitting in the checkpoint: the exact
-            # abandonment invariant 11 exists to prevent, reached through the
-            # one control that was supposed to be the way out.
-            # Which builder, decided by the turn's own kind rather than by
-            # which id happens to be set: both can be set at once, since
-            # browsing a scan does not clear the application that last ran.
-            builder = (
-                get_discovery_agent
-                if st.session_state.active_kind == DISCOVER
-                else get_agent
-            )
-            agent = builder(profile, approve, search)
-            # The module-level `settings`, not a second call: built from the
-            # same three flags `get_agent` is keyed on, in this same pass --
-            # the sidebar assigns those three exactly once, above it, and
-            # nothing rebinds them -- so the tags still describe the graph
-            # that actually ran rather than whatever the sidebar shows by the
-            # time anyone reads the trace. Rebuilding it here was a second
-            # copy of that derivation, and a fourth flag reaching one call
-            # site and not the other would label the run under settings no
-            # graph was ever built with.
-            # `active_discovering` and `active_ref` are this pass's own
-            # values, the same pair the banners below read -- a third copy
-            # of that expression is how the run and the page start
-            # disagreeing about which id is on screen.
-            config = trace_config(
-                settings,
-                command=st.session_state.active_command,
-                frontend="ui",
-                ref=active_ref,
-                thread_id=_active_thread_id(),
-                recursion_limit=int(recursion_limit),
-                details={
-                    ("scan_id" if active_discovering else "app_id"): active_ref,
-                    # The id first, so a stale stash cannot shadow it.
-                    **st.session_state.active_details,
-                },
-            )
-            interrupted = stream_turn(agent, turn_payload, config)
-        except Exception as exc:  # noqa: BLE001 - surface anything to the user
-            st.session_state.error = f"{type(exc).__name__}: {exc}"
-            st.session_state.phase = FAILED
-        else:
-            st.session_state.phase = AWAITING if interrupted else DONE
+            try:
+                # `get_agent` inside the try, the third site to need it and the one
+                # that had it outside: it builds models and opens the SQLite
+                # connection, so a read-only `.grant_writer/` or a dropped key
+                # raises here rather than in `stream_turn`. That mattered most on
+                # the path the blind approval panel opens. AWAITING has no enabled
+                # way out but that panel, its Reject needs no readable request to
+                # send -- and Reject lands *here*, phase already RUNNING with the
+                # payload consumed. Outside the try the raise escaped as a
+                # traceback, the resume Command was gone, and the next pass
+                # inferred STOPPED, whose banner invites re-submitting the same id
+                # over an interrupt still sitting in the checkpoint: the exact
+                # abandonment invariant 11 exists to prevent, reached through the
+                # one control that was supposed to be the way out.
+                # Which builder, decided by the turn's own kind rather than by
+                # which id happens to be set: both can be set at once, since
+                # browsing a scan does not clear the application that last ran.
+                builder = (
+                    get_discovery_agent
+                    if st.session_state.active_kind == DISCOVER
+                    else get_agent
+                )
+                agent = builder(profile, approve, search)
+                # The module-level `settings`, not a second call: built from the
+                # same three flags `get_agent` is keyed on, in this same pass --
+                # the sidebar assigns those three exactly once, above it, and
+                # nothing rebinds them -- so the tags still describe the graph
+                # that actually ran rather than whatever the sidebar shows by the
+                # time anyone reads the trace. Rebuilding it here was a second
+                # copy of that derivation, and a fourth flag reaching one call
+                # site and not the other would label the run under settings no
+                # graph was ever built with.
+                # `active_discovering` and `active_ref` are this pass's own
+                # values, the same pair the banners below read -- a third copy
+                # of that expression is how the run and the page start
+                # disagreeing about which id is on screen.
+                config = trace_config(
+                    settings,
+                    command=st.session_state.active_command,
+                    frontend="ui",
+                    ref=active_ref,
+                    thread_id=_active_thread_id(),
+                    recursion_limit=int(recursion_limit),
+                    details={
+                        ("scan_id" if active_discovering else "app_id"): active_ref,
+                        # The id first, so a stale stash cannot shadow it.
+                        **st.session_state.active_details,
+                    },
+                )
+                # Every model call in the turn, subagents' included, reports
+                # its usage here; see `runs.UsageMeter`. Only on a metered run:
+                # unsigned, the config stays exactly the one `cli._draft`
+                # builds, which `test_frontends.py` pins key for key.
+                if run_id is not None:
+                    config["callbacks"] = [meter]
+                interrupted = stream_turn(agent, turn_payload, config)
+            except Exception as exc:  # noqa: BLE001 - surface anything to the user
+                outcome = "failed"
+                st.session_state.error = f"{type(exc).__name__}: {exc}"
+                st.session_state.phase = FAILED
+            else:
+                declined = any(
+                    event.kind == DECLINED
+                    for event in st.session_state.activity[first_event:]
+                )
+                outcome = (
+                    "parked" if interrupted else "refused" if declined else "completed"
+                )
+                st.session_state.phase = AWAITING if interrupted else DONE
+        finally:
+            if run_id is not None:
+                try:
+                    build_run_ledger(settings).finish(run_id, outcome, meter)
+                except Exception as exc:  # noqa: BLE001 - the turn itself is done
+                    # The run stays counted as in flight until it goes stale,
+                    # and its spend is missing from today's total -- worth
+                    # saying, never worth losing the turn's own result over.
+                    st.session_state.error = (
+                        f"{st.session_state.error}\n\n"
+                        if st.session_state.error
+                        else ""
+                    ) + (
+                        f"This run's usage could not be recorded "
+                        f"({type(exc).__name__}: {exc})."
+                    )
     # Redraw now that the phase is terminal. The form above was drawn from
     # `busy` at the top of this pass -- disabled, correctly, since the turn was
     # about to stream -- and nothing else would rerun to re-enable it. Skipping
@@ -1802,7 +1943,7 @@ with discovery_slot:
             # lists the repo root, and `render_file`'s download branch would
             # hand `.env` -- live API keys -- to the browser.
             scan_dir = opportunities_dir(
-                settings, browse_scan_id, user_id=current_user()
+                settings, browse_scan_id, user_id=current_user(st.user)
             )
         except ValueError as exc:
             st.warning(str(exc), icon=":material/warning:")
@@ -1894,7 +2035,9 @@ with results_slot:
             # Same boundary as the write side, and it matters more here: without
             # it an id of ".." lists the repo root, and the download branch
             # below would hand `.env` -- live API keys -- to the browser.
-            app_dir = application_dir(settings, browse_id, user_id=current_user())
+            app_dir = application_dir(
+                settings, browse_id, user_id=current_user(st.user)
+            )
         except ValueError as exc:
             st.warning(str(exc), icon=":material/warning:")
         else:
