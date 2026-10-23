@@ -198,6 +198,21 @@ st.session_state.setdefault("error", "")
 # interrupt gets its own. See `resume_with`.
 st.session_state.setdefault("approval_round", 0)
 
+# The one height every scroll box derives from: the activity feed, the file
+# browser, and the PDF viewer inside it. Streamlit has no viewport API, so
+# the reader picks -- a fixed 480 overran a 768px laptop screen, and wasted a
+# tall monitor. Comfortable is the height the page had before this existed,
+# and each offset below keeps that old relationship, so the default page
+# looks exactly as it did.
+PANE_HEIGHTS = {"Compact": 320, "Comfortable": 480, "Tall": 720}
+st.session_state.setdefault("pane_height", "Comfortable")
+
+
+def pane_height(offset: int = 0) -> int:
+    """The chosen pane height in pixels, less `offset`."""
+    return PANE_HEIGHTS[st.session_state.pane_height] - offset
+
+
 # A script run that is stopped mid-stream -- the toolbar's Stop button, or any
 # widget interaction, which aborts the current pass at the next element call --
 # leaves `phase` at RUNNING with its payload already consumed. Streamlit raises
@@ -794,7 +809,9 @@ def render_file(path: Path) -> None:
         return
 
     if suffix == ".pdf":
-        st.pdf(blob, height=430)
+        # 50 under the box that holds it, so the viewer's own toolbar fits
+        # without the box scrolling as well.
+        st.pdf(blob, height=pane_height(50))
         return
 
     if suffix != ".md" and suffix not in CODE_LANGUAGES:
@@ -881,11 +898,11 @@ def file_browser(app_dir: Path, files: list[Path], gaps: int, verdict: str) -> N
 
     names = [str(path.relative_to(app_dir)) for path in files]
     picker_col, content_col = st.columns([1, 2], vertical_alignment="top")
-    with picker_col, st.container(height=480, border=True):
+    with picker_col, st.container(height=pane_height(), border=True):
         selected = st.radio(
             "File", names, key="file_pick", label_visibility="collapsed"
         )
-    with content_col, st.container(height=480, border=True):
+    with content_col, st.container(height=pane_height(), border=True):
         render_file(app_dir / selected)
 
 
@@ -974,7 +991,27 @@ existing_scan_ids = opportunity_scan_ids(settings) if profile == "local" else []
 
 # --- Header and run form -----------------------------------------------------
 
-st.title("Grant writer", anchor=False)
+with st.container(
+    horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"
+):
+    st.title("Grant writer", anchor=False)
+    # Here rather than in the sidebar, which is hidden on a phone and locked
+    # whole on AWAITING. This is a display preference, not a run setting: it
+    # starts no turn, so it is not gated on `turn_locked` and stays usable
+    # while an approval waits -- when reading a long `final/` write in a
+    # taller pane is the point. It is still gated on `busy`, like every
+    # widget on the page, because touching one mid-stream aborts the turn.
+    # Not part of `get_agent`'s key: it changes no graph. A text label beside
+    # the icon, so a screen reader announces more than the icon's name.
+    with st.popover("Display", icon=":material/tune:"):
+        st.segmented_control(
+            "Pane height",
+            tuple(PANE_HEIGHTS),
+            required=True,
+            key="pane_height",
+            disabled=busy,
+            help="Height of the activity feed and the file panes.",
+        )
 st.caption(
     "Turns a solicitation into a compliant proposal draft. It drafts; it does "
     "not submit. Every output needs human review before it goes to a funder."
@@ -1397,7 +1434,9 @@ active_noun = "scan" if active_discovering else "application"
 
 with activity_slot:
     st.subheader("Activity", anchor=False)
-    feed = st.container(height=440, border=True, autoscroll=True)
+    # 40 under the file panes, as it always was: the follow-up input and its
+    # caption sit under it, and the two together come to about one pane.
+    feed = st.container(height=pane_height(40), border=True, autoscroll=True)
     with feed:
         render_feed(st.session_state.activity)
         # AWAITING is excluded, not just RUNNING. The reload-recovery path lands

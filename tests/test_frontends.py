@@ -443,6 +443,16 @@ def _button(app, label: str):
     return next(button for button in app.button if button.label == label)
 
 
+def _view_controls(app):
+    """The Source/Rendered toggles, and not the page's other segmented controls.
+
+    `_button`'s argument again: counting `app.segmented_control` was a claim
+    about every such control on the page, and the Display popover's Pane height
+    control broke three cases that only meant the file views.
+    """
+    return [control for control in app.segmented_control if control.label == "View"]
+
+
 def _unparked(_config):
     """`get_state` for a thread with nothing pending.
 
@@ -1341,6 +1351,64 @@ def test_the_sidebar_is_frozen_while_a_turn_is_in_flight(monkeypatch):
     # Still holding what was chosen, not the defaults.
     assert app.selectbox(key="profile_select").value == "server"
     assert app.toggle(key="search_toggle").value is False
+    # The Display popover is gated on `busy` too: a display preference, but
+    # a widget all the same, and touching one mid-stream aborts the turn.
+    assert app.segmented_control(key="pane_height").disabled
+
+
+def _pixel_heights(app) -> list[int]:
+    """Every fixed-height container on the page, in tree order."""
+    found = []
+
+    def walk(node):
+        proto = getattr(node, "proto", None)
+        config = getattr(proto, "height_config", None)
+        if config is not None and config.pixel_height:
+            found.append(config.pixel_height)
+        for child in getattr(node, "children", {}).values():
+            walk(child)
+
+    walk(app._tree)
+    return found
+
+
+def test_every_scroll_box_follows_the_pane_height(application_with_drafts):
+    """The feed and both file panes derive from one control, and the default
+    is the page as it was before the control existed: 440 for the feed, 480
+    for the panes. A box left on a literal would silently ignore the choice."""
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.run()
+    assert not app.exception
+    assert sorted(_pixel_heights(app)) == [440, 480, 480]
+
+    app.segmented_control(key="pane_height").set_value("Tall").run()
+    assert sorted(_pixel_heights(app)) == [680, 720, 720]
+
+    app.segmented_control(key="pane_height").set_value("Compact").run()
+    assert sorted(_pixel_heights(app)) == [280, 320, 320]
+
+
+def test_the_pane_height_stays_usable_while_an_approval_waits(monkeypatch):
+    """Display is not a run setting, so it is not behind `turn_locked`: on
+    AWAITING a taller pane is how a long `final/` write gets read. Changing it
+    there must neither start a turn nor drop the panel."""
+    agent = _parked_agent("/applications/zz-pytest-display/final/need.md")
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-display"
+    app.run()
+
+    control = app.segmented_control(key="pane_height")
+    assert not control.disabled
+    control.set_value("Tall").run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "awaiting"
+    assert "Approval required" in {sub.value for sub in app.subheader}
 
 
 def test_the_approval_preview_can_still_be_read_as_prose(monkeypatch):
@@ -1940,7 +2008,7 @@ def test_the_case_insensitive_suffix_reaches_the_text_branches_too(
     app.radio(key="file_pick").set_value("NARRATIVE.MD").run()
     assert not app.exception
     # Markdown, so it gets the Source/Rendered control and no download.
-    assert len(app.segmented_control) == 1
+    assert len(_view_controls(app)) == 1
     assert not app.download_button
     assert "the deadline" in " ".join(block.value for block in app.markdown)
 
@@ -1986,7 +2054,7 @@ def test_the_view_toggles_cannot_be_deselected(application_with_drafts):
     app.run()
 
     app.radio(key="file_pick").set_value("sections/need.md").run()
-    (control,) = app.segmented_control
+    (control,) = _view_controls(app)
     assert control.value == "Rendered"
     # `required` is what the widget carries; deselection is a frontend gesture
     # AppTest cannot make, so the flag itself is the thing to pin.
@@ -2007,7 +2075,7 @@ def test_the_approval_view_toggle_cannot_be_deselected(monkeypatch):
     app.session_state["active_app_id"] = "zz-pytest-view"
     app.run()
 
-    (control,) = app.segmented_control
+    (control,) = _view_controls(app)
     assert control.proto.required, "the approval view toggle is deselectable"
 
 
