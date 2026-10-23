@@ -1191,7 +1191,7 @@ def test_the_approval_panel_comes_before_everything_it_locks(monkeypatch):
     phone, and last in keyboard order.
 
     Order is the point here, so this one case asserts on it deliberately --
-    by heading text, which a layout change cannot silently retarget."""
+    by what each node *is*, which a layout change cannot silently retarget."""
     requests = [
         {
             "name": "write_file",
@@ -1216,10 +1216,93 @@ def test_the_approval_panel_comes_before_everything_it_locks(monkeypatch):
     app.run()
 
     assert not app.exception
-    headings = [sub.value for sub in app.subheader]
-    first = headings.index("Approval required")
-    for later in ("Find opportunities", "Draft a proposal", "Activity"):
-        assert first < headings.index(later), later
+    order = _tree_order(app)
+    panel = next(
+        i
+        for i, node in enumerate(order)
+        if getattr(node, "value", None) == "Approval required"
+    )
+    # Both run forms live in the tabs, so one index covers both of them.
+    tabs = next(i for i, node in enumerate(order) if _is_tab_container(node))
+    feed = next(
+        i for i, node in enumerate(order) if getattr(node, "value", None) == "Activity"
+    )
+    assert panel < tabs < feed
+
+
+def _tree_order(app) -> list:
+    """Every node on the page, depth first -- the order the browser draws."""
+    nodes = []
+
+    def walk(node):
+        nodes.append(node)
+        for child in getattr(node, "children", {}).values():
+            walk(child)
+
+    walk(app._tree)
+    return nodes
+
+
+def _is_tab_container(node) -> bool:
+    # Elements carry their own message types; only a block can be a container.
+    proto = getattr(node, "proto", None)
+    return (
+        type(node).__name__ == "Block"
+        and proto is not None
+        and proto.HasField("tab_container")
+    )
+
+
+def _tab(app, label: str):
+    """A workflow tab by its label, as `_button` selects a button."""
+    return next(tab for tab in app.tabs if tab.label == label)
+
+
+def test_each_workflow_tab_holds_its_own_form(monkeypatch):
+    """One workflow on screen at a time: each tab carries its form, its id
+    box, and nothing of the other's. A control drawn into the wrong tab still
+    works -- it is just under the wrong heading, which for a billed button is
+    the expensive kind of wrong.
+
+    Pins invariant 10.
+    The id boxes moved into tabs, and stay outside `st.form` there."""
+    app = _app_test(monkeypatch)
+    app.run()
+    assert not app.exception
+
+    discover, draft = _tab(app, "Find opportunities"), _tab(app, "Draft a proposal")
+    assert {b.label for b in discover.button} >= {"Find opportunities"}
+    assert "Draft proposal" not in {b.label for b in discover.button}
+    assert {b.label for b in draft.button} >= {"Draft proposal"}
+    assert "Find opportunities" not in {b.label for b in draft.button}
+
+    assert [box.key for box in discover.text_input if box.key] == ["scan_id_input"]
+    assert [box.key for box in draft.text_input if box.key] == ["app_id_input"]
+    for box in (
+        app.text_input(key="scan_id_input"),
+        app.text_input(key="app_id_input"),
+    ):
+        assert not box.form_id, f"{box.key} is inside a form"
+
+    # The feed belongs to whichever run is active, so it is in neither tab.
+    for tab in (discover, draft):
+        assert "Activity" not in {sub.value for sub in tab.subheader}
+    assert "Activity" in {sub.value for sub in app.subheader}
+
+
+def test_the_tab_opens_on_the_workflow_of_the_last_run(monkeypatch):
+    """A fresh session -- a reload recovering a run, most of all -- lands on
+    the tab of the run it last started, not always on the first one, so the
+    form and results beside the feed are that run's."""
+    app = _app_test(monkeypatch)
+    app.run()
+    container = next(node for node in _tree_order(app) if _is_tab_container(node))
+    assert container.proto.tab_container.default_tab_index == 1  # drafting
+
+    app.session_state["active_kind"] = "discover"
+    app.run()
+    container = next(node for node in _tree_order(app) if _is_tab_container(node))
+    assert container.proto.tab_container.default_tab_index == 0
 
 
 def test_the_approval_caption_names_a_pending_delete(monkeypatch):
