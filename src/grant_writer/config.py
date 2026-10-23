@@ -102,6 +102,17 @@ DISCOVERY_EFFORT = os.getenv(
     "GRANT_WRITER_DISCOVERY_EFFORT", DEFAULT_EFFORT["discovery"]
 )
 
+# A deployment's database. Unprefixed because hosting platforms inject exactly
+# this name when they attach a managed Postgres. Read only by
+# `persistent_settings`, so `Settings()` built directly (tests, library use)
+# never reaches a database because of the shell it happens to run in. `or
+# None` because an empty value means unset, as it does for every key here.
+DATABASE_URL = os.getenv("DATABASE_URL") or None
+# Parsed here rather than defaulted on a bad value: a typo should stop the
+# process at import, not quietly run a deployment on a pool nobody sized.
+DB_POOL_MAX_SIZE = int(os.getenv("GRANT_WRITER_DB_POOL_MAX_SIZE") or 10)
+DB_POOL_TIMEOUT = float(os.getenv("GRANT_WRITER_DB_POOL_TIMEOUT") or 30)
+
 
 def build_model(spec: str, *, effort: str) -> BaseChatModel:
     """Resolve a `provider:model` spec into a chat model with a real ceiling.
@@ -206,6 +217,20 @@ class Settings:
     """When set, the agent persists its checkpoint to this SQLite file so
     conversation and todos survive across separate processes. ``None`` uses an
     in-memory checkpointer (tests, and library-default behaviour)."""
+
+    database_url: str | None = None
+    """A Postgres connection string. When set, it wins over ``checkpoint_db``:
+    the checkpointer *and* the Store live in Postgres, so threads and org
+    memory outlive the process and are shared by every process pointed at it.
+    For a deployment; ``None`` keeps SQLite or memory as above."""
+
+    db_pool_max_size: int = 10
+    """Most Postgres connections one process holds, shared by both graphs."""
+
+    db_pool_timeout: float = 30.0
+    """Seconds to wait for a free connection before raising ``PoolTimeout``,
+    so an exhausted pool or an unreachable database fails with a message
+    rather than hanging a run."""
 
     max_rubric_iterations: int = 3
 
@@ -463,11 +488,17 @@ def persistent_settings(
     pending approvals survive the process, so a run started in the UI can be
     continued from ``grant-writer chat`` and vice versa. Constructing
     ``Settings`` directly instead (tests, library use) stays in memory.
+
+    It is also the one place ``DATABASE_URL`` reaches a ``Settings``: set, both
+    the checkpoint and the Store go to Postgres and the SQLite path is unused.
     """
     base = Settings(
         backend_profile=backend_profile,
         approve_final=approve_final,
         enable_search=enable_search,
+        database_url=DATABASE_URL,
+        db_pool_max_size=DB_POOL_MAX_SIZE,
+        db_pool_timeout=DB_POOL_TIMEOUT,
     )
     return replace(base, checkpoint_db=base.default_checkpoint_db)
 

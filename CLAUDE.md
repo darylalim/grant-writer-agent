@@ -22,6 +22,7 @@ uv run python -m evals.run_refusals --repeat 5        # false-refusal rate (H4):
 uv run grant-writer discover --scan-id X --focus "rural health"   # before drafting
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
 uv run grant-writer chat --app-id X           # resume the same thread
+uv run grant-writer db-setup                  # create/migrate Postgres tables; needs DATABASE_URL
 
 uv run streamlit run streamlit_app.py         # optional Streamlit front end
 ```
@@ -581,8 +582,20 @@ runs, and still produces plausible output.
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files
 you can open in an editor. `server` puts drafts in `StateBackend` (ephemeral, thread-scoped) and
 routes `/skills/` + `/memories/` to a `Store` seeded by `seed_store_from_disk` at startup.
-**Never use `local` inside a web server.** The server profile's `InMemoryStore` dies with the
-process — swap for `PostgresStore` before deploying.
+**Never use `local` inside a web server.** Without `DATABASE_URL` the server profile's Store is
+an `InMemoryStore` that dies with the process.
+
+`DATABASE_URL` reaches a `Settings` only through `config.persistent_settings`, never through
+`Settings()` itself, so a library caller or a test cannot be pointed at a real database by its
+shell. Set, it wins over `checkpoint_db`: `agent._build_checkpointer` returns a `PostgresSaver` and
+`agent._build_store` a `PostgresStore`, both on **one** `psycopg` pool per process
+(`agent._connection_pool`, cached on url/size/timeout) because the UI builds a graph per sidebar
+combination per workflow and a pool apiece would multiply the connections. The pool restates
+`from_conn_string`'s connection kwargs (`autocommit`, `dict_row`, `prepare_threshold=0`) — a pool
+built without them constructs fine and fails on the first query. Tables come from
+`grant-writer db-setup`, a deploy step, never from graph construction. Both savers borrow a
+connection per query under their own lock, so a long run does not hold one: size the pool for
+concurrent queries, not concurrent runs. SQLite history does not migrate.
 
 ## Testing conventions
 
@@ -592,6 +605,9 @@ env spellings that enable it and blanks the LangSmith credential (invariant 19),
 load-bearing: `load_dotenv()` only skips keys already present in `os.environ`, so popping handed a
 developer's real key straight back and the suite behaved one way locally and another on a clean
 checkout. Every consumer tests it with `if not os.getenv(...)`, so an empty string reads as absent.
+`DATABASE_URL` and the two `GRANT_WRITER_DB_POOL_*` sizes are blanked the same way: the AppTest
+cases build on `persistent_settings`, so a developer's URL would aim the offline suite at a real
+Postgres. `tests/test_database.py` pins the Postgres wiring with the pool's `open()` patched out.
 Tests that want a key set it with `monkeypatch`.
 
 **Two modules call `load_dotenv()`**, and both reach this suite: `config.py` at import, which every

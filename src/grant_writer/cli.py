@@ -18,7 +18,7 @@ from grant_writer.activity import (
     iter_activity,
     pending_action_requests,
 )
-from grant_writer.agent import build_agent, build_discovery_agent
+from grant_writer.agent import build_agent, build_discovery_agent, setup_database
 from grant_writer.config import (
     Settings,
     discovery_thread_id,
@@ -270,6 +270,24 @@ def _print_shortlist(scan_dir: Path, scan_id: str, settings: Settings) -> None:
         )
 
 
+def _db_setup(args: argparse.Namespace) -> int:
+    """Create or migrate the Postgres tables named by ``DATABASE_URL``.
+
+    A subcommand rather than a side effect of building a graph: migrations are
+    a deploy step, and every replica of a web server running them on startup
+    would race each other. Needs no model key and bills nothing.
+    """
+    settings = persistent_settings()
+    if settings.database_url is None:
+        print(
+            "DATABASE_URL is not set; there is no database to set up.", file=sys.stderr
+        )
+        return 1
+    setup_database(settings)
+    print("Checkpoint and Store tables are up to date.")
+    return 0
+
+
 def _discover(args: argparse.Namespace) -> int:
     settings = _settings_from_args(args)
     missing = require_api_keys(needs_search=settings.enable_search)
@@ -401,6 +419,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     discover.add_argument("--notes", help="extra context for this scan")
     discover.set_defaults(func=_discover)
+
+    # No `common` parent: none of those flags means anything to a migration,
+    # and accepting `--approve` here would suggest it did.
+    db_setup = sub.add_parser(
+        "db-setup", help="create or migrate the Postgres tables (deployments only)"
+    )
+    db_setup.set_defaults(func=_db_setup)
 
     return parser
 

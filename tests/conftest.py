@@ -52,6 +52,16 @@ os.environ["TAVILY_API_KEY"] = ""
 os.environ["LANGSMITH_API_KEY"] = ""
 os.environ["LANGCHAIN_API_KEY"] = ""
 
+# And the database, for the same load_dotenv reason: `persistent_settings` is
+# what the AppTest cases and the CLI tests build on, so a developer's
+# DATABASE_URL would point the offline suite at a real Postgres. config.py reads
+# it with `or None`, so empty is unset. The pool sizes are blanked alongside it
+# because config.py parses them at import, and a bad value there would fail
+# every test at collection rather than the one that cares.
+os.environ["DATABASE_URL"] = ""
+os.environ["GRANT_WRITER_DB_POOL_MAX_SIZE"] = ""
+os.environ["GRANT_WRITER_DB_POOL_TIMEOUT"] = ""
+
 # Non-empty on purpose: if a run ever does escape, it lands somewhere visibly
 # wrong rather than in `default` or in the real `grant-writer`.
 os.environ["LANGSMITH_PROJECT"] = "grant-writer-tests-should-be-empty"
