@@ -287,20 +287,20 @@ def test_application_dir_rejects_ids_that_leave_the_tree(app_id, tmp_path):
     test_wiring; both resolve `..` before the prefix check, for the same reason.
     """
     with pytest.raises(ValueError, match=r"application id|outside applications"):
-        application_dir(Settings(root=tmp_path), app_id)
+        application_dir(Settings(root=tmp_path), app_id, user_id=None)
 
 
 @pytest.mark.parametrize("app_id", ["nsf-aisl-2026", "NSF_26.v2", "a", "2026"])
 def test_application_dir_accepts_plain_ids_and_stays_inside(app_id, tmp_path):
     settings = Settings(root=tmp_path)
-    resolved = application_dir(settings, app_id)
+    resolved = application_dir(settings, app_id, user_id=None)
     assert resolved.is_relative_to(settings.applications_path.resolve())
     assert resolved.name == app_id
 
 
 def test_application_dir_strips_surrounding_whitespace(tmp_path):
     settings = Settings(root=tmp_path)
-    assert application_dir(settings, "  nsf-26  ").name == "nsf-26"
+    assert application_dir(settings, "  nsf-26  ", user_id=None).name == "nsf-26"
 
 
 # ---- ⑧ the compliance verdict shown is the current one ---------------------
@@ -380,17 +380,17 @@ def test_application_ids_offers_only_what_the_boundary_will_accept(tmp_path):
     (apps / "has space").mkdir()  # not a legal id
     (apps / "loose-file.md").write_text("x", encoding="utf-8")  # not a directory
 
-    listed = application_ids(settings)
+    listed = application_ids(settings, user_id=None)
     assert listed == ["nsf-aisl-2026", "zz_ok.2"]
     # Everything offered survives the boundary, which is the point.
     for app_id in listed:
-        assert application_dir(settings, app_id).parent == apps.resolve()
+        assert application_dir(settings, app_id, user_id=None).parent == apps.resolve()
 
 
 def test_application_ids_is_empty_before_the_directory_exists(tmp_path):
     """First run, nothing drafted yet. Returning [] rather than raising is what
     lets the frontend simply not draw the picker."""
-    assert application_ids(Settings(root=tmp_path)) == []
+    assert application_ids(Settings(root=tmp_path), user_id=None) == []
 
 
 def test_application_ids_does_not_offer_a_symlink_out_of_the_tree(tmp_path):
@@ -413,9 +413,9 @@ def test_application_ids_does_not_offer_a_symlink_out_of_the_tree(tmp_path):
     # Inside the tree is still fine: the boundary's objection is the escape.
     (apps / "alias").symlink_to(apps / "real", target_is_directory=True)
 
-    assert application_ids(settings) == ["alias", "real"]
+    assert application_ids(settings, user_id=None) == ["alias", "real"]
     with pytest.raises(ValueError, match="outside applications/"):
-        application_dir(settings, "legacy")
+        application_dir(settings, "legacy", user_id=None)
 
 
 def test_application_ids_hides_dot_directories(tmp_path):
@@ -432,10 +432,10 @@ def test_application_ids_hides_dot_directories(tmp_path):
     (apps / ".ipynb_checkpoints").mkdir()
     (apps / ".git").mkdir()
 
-    assert application_ids(settings) == ["nsf-aisl-2026"]
+    assert application_ids(settings, user_id=None) == ["nsf-aisl-2026"]
     # Not a security claim: the boundary accepts these, it just should not be
     # asked to. Pinned so the reason for the extra filter stays legible.
-    assert application_dir(settings, ".git").name == ".git"
+    assert application_dir(settings, ".git", user_id=None).name == ".git"
 
 
 def test_application_ids_does_not_offer_a_name_that_opens_another_directory(tmp_path):
@@ -453,10 +453,13 @@ def test_application_ids_does_not_offer_a_name_that_opens_another_directory(tmp_
     (apps / "nsf-26").mkdir()
     (apps / "nsf-26 ").mkdir()
 
-    assert application_ids(settings) == ["nsf-26"]
+    assert application_ids(settings, user_id=None) == ["nsf-26"]
     # The boundary does accept it -- that is exactly why the listing has to ask
     # the further question rather than trusting acceptance alone.
-    assert application_dir(settings, "nsf-26 ") == (apps / "nsf-26").resolve()
+    assert (
+        application_dir(settings, "nsf-26 ", user_id=None)
+        == (apps / "nsf-26").resolve()
+    )
 
 
 def test_application_ids_survives_an_unreadable_applications_directory(tmp_path):
@@ -474,7 +477,7 @@ def test_application_ids_survives_an_unreadable_applications_directory(tmp_path)
     try:
         if os.access(apps, os.R_OK):  # running as root; the chmod means nothing
             pytest.skip("cannot make a directory unreadable as this user")
-        assert application_ids(settings) == []
+        assert application_ids(settings, user_id=None) == []
     finally:
         apps.chmod(0o755)
 
@@ -505,13 +508,13 @@ def test_opportunities_dir_rejects_ids_that_leave_the_tree(scan_id, tmp_path):
     is precisely what having one function is meant to make impossible.
     """
     with pytest.raises(ValueError, match=r"scan id|outside opportunities"):
-        opportunities_dir(Settings(root=tmp_path), scan_id)
+        opportunities_dir(Settings(root=tmp_path), scan_id, user_id=None)
 
 
 @pytest.mark.parametrize("scan_id", ["rural-health-2026", "Q1_2026.v2", "a", "2026"])
 def test_opportunities_dir_accepts_plain_ids_and_stays_inside(scan_id, tmp_path):
     settings = Settings(root=tmp_path)
-    resolved = opportunities_dir(settings, scan_id)
+    resolved = opportunities_dir(settings, scan_id, user_id=None)
     assert resolved.is_relative_to(settings.opportunities_path.resolve())
     assert resolved.name == scan_id
 
@@ -525,9 +528,9 @@ def test_the_two_boundaries_refuse_with_their_own_noun(tmp_path):
     """
     settings = Settings(root=tmp_path)
     with pytest.raises(ValueError, match="application id"):
-        application_dir(settings, "../evil")
+        application_dir(settings, "../evil", user_id=None)
     with pytest.raises(ValueError, match="scan id"):
-        opportunities_dir(settings, "../evil")
+        opportunities_dir(settings, "../evil", user_id=None)
 
 
 def test_opportunity_scan_ids_offers_only_what_the_boundary_will_accept(tmp_path):
@@ -551,16 +554,16 @@ def test_opportunity_scan_ids_offers_only_what_the_boundary_will_accept(tmp_path
     except (OSError, NotImplementedError):  # pragma: no cover - platform
         pytest.skip("symlinks unavailable")
 
-    listed = opportunity_scan_ids(settings)
+    listed = opportunity_scan_ids(settings, user_id=None)
     assert listed == ["rural-2026"]
     with pytest.raises(ValueError):
-        opportunities_dir(settings, "legacy")
+        opportunities_dir(settings, "legacy", user_id=None)
 
 
 def test_opportunity_scan_ids_is_empty_before_the_directory_exists(tmp_path):
     """A fresh checkout has no `opportunities/`, and the Streamlit script calls
     this from its body, outside any try."""
-    assert opportunity_scan_ids(Settings(root=tmp_path)) == []
+    assert opportunity_scan_ids(Settings(root=tmp_path), user_id=None) == []
 
 
 def test_ensure_dirs_creates_the_opportunities_directory(tmp_path):

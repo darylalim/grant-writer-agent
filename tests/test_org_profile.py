@@ -209,4 +209,6 @@ def test_the_real_disk_writers_refuse_the_tracked_template(allowed, tmp_path):
     real disk and never consults the permission rules above.
     """
     with pytest.raises(ValueError):
-        _resolve_output_path("/templates/org-profile.md", allowed, tmp_path)
+        _resolve_output_path(
+            "/templates/org-profile.md", allowed, tmp_path, user_id=None
+        )

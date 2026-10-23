@@ -331,7 +331,7 @@ def _resolve_content_id(root: Path, item_id: str, *, noun: str) -> Path:
     return resolved
 
 
-def application_dir(settings: Settings, app_id: str) -> Path:
+def application_dir(settings: Settings, app_id: str, *, user_id: str | None) -> Path:
     """Resolve an application id to its directory, refusing anything unsafe.
 
     Frontends that touch the real filesystem must route through this rather
@@ -341,16 +341,23 @@ def application_dir(settings: Settings, app_id: str) -> Path:
     check second -- because validating the raw string lets `..` pass the prefix
     test and escape when it collapses.
 
+    `user_id` is required, with no default, for the reason `build_model`'s
+    `effort` is: a default is how a new call site would land in the shared
+    tree without anyone choosing it. None is the single-user tree; a user id
+    resolves inside that user's own directory (see `user_content_root`).
+
     Raises:
         ValueError: if the id is empty, not a plain path segment, or would
-            resolve outside `applications/`.
+            resolve outside `applications/` (or the user's directory in it).
     """
     return _resolve_content_id(
-        settings.applications_path, app_id, noun="application id"
+        user_content_root(settings.applications_path, user_id),
+        app_id,
+        noun="application id",
     )
 
 
-def opportunities_dir(settings: Settings, scan_id: str) -> Path:
+def opportunities_dir(settings: Settings, scan_id: str, *, user_id: str | None) -> Path:
     """Resolve a discovery scan id to its directory, refusing anything unsafe.
 
     Structurally identical to `application_dir` -- see `_resolve_content_id`
@@ -366,11 +373,17 @@ def opportunities_dir(settings: Settings, scan_id: str) -> Path:
     A scan id and an application id share this character set and one
     checkpoint file, but never a thread id -- see `agent.discovery_thread_id`.
 
+    `user_id` is required, as on `application_dir`.
+
     Raises:
         ValueError: if the id is empty, not a plain path segment, or would
-            resolve outside `opportunities/`.
+            resolve outside `opportunities/` (or the user's directory in it).
     """
-    return _resolve_content_id(settings.opportunities_path, scan_id, noun="scan id")
+    return _resolve_content_id(
+        user_content_root(settings.opportunities_path, user_id),
+        scan_id,
+        noun="scan id",
+    )
 
 
 def discovery_thread_id(scan_id: str) -> str:
@@ -390,6 +403,90 @@ def discovery_thread_id(scan_id: str) -> str:
     `CONTENT_DIRS` exists one file over.
     """
     return f"discover:{scan_id}"
+
+
+# A user's thread is `user:<user id>:<thread id>`, where the inner thread id is
+# an application id or a `discovery_thread_id`. `_SAFE_ID` forbids `:` in a user
+# id and in an application id alike, so the first colon after the prefix always
+# ends the user id, and no typed id can spell another user's thread -- invariant
+# 12's construction, one level up. Invariant 23.
+_USER_THREAD_PREFIX = "user:"
+
+
+def _checked_user_id(user_id: str) -> str:
+    """Refuse a user id that is not a single plain path segment.
+
+    Not stripped, unlike a typed id: a user id comes from the sign-in session,
+    never from a text box, so a padded one is a bug upstream to surface rather
+    than to tidy away.
+    """
+    if user_id in {".", ".."} or not _SAFE_ID.match(user_id):
+        msg = f"invalid user id {user_id!r}"
+        raise ValueError(msg)
+    return user_id
+
+
+def user_thread_id(user_id: str | None, thread_id: str) -> str:
+    """The LangGraph thread id for `thread_id` as seen by `user_id`.
+
+    Two people who both name an application `nsf-2027` must not resume each
+    other's conversation, plan, drafts, or pending approval -- invariant 12's
+    collision, between users instead of graphs, and the same fix: a prefix
+    whose separator no valid id can contain. It composes with that one,
+    `user_thread_id(u, discovery_thread_id(s))`, so the two namespaces nest
+    rather than compete.
+
+    None is single-user and returns `thread_id` unchanged. That is what the CLI
+    always passes (decision 9) and what the UI passes until sign-in supplies a
+    user, so an existing checkpoint keeps resuming and a run started in one
+    frontend still continues in the other.
+
+    Every caller goes through this, never a literal: `thread_user_id` parses
+    the same shape back out, and the real-disk tools trust that parse.
+    """
+    if user_id is None:
+        return thread_id
+    return f"{_USER_THREAD_PREFIX}{_checked_user_id(user_id)}:{thread_id}"
+
+
+def thread_user_id(thread_id: str | None) -> str | None:
+    """The user a thread belongs to, or None for a single-user thread.
+
+    The inverse of `user_thread_id`, and the reason the tools that write to
+    real disk need no second key in `configurable`: the thread id is the one
+    value every checkpointed run must carry, so the user travels inside it and
+    a caller cannot forget to send one without also losing the thread. A
+    separate `user_id` key, forgotten, would have written into the shared tree.
+
+    A single-user id can never start with the prefix: an application id has no
+    `:`, and a discovery id starts `discover:`.
+
+    Raises:
+        ValueError: if `thread_id` has the prefix but not the shape.
+    """
+    if not thread_id or not thread_id.startswith(_USER_THREAD_PREFIX):
+        return None
+    user_id, sep, inner = thread_id.removeprefix(_USER_THREAD_PREFIX).partition(":")
+    if not sep or not inner:
+        msg = f"malformed per-user thread id {thread_id!r}"
+        raise ValueError(msg)
+    return _checked_user_id(user_id)
+
+
+def user_content_root(base: Path, user_id: str | None) -> Path:
+    """`base` itself, or `user_id`'s own directory directly beneath it.
+
+    The directory is `@<user id>`. `_SAFE_ID` has no `@`, so no application or
+    scan id names a user's directory -- the single-user tree cannot reach into
+    one, the listing drops them as names the boundary refuses, and one user's
+    id can only ever resolve under their own. The disk half of invariant 23:
+    `applications/` and `opportunities/` are written past the permission rules
+    (invariant 2), so separating thread ids alone would have left user B's scan
+    `x` overwriting user A's.
+    """
+    if user_id is None:
+        return base
+    return base / f"@{_checked_user_id(user_id)}"
 
 
 def _list_content_ids(directory: Path, resolver: Callable[[str], Path]) -> list[str]:
@@ -419,7 +516,7 @@ def _list_content_ids(directory: Path, resolver: Callable[[str], Path]) -> list[
     return ids
 
 
-def application_ids(settings: Settings) -> list[str]:
+def application_ids(settings: Settings, *, user_id: str | None) -> list[str]:
     """Every application on disk, as ids `application_dir` will accept.
 
     The read-side counterpart to `application_dir`. Each candidate is run
@@ -457,11 +554,12 @@ def application_ids(settings: Settings) -> list[str]:
     merely not in recency order.
     """
     return _list_content_ids(
-        settings.applications_path, lambda name: application_dir(settings, name)
+        user_content_root(settings.applications_path, user_id),
+        lambda name: application_dir(settings, name, user_id=user_id),
     )
 
 
-def opportunity_scan_ids(settings: Settings) -> list[str]:
+def opportunity_scan_ids(settings: Settings, *, user_id: str | None) -> list[str]:
     """Every discovery scan on disk, as ids `opportunities_dir` will accept.
 
     The read-side counterpart to `opportunities_dir`, and the same argument as
@@ -471,7 +569,8 @@ def opportunity_scan_ids(settings: Settings) -> list[str]:
     re-testing `_SAFE_ID`, for the reason spelled out there.
     """
     return _list_content_ids(
-        settings.opportunities_path, lambda name: opportunities_dir(settings, name)
+        user_content_root(settings.opportunities_path, user_id),
+        lambda name: opportunities_dir(settings, name, user_id=user_id),
     )
 
 

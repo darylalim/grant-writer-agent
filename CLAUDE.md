@@ -75,7 +75,7 @@ running both locks' ty side by side, not by the count. A steady baseline is not 
 steady cause, and a new diagnostic of ours arriving as an old upstream one departs would net to
 zero.
 
-Common flags (`--profile`, `--approve`, `--no-search`, `--recursion-limit`) live on a shared
+Common flags (`--profile`, `--approve`, `--no-search`, `--recursion-limit`, `--operator`) live on a shared
 parent parser and must be passed **after** the subcommand. `--app-id` is also the LangGraph
 `thread_id`; the CLI persists to `.grant_writer/checkpoints.sqlite`, so state resumes across
 processes. `applications/`, `opportunities/`, and `.grant_writer/` are gitignored.
@@ -119,7 +119,7 @@ Module dependencies flow one way:
 ```
 config.py  →  tools.py, backends.py  →  subagents.py  →  agent.py  →  cli.py
 opportunities.py ─→ prompts.py, workspace.py, cli.py ─────────────────────↗
-              activity.py, workspace.py  ──────────────────────────────────↗  streamlit_app.py
+              activity.py, workspace.py, identity.py  ─────────────────────↗  streamlit_app.py
 activity.py ─→ refusals.py ─→ subagents.py, agent.py
 ```
 
@@ -138,8 +138,8 @@ was duplicated logic waiting to happen:
 - **`activity.py`** parses the `stream_mode="updates"` chunks and builds the approval decisions.
   A renamed `deepagents` key blanks a frontend's labels silently; a decision list whose length
   disagrees with the interrupted calls leaves the graph stuck with no exception raised. Like
-  `opportunities.py` it imports nothing from the package — the three leaves in the diagram above
-  are `config.py`, `opportunities.py`, and this. It also owns the declined-reply sentence that
+  `opportunities.py` it imports nothing from the package — the four leaves in the diagram above
+  are `config.py`, `opportunities.py`, `identity.py` (invariant 23), and this. It also owns the declined-reply sentence that
   `refusals.py` writes into the graph (invariant 21), which is the one arrow running from it
   back toward the agent: a leaf can be imported by both sides, so the format has one home.
 - **`workspace.py`** reads an application directory back — file listing, `[NEEDS INPUT]` count,
@@ -577,6 +577,39 @@ runs, and still produces plausible output.
     distinction is invisible, because the Store starts empty; against E1's Postgres, seeding
     over the profile would revert it on every restart.
 
+23. **Two users who name an application alike must reach different threads *and* different
+    directories, and the user comes from the thread id.** Unseparated, two people who both call
+    an application `nsf-2027` resume one conversation, one set of drafts and one pending
+    approval — invariant 12's collision between users instead of graphs, with nothing raised.
+    The fix is the same construction: `config.user_thread_id` prefixes `user:<id>:`, and
+    `_SAFE_ID` forbids `:` in user ids and application ids alike, so no typed id can spell
+    another user's thread; it composes with `discovery_thread_id`. `None` is single-user and
+    returns the id unchanged — the CLI always passes it (decision 9) and the UI does until
+    sign-in, so existing checkpoints resume and UI↔CLI continuity holds.
+
+    Thread ids alone would have left the disk shared, since `applications/` and
+    `opportunities/` are written past the permission rules (invariant 2): user B's scan `x`
+    overwrote user A's. `application_dir`, `opportunities_dir` and both listings take a
+    **required** `user_id` (no default, invariant 9's reason) and resolve under
+    `@<user>/`; `@` is outside `_SAFE_ID`, so no typed id names a user's directory and the
+    single-user listing drops them. The real-disk tools cannot be told who is calling — the
+    graph is cached and shared by every session — so `_resolve_output_path` reads the user
+    **out of the run's thread id** (`config.thread_user_id`), maps the write under it, refuses
+    an `@` segment the agent wrote itself, and re-checks after the mapping. Not a second
+    `configurable` key: a caller that forgot one would write into the shared tree, while the
+    thread id cannot be forgotten without losing the thread. A malformed per-user id raises
+    rather than parsing as single-user, which would fail open.
+
+    The user enters the UI in one place, `identity.current_user`, a package module rather
+    than a script function only because AppTest cannot patch a function the script redefines
+    each run. Every thread id — `_active_thread_id`, `parked_state` (which takes the
+    application id and applies the user itself, so neither caller can hand it a bare id) — and
+    every directory goes through it. When sign-in fills it, the id must come only from the
+    provider's verified session, never from anything the client can set.
+    `tests/test_users.py` impersonates two users through every entry point — run form,
+    follow-up, approval panel, file browser and picker — and each case was mutation-checked
+    against reverting one of those routes to the bare id.
+
 ## Backend profiles
 
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files
@@ -596,6 +629,11 @@ built without them constructs fine and fails on the first query. Tables come fro
 `grant-writer db-setup`, a deploy step, never from graph construction. Both savers borrow a
 connection per query under their own lock, so a long run does not hold one: size the pool for
 concurrent queries, not concurrent runs. SQLite history does not migrate.
+
+With `DATABASE_URL` set, `draft`, `chat` and `discover` **refuse to run** unless given
+`--operator`, and log the override at WARNING (decision 18). The CLI has no sign-in and
+unprefixed thread ids (decision 9), so against the shared database it would reach any thread at
+all. `db-setup` is exempt: it is the deploy step that needs the URL, and it touches no thread.
 
 ## Testing conventions
 
