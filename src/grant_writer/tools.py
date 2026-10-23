@@ -2,8 +2,9 @@
 
 Deliberately small. The agent already gets ``ls``/``read_file``/``write_file``/
 ``edit_file``/``glob``/``grep`` from the filesystem middleware, so these only
-cover what the harness cannot do: read a PDF solicitation, count words
-reliably, search the web, and query the grants.gov opportunity index.
+cover what the harness cannot do: count words reliably, search the web, and
+query the grants.gov opportunity index. A solicitation PDF is not among them:
+frontends extract it before a run (`solicitation.py`, invariant 24).
 
 The grants.gov pair is separate from web search rather than folded into it
 because the two return different *kinds* of thing. Search returns prose a model
@@ -40,43 +41,22 @@ if TYPE_CHECKING:
 WORDS_PER_PAGE_SINGLE = 500
 WORDS_PER_PAGE_DOUBLE = 250
 
-# What each real-disk writer may reach, per tool rather than per project.
+# What the real-disk writer may reach, per tool rather than per project.
 #
-# These are deliberately narrower than `config.CONTENT_DIRS`, which is the union
-# the *permission rules* legitimately cover. A tool that writes past the backend
-# gets only the directories its own graph has business in: `extract_pdf_text`
-# belongs to drafting and archives a solicitation beside the drafts;
+# Deliberately narrower than `config.CONTENT_DIRS`, which is the union the
+# *permission rules* legitimately cover. A tool that writes past the backend gets
+# only the directories its own graph has business in:
 # `fetch_grants_gov_opportunity` belongs to discovery and has no reason to touch
 # an application at all -- least of all `final/`, where a write would bypass the
 # approval interrupt entirely. See `_resolve_output_path`.
 #
 # The *root* those directories sit under is the caller's too, which is why the
-# two writers are built by `build_extract_pdf_tool` / `build_fetch_opportunity_tool`
-# from `Settings.root` rather than defined at module level. A module-level tool
-# can only resolve against `config.PROJECT_ROOT`, so a graph built on any other
-# root archived its solicitation into this checkout's `applications/` and then
-# read it back from its own, finding nothing. Inside a content directory, so no
-# boundary escape -- but the wrong tree, silently.
-_DRAFTING_WRITE_DIRS: tuple[str, ...] = ("applications", "memories")
+# writer is built by `build_fetch_opportunity_tool` from `Settings.root` rather
+# than defined at module level. A module-level tool can only resolve against
+# `config.PROJECT_ROOT`, so a graph built on any other root archived into this
+# checkout's tree and then read back from its own, finding nothing. Inside a
+# content directory, so no boundary escape -- but the wrong tree, silently.
 _DISCOVERY_WRITE_DIRS: tuple[str, ...] = ("opportunities",)
-
-
-def _parse_page_spec(spec: str, n_pages: int) -> list[int]:
-    """Turn ``"1-3,7"`` into zero-based page indices."""
-    if not spec.strip():
-        return list(range(n_pages))
-    wanted: list[int] = []
-    for chunk in spec.split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        if "-" in chunk:
-            start_s, _, end_s = chunk.partition("-")
-            start, end = int(start_s), int(end_s)
-        else:
-            start = end = int(chunk)
-        wanted.extend(range(start - 1, end))
-    return [p for p in wanted if 0 <= p < n_pages]
 
 
 def _resolve_output_path(
@@ -160,115 +140,6 @@ def _run_user_id(config: RunnableConfig) -> str | None:
     key of its own.
     """
     return thread_user_id(config.get("configurable", {}).get("thread_id"))
-
-
-def build_extract_pdf_tool(root: Path) -> BaseTool:
-    """Return `extract_pdf_text`, writing under `root` (the graph's `Settings.root`)."""
-
-    @tool
-    def extract_pdf_text(
-        config: RunnableConfig,
-        pdf_path: str,
-        pages: str = "",
-        max_chars: int = 20000,
-        out_path: str = "",
-    ) -> str:
-        """Extract text from a PDF solicitation, RFP, or funder guideline document.
-
-        Args:
-            pdf_path: Path to the PDF on the local machine.
-            pages: Optional 1-based page selection such as "1-4,9". Empty means
-                all pages. Use this to page through a long RFP when reading it.
-            max_chars: Truncation limit when returning text to you. Ignored
-                when `out_path` is set.
-            out_path: If set (e.g. "/applications/nsf-26/rfp.md"), the COMPLETE
-                extracted text is written straight to that file and you get back
-                only a short receipt. Always use this to archive a solicitation.
-                Never read a long PDF and copy it into `write_file` yourself --
-                the text gets silently abridged in transit and downstream
-                compliance checks then run against an incomplete document.
-
-        Returns:
-            A write receipt when `out_path` is set, otherwise the extracted text
-            with an explicit notice if it was truncated.
-        """
-        try:
-            user_id = _run_user_id(config)
-        except ValueError as exc:
-            return f"Error: {exc}"
-        return _extract_pdf_text(
-            root, pdf_path, pages, max_chars, out_path, user_id=user_id
-        )
-
-    return extract_pdf_text
-
-
-def _extract_pdf_text(
-    root: Path,
-    pdf_path: str,
-    pages: str,
-    max_chars: int,
-    out_path: str,
-    *,
-    user_id: str | None,
-) -> str:
-    """The body of `extract_pdf_text`; its docstring is the model's, above."""
-    path = Path(pdf_path).expanduser()
-    if not path.is_file():
-        return f"Error: no such file: {path}"
-
-    try:
-        from pypdf import PdfReader
-    except ImportError:  # pragma: no cover - dependency is declared
-        return "Error: pypdf is not installed."
-
-    try:
-        reader = PdfReader(str(path))
-    except Exception as exc:  # noqa: BLE001 - surface any parse failure to the agent
-        return f"Error: could not read PDF: {exc}"
-
-    total = len(reader.pages)
-    try:
-        indices = _parse_page_spec(pages, total)
-    except ValueError:
-        return f"Error: could not parse page spec {pages!r}. Use forms like '1-4,9'."
-    if not indices:
-        return f"Error: page spec {pages!r} selected no pages (document has {total})."
-
-    parts = [f"[{path.name} - {total} page(s), showing {len(indices)}]"]
-    for i in indices:
-        try:
-            text = reader.pages[i].extract_text() or ""
-        except Exception as exc:  # noqa: BLE001
-            text = f"<page {i + 1} could not be extracted: {exc}>"
-        parts.append(f"\n--- page {i + 1} ---\n{text.strip()}")
-
-    out = "\n".join(parts)
-
-    if out_path:
-        try:
-            target = _resolve_output_path(
-                out_path, _DRAFTING_WRITE_DIRS, root, user_id=user_id
-            )
-        except ValueError as exc:
-            return f"Error: {exc}"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(out, encoding="utf-8")
-        return (
-            f"Wrote {len(out)} characters covering {len(indices)} of {total} page(s) "
-            f"to {out_path}. The full text is on disk -- read it back with "
-            f"read_file, in ranges if it is long. Do not re-transcribe it."
-        )
-
-    if len(out) > max_chars:
-        shown = out[:max_chars]
-        remaining = len(out) - max_chars
-        return (
-            f"{shown}\n\n[TRUNCATED: {remaining} more characters. "
-            f"Re-call with a narrower `pages` range to read the rest, or pass "
-            f"`out_path` to save the whole document to a file.]"
-        )
-    return out
 
 
 def measure(text: str) -> str:
@@ -598,8 +469,7 @@ def build_fetch_opportunity_tool(root: Path) -> BaseTool:
                 text is written straight to that file and you get back a short
                 receipt. Use this for anything you intend to score. A citation
                 has to quote the real document, and text relayed through your
-                own context gets silently abridged -- the same hazard
-                `extract_pdf_text` warns about for a solicitation PDF.
+                own context gets silently abridged.
 
         Returns:
             A write receipt when `out_path` is set, otherwise the formatted

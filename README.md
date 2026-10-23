@@ -71,7 +71,7 @@ Flags go **after** the subcommand, e.g. `grant-writer draft --app-id X --approve
 |---|---|---|
 | `--focus TEXT` | `discover` | What to search for |
 | `--agencies CODES` | `discover` | Pipe-separated grants.gov agency codes, e.g. `USDA\|NSF` |
-| `--rfp FILE` | `draft` | The solicitation PDF |
+| `--rfp FILE` | `draft` | The solicitation PDF, extracted to `rfp.md` before the run |
 | `--funder NAME` | `draft` | Funder name, e.g. `NSF` |
 | `--rubric FILE` | `draft` | Grade the draft against the funder's review criteria and iterate |
 | `--notes TEXT` | `discover`, `draft` | Extra context for this run |
@@ -268,9 +268,13 @@ with none.
 - **Deletes** follow the write rules: a file the agent can write, it can delete.
   It can never delete a directory.
 - **Discovery** cannot write to `/applications/` and never pauses for approval.
-- **Real-disk tools** (`extract_pdf_text`, `fetch_grants_gov_opportunity`)
-  bypass these rules, so each one limits itself to the folders its own graph
-  may write to.
+- **The real-disk tool** (`fetch_grants_gov_opportunity`) bypasses these
+  rules, so it limits itself to the folder its own graph may write to.
+- **Solicitations** are read before the run, never by the agent: the CLI and
+  the UI extract the PDF's text (up to 50 MB and 500 pages, checked by its
+  `%PDF-` signature, in a child process stopped after two minutes) and put it
+  at `rfp.md`. The agent has no tool that opens a PDF or any other path on
+  disk, and the UI keeps no copy of the uploaded file.
 
 ## Guardrails
 

@@ -405,6 +405,21 @@ def test_every_case_declares_why_it_exists():
 
 
 @pytest.fixture(autouse=True)
+def _extract_in_process(monkeypatch):
+    """The harnesses' real extraction, without its child process.
+
+    Every `prepare_root` and trajectory `run_once` here extracts the fixture
+    PDF, and spawning an interpreter for each cost about a second a case --
+    doubling the suite that gates every edit. What runs in the child is
+    unchanged; the isolation itself is `test_solicitation.py`'s to pin.
+    """
+    monkeypatch.setattr(
+        "grant_writer.solicitation.run_isolated",
+        lambda target, args, *, timeout: target(*args),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _empty_session_id_cache():
     """`run_scout._SESSION_IDS` caches a project uuid for the whole process.
 
@@ -2319,7 +2334,7 @@ _PLAN = ("write_todos", {"todos": [{"status": "pending", "content": "need"}]})
 
 DELEGATING = [
     _ai(_PLAN),
-    _ai(("extract_pdf_text", {"pdf_path": "/x.pdf"})),
+    _ai(("read_file", {"file_path": "/applications/a/rfp.md"})),
     _ai(_delegate("section-drafter")),
     _ai(_delegate("section-drafter")),
     _ai(_delegate("compliance-checker")),

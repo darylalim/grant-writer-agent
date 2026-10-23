@@ -114,13 +114,16 @@ def prepare_root(root: Path, case: RefusalCase) -> None:
     shutil.copytree(REPO / "skills", root / "skills")
     rfp = root / case.rfp_path.lstrip("/")
     if case.rfp_pdf is not None:
-        from grant_writer.tools import build_extract_pdf_tool
-
-        reply = build_extract_pdf_tool(root).invoke(
-            {"pdf_path": str(case.rfp_pdf), "out_path": case.rfp_path}
+        from grant_writer.config import Settings
+        from grant_writer.solicitation import (
+            extract_solicitation,
+            preload_solicitation,
         )
+
+        text = extract_solicitation(case.rfp_pdf.read_bytes(), case.rfp_pdf.name)
+        preload_solicitation(Settings(root=root), case.app_id, text, user_id=None)
         if not rfp.is_file():
-            raise RuntimeError(f"rfp extraction failed: {reply}")
+            raise RuntimeError(f"rfp preload did not land at {case.rfp_path}")
     else:
         rfp.parent.mkdir(parents=True)
         rfp.write_text(case.rfp_text, "utf-8")

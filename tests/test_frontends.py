@@ -252,19 +252,22 @@ def test_draft_request_names_the_application_directory():
 
 def test_draft_request_omits_sections_it_was_given_nothing_for():
     minimal = draft_request("nsf-26")
-    assert "solicitation is the PDF" not in minimal
+    assert "rfp.md" not in minimal
     assert "The funder is" not in minimal
     assert "Additional context" not in minimal
     # The process instruction is unconditional -- it is what drives the run.
     assert "requirements checklist" in minimal
 
 
-def test_draft_request_routes_the_pdf_through_extract_pdf_text():
-    """Never `write_file`: relayed PDF text gets silently abridged in transit."""
-    request = draft_request("nsf-26", rfp_path="/tmp/rfp.pdf", funder="NSF")
-    assert "extract_pdf_text" in request
-    assert "/tmp/rfp.pdf" in request
+def test_draft_request_names_the_preloaded_archive_and_no_pdf():
+    """The brief points at the virtual archive the frontend preloaded.
+
+    Never a disk path or a PDF tool: the agent has no way to open one, and a
+    brief that named one would send it looking (invariant 24).
+    """
+    request = draft_request("nsf-26", solicitation=True, funder="NSF")
     assert "/applications/nsf-26/rfp.md" in request
+    assert "pdf" not in request.lower()
     assert "The funder is NSF." in request
 
 

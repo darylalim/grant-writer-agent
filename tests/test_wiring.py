@@ -56,12 +56,9 @@ from grant_writer.subagents import (
 )
 from grant_writer.tools import (
     _DISCOVERY_WRITE_DIRS,
-    _DRAFTING_WRITE_DIRS,
     _format_opportunity,
     _format_search_hits,
-    _parse_page_spec,
     _resolve_output_path,
-    build_extract_pdf_tool,
     build_fetch_opportunity_tool,
     build_measure_tool,
     measure,
@@ -90,7 +87,6 @@ def test_graph_builds(profile):
         "ls",
         "glob",
         "grep",
-        "extract_pdf_text",
         "measure_text",
     ],
 )
@@ -704,47 +700,21 @@ def test_measure_text_reads_a_draft_that_exists_only_in_graph_state(monkeypatch)
     assert measured == [f"{path}: " + measure(body)]
 
 
-def test_extract_pdf_text_reports_missing_file(tmp_path):
-    tool = build_extract_pdf_tool(tmp_path)
-    assert tool.invoke({"pdf_path": "/nope/missing.pdf"}).startswith(
-        "Error: no such file"
-    )
-
-
-_RFP = Path(PROJECT_ROOT, "evals", "fixtures", "scmp-2026-nofo-excerpt.pdf")
-
-
 def _graph_tool(graph, name):
     return graph.nodes["tools"].bound.tools_by_name[name]
-
-
-def test_a_graph_on_another_root_archives_its_solicitation_there(tmp_path):
-    """The real-disk writers resolve against the graph's root, not this checkout's.
-
-    Before the tools were built from `Settings.root`, `_resolve_output_path`
-    read `config.PROJECT_ROOT`, so a graph on any other root -- the trajectory
-    eval's, a test's, a second deployment's -- archived its solicitation into
-    this repository's `applications/` and then looked for it under its own.
-    Inside a content directory, so nothing refused it; the wrong tree, silently.
-    """
-    app_id = "root-fix-probe"
-    repo_copy = Path(PROJECT_ROOT, "applications", app_id)
-    assert not repo_copy.exists()
-
-    tool = _graph_tool(build_agent(Settings(root=tmp_path)), "extract_pdf_text")
-    receipt = tool.invoke(
-        {"pdf_path": str(_RFP), "out_path": f"/applications/{app_id}/rfp.md"}
-    )
-
-    assert receipt.startswith("Wrote ")
-    assert (tmp_path / "applications" / app_id / "rfp.md").is_file()
-    assert not repo_copy.exists()
 
 
 def test_a_discovery_graph_on_another_root_archives_candidates_there(
     tmp_path, monkeypatch
 ):
-    """The same, for the discovery graph's writer."""
+    """The real-disk writer resolves against the graph's root, not this checkout's.
+
+    Before the tools were built from `Settings.root`, `_resolve_output_path`
+    read `config.PROJECT_ROOT`, so a graph on any other root -- an eval's, a
+    test's, a second deployment's -- archived into this repository's tree and
+    then looked for the file under its own. Inside a content directory, so
+    nothing refused it; the wrong tree, silently.
+    """
     monkeypatch.setattr(
         "grant_writer.tools._grants_gov_post", lambda *_a, **_k: {"synopsis": {}}
     )
@@ -762,12 +732,18 @@ def test_a_discovery_graph_on_another_root_archives_candidates_there(
     assert not repo_copy.exists()
 
 
+# The resolver takes its directories from the caller, so its general behaviour
+# is tested against a set of two -- the shape a future drafting writer would
+# pass -- as well as against the one real caller's.
+_TWO_DIRS = ("applications", "memories")
+
+
 @pytest.mark.parametrize(
     ("out_path", "allowed"),
     [
-        ("/applications/x/rfp.md", _DRAFTING_WRITE_DIRS),
-        ("applications/x/rfp.md", _DRAFTING_WRITE_DIRS),
-        ("/memories/org/AGENTS.md", _DRAFTING_WRITE_DIRS),
+        ("/applications/x/rfp.md", _TWO_DIRS),
+        ("applications/x/rfp.md", _TWO_DIRS),
+        ("/memories/org/AGENTS.md", _TWO_DIRS),
         ("/opportunities/rural-2026/candidates/353201.md", _DISCOVERY_WRITE_DIRS),
         ("opportunities/rural-2026/scored/353201.md", _DISCOVERY_WRITE_DIRS),
     ],
@@ -802,22 +778,6 @@ def test_the_discovery_tool_cannot_write_into_an_application(out_path):
     with pytest.raises(ValueError, match=re.escape("refusing to write outside")):
         _resolve_output_path(
             out_path, _DISCOVERY_WRITE_DIRS, PROJECT_ROOT, user_id=None
-        )
-
-
-def test_the_drafting_tool_cannot_write_into_a_scan():
-    """The same rule in the other direction, so neither set is a superset.
-
-    `extract_pdf_text` archives a solicitation beside the drafts; a scan
-    directory is not its business, and letting it write there would put a tool
-    the discovery graph does not carry into the tree that graph owns.
-    """
-    with pytest.raises(ValueError, match=re.escape("refusing to write outside")):
-        _resolve_output_path(
-            "/opportunities/s/candidates/x.md",
-            _DRAFTING_WRITE_DIRS,
-            PROJECT_ROOT,
-            user_id=None,
         )
 
 
@@ -857,7 +817,7 @@ def test_output_paths_outside_content_dirs_are_refused(out_path):
         ValueError,
         match=re.escape("refusing to write outside /applications/ or /memories/"),
     ):
-        _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS, PROJECT_ROOT, user_id=None)
+        _resolve_output_path(out_path, _TWO_DIRS, PROJECT_ROOT, user_id=None)
 
 
 def test_content_dirs_agrees_with_the_settings_paths():
@@ -873,14 +833,6 @@ def test_content_dirs_agrees_with_the_settings_paths():
     assert settings.applications_path.name in CONTENT_DIRS
     assert settings.opportunities_path.name in CONTENT_DIRS
     assert settings.memory_path.parent.parent.name in CONTENT_DIRS
-
-
-@pytest.mark.parametrize(
-    ("spec", "total", "expected"),
-    [("1-3,7", 10, [0, 1, 2, 6]), ("", 3, [0, 1, 2]), ("9-12", 10, [8, 9])],
-)
-def test_page_spec_parsing(spec, total, expected):
-    assert _parse_page_spec(spec, total) == expected
 
 
 def test_skills_have_valid_frontmatter():

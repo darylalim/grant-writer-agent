@@ -273,3 +273,10 @@ borderColor = "#78716C"
 primaryColor = "#605EEF"
 dataframeHeaderBackgroundColor = "#292524"
 dataframeBorderColor = "#44403C"
+
+# Uploads are untrusted input parsed on the server (invariant 24). Streamlit's
+# default is 200 MB; a solicitation needs a fraction of that. Megabytes, and
+# the same value as `solicitation.MAX_UPLOAD_MB`, which enforces it for the CLI
+# -- `tests/test_solicitation.py` pins the two to agree.
+[server]
+maxUploadSize = 50
