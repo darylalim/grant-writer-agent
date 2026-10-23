@@ -443,6 +443,16 @@ def _button(app, label: str):
     return next(button for button in app.button if button.label == label)
 
 
+def _view_controls(app):
+    """The Source/Rendered toggles, and not the page's other segmented controls.
+
+    `_button`'s argument again: counting `app.segmented_control` was a claim
+    about every such control on the page, and the Display popover's Pane height
+    control broke three cases that only meant the file views.
+    """
+    return [control for control in app.segmented_control if control.label == "View"]
+
+
 def _unparked(_config):
     """`get_state` for a thread with nothing pending.
 
@@ -493,7 +503,7 @@ def test_streamlit_app_renders_without_error():
 
     assert not app.exception
     assert [title.value for title in app.title] == ["Grant writer"]
-    assert {"Activity", "Application files"} <= {s.value for s in app.subheader}
+    assert {"Activity", "Application files"} <= {s.value for s in app.header}
 
 
 def test_every_activity_event_kind_renders():
@@ -1163,7 +1173,7 @@ def test_the_approval_panel_renders_every_pending_write(monkeypatch):
     app.run()
 
     assert not app.exception
-    assert "Approval required" in {sub.value for sub in app.subheader}
+    assert "Approval required" in {sub.value for sub in app.header}
     # Both writes are offered, and the count is per request, not per interrupt.
     assert any("2 pending action(s)" in caption.value for caption in app.caption)
     assert {"Approve", "Reject"} <= {button.label for button in app.button}
@@ -1172,6 +1182,147 @@ def test_the_approval_panel_renders_every_pending_write(monkeypatch):
     # submission -- a citation whose link text and URL disagree, most of all.
     assert "# Narrative" in " ".join(block.value for block in app.code)
     assert "Drafted text." not in " ".join(block.value for block in app.markdown)
+
+
+def test_the_approval_panel_comes_before_everything_it_locks(monkeypatch):
+    """On AWAITING the panel is the only enabled way out, so it is drawn
+    first: above both run forms and the activity feed, every one of which is
+    disabled while it waits. Below them it sat a screen and a half down on a
+    phone, and last in keyboard order.
+
+    Order is the point here, so this one case asserts on it deliberately --
+    by what each node *is*, which a layout change cannot silently retarget."""
+    requests = [
+        {
+            "name": "write_file",
+            "args": {"file_path": "/applications/x/final/narrative.md"},
+        }
+    ]
+    agent = SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[
+                SimpleNamespace(
+                    interrupts=[SimpleNamespace(value={"action_requests": requests})]
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-approval-first"
+    app.run()
+
+    assert not app.exception
+    order = _tree_order(app)
+    panel = next(
+        i
+        for i, node in enumerate(order)
+        if getattr(node, "value", None) == "Approval required"
+    )
+    # Both run forms live in the tabs, so one index covers both of them.
+    tabs = next(i for i, node in enumerate(order) if _is_tab_container(node))
+    feed = next(
+        i for i, node in enumerate(order) if getattr(node, "value", None) == "Activity"
+    )
+    assert panel < tabs < feed
+
+
+def _tree_order(app) -> list:
+    """Every node on the page, depth first -- the order the browser draws.
+
+    Takes a block as well as an `AppTest`, to walk just that subtree."""
+    nodes = []
+
+    def walk(node):
+        nodes.append(node)
+        for child in getattr(node, "children", {}).values():
+            walk(child)
+
+    walk(getattr(app, "_tree", app))
+    return nodes
+
+
+def _is_tab_container(node) -> bool:
+    # Elements carry their own message types; only a block can be a container.
+    proto = getattr(node, "proto", None)
+    return (
+        type(node).__name__ == "Block"
+        and proto is not None
+        and proto.HasField("tab_container")
+    )
+
+
+def _tab(app, label: str):
+    """A workflow tab by its label, as `_button` selects a button."""
+    return next(tab for tab in app.tabs if tab.label == label)
+
+
+def test_each_workflow_tab_holds_its_own_form(monkeypatch):
+    """One workflow on screen at a time: each tab carries its form, its id
+    box, and nothing of the other's. A control drawn into the wrong tab still
+    works -- it is just under the wrong heading, which for a billed button is
+    the expensive kind of wrong.
+
+    Pins invariant 10.
+    The id boxes moved into tabs, and stay outside `st.form` there."""
+    app = _app_test(monkeypatch)
+    app.run()
+    assert not app.exception
+
+    discover, draft = _tab(app, "Find opportunities"), _tab(app, "Draft a proposal")
+    assert {b.label for b in discover.button} >= {"Find opportunities"}
+    assert "Draft proposal" not in {b.label for b in discover.button}
+    assert {b.label for b in draft.button} >= {"Draft proposal"}
+    assert "Find opportunities" not in {b.label for b in draft.button}
+
+    assert [box.key for box in discover.text_input if box.key] == ["scan_id_input"]
+    assert [box.key for box in draft.text_input if box.key] == ["app_id_input"]
+    for box in (
+        app.text_input(key="scan_id_input"),
+        app.text_input(key="app_id_input"),
+    ):
+        assert not box.form_id, f"{box.key} is inside a form"
+
+    # The feed belongs to whichever run is active, so it is in neither tab.
+    for tab in (discover, draft):
+        assert "Activity" not in {sub.value for sub in tab.header}
+    assert "Activity" in {sub.value for sub in app.header}
+
+
+def test_the_heading_outline_skips_no_level(application_with_drafts):
+    """Heading navigation is how a screen reader skims a page, and an outline
+    that jumps from the title (h1) straight to h3 reads as a missing section.
+    The sections are h2; their look is set in the theme, not by the level."""
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.run()
+    assert not app.exception
+
+    assert [title.value for title in app.title] == ["Grant writer"]
+    assert {"Run settings", "Application files", "Activity"} <= {
+        header.value for header in app.header
+    }
+    assert {header.tag for header in app.header} == {"h2"}
+    assert not app.subheader, "a section drawn as h3 under the h1"
+
+
+def test_the_tab_opens_on_the_workflow_of_the_last_run(monkeypatch):
+    """A fresh session -- a reload recovering a run, most of all -- lands on
+    the tab of the run it last started, not always on the first one, so the
+    form and results beside the feed are that run's."""
+    app = _app_test(monkeypatch)
+    app.run()
+    container = next(node for node in _tree_order(app) if _is_tab_container(node))
+    assert container.proto.tab_container.default_tab_index == 1  # drafting
+
+    app.session_state["active_kind"] = "discover"
+    app.run()
+    container = next(node for node in _tree_order(app) if _is_tab_container(node))
+    assert container.proto.tab_container.default_tab_index == 0
 
 
 def test_the_approval_caption_names_a_pending_delete(monkeypatch):
@@ -1261,7 +1412,7 @@ def test_an_unreadable_interrupt_does_not_offer_a_plain_approve(monkeypatch):
     assert not next(b for b in app.button if b.label == "Reject").disabled
 
     # Approving is reachable, but only as a second deliberate act.
-    app.checkbox[0].set_value(True).run()
+    app.checkbox(key="blind_approve_0").set_value(True).run()
     assert not next(b for b in app.button if b.label == "Approve").disabled
 
 
@@ -1303,6 +1454,102 @@ def test_the_sidebar_is_frozen_while_a_turn_is_in_flight(monkeypatch):
     # Still holding what was chosen, not the defaults.
     assert app.selectbox(key="profile_select").value == "server"
     assert app.toggle(key="search_toggle").value is False
+    # The Display popover is gated on `busy` too: a display preference, but
+    # a widget all the same, and touching one mid-stream aborts the turn.
+    assert app.segmented_control(key="pane_height").disabled
+
+
+def _pixel_heights(app) -> list[int]:
+    """Every fixed-height container on the page, in tree order."""
+    found = []
+
+    def walk(node):
+        proto = getattr(node, "proto", None)
+        config = getattr(proto, "height_config", None)
+        if config is not None and config.pixel_height:
+            found.append(config.pixel_height)
+        for child in getattr(node, "children", {}).values():
+            walk(child)
+
+    walk(app._tree)
+    return found
+
+
+def test_every_scroll_box_follows_the_pane_height(application_with_drafts):
+    """The feed and the file content pane derive from one control, and the
+    default is the page as it was before the control existed: 440 for the
+    feed, 480 for the pane. A box left on a literal would silently ignore the
+    choice. The file picker beside the pane stretches to the row instead, so
+    it matches the pane side by side and shrinks to its list when stacked."""
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.run()
+    assert not app.exception
+    assert sorted(_pixel_heights(app)) == [440, 480]
+    picker = next(
+        node
+        for node in _tree_order(app)
+        if type(node).__name__ == "Block"
+        and any(getattr(c, "key", None) == "file_pick" for c in _tree_order(node))
+        and node.proto.flex_container.border
+    )
+    assert picker.proto.height_config.use_stretch
+
+    app.segmented_control(key="pane_height").set_value("Tall").run()
+    assert sorted(_pixel_heights(app)) == [680, 720]
+
+    app.segmented_control(key="pane_height").set_value("Compact").run()
+    assert sorted(_pixel_heights(app)) == [280, 320]
+
+
+def test_rendered_prose_keeps_a_reading_measure(application_with_drafts):
+    """A rendered draft is capped at a reading width on a wide screen, and
+    its source view is not -- code blocks need the room."""
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.run()
+    app.radio(key="file_pick").set_value("sections/need.md").run()
+    assert not app.exception
+
+    def widths_around(text):
+        """Pixel widths of every block that holds a markdown `text`."""
+        return [
+            node.proto.width_config.pixel_width
+            for node in _tree_order(app)
+            if type(node).__name__ == "Block"
+            and node.proto.width_config.pixel_width
+            and any(text in getattr(c, "value", "") for c in _tree_order(node))
+        ]
+
+    (control,) = _view_controls(app)
+    assert control.value == "Rendered"
+    assert widths_around("Working draft.") == [780]
+
+    control.set_value("Source").run()
+    assert widths_around("Working draft.") == []
+
+
+def test_the_pane_height_stays_usable_while_an_approval_waits(monkeypatch):
+    """Display is not a run setting, so it is not behind `turn_locked`: on
+    AWAITING a taller pane is how a long `final/` write gets read. Changing it
+    there must neither start a turn nor drop the panel."""
+    agent = _parked_agent("/applications/zz-pytest-display/final/need.md")
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-display"
+    app.run()
+
+    control = app.segmented_control(key="pane_height")
+    assert not control.disabled
+    control.set_value("Tall").run()
+
+    assert not app.exception
+    assert app.session_state["phase"] == "awaiting"
+    assert "Approval required" in {sub.value for sub in app.header}
 
 
 def test_the_approval_preview_can_still_be_read_as_prose(monkeypatch):
@@ -1336,7 +1583,9 @@ def test_the_approval_preview_can_still_be_read_as_prose(monkeypatch):
     app.session_state["active_app_id"] = "zz-pytest-view"
     app.run()
 
-    control = app.segmented_control[0]
+    # By key, not `[0]`: the file browser draws a "View" control too, so an
+    # index names whichever one the layout happens to emit first.
+    control = app.segmented_control(key="view_0_0")
     assert control.value == "Source"
     control.set_value("Rendered").run()
 
@@ -1591,7 +1840,7 @@ def test_the_application_id_stays_frozen_while_an_approval_is_pending(
     app.run()
 
     assert not app.exception
-    assert "Approval required" in {sub.value for sub in app.subheader}
+    assert "Approval required" in {sub.value for sub in app.header}
     assert app.text_input(key="app_id_input").disabled
     assert app.selectbox(key="browse_pick").disabled
 
@@ -1900,7 +2149,7 @@ def test_the_case_insensitive_suffix_reaches_the_text_branches_too(
     app.radio(key="file_pick").set_value("NARRATIVE.MD").run()
     assert not app.exception
     # Markdown, so it gets the Source/Rendered control and no download.
-    assert len(app.segmented_control) == 1
+    assert len(_view_controls(app)) == 1
     assert not app.download_button
     assert "the deadline" in " ".join(block.value for block in app.markdown)
 
@@ -1946,7 +2195,7 @@ def test_the_view_toggles_cannot_be_deselected(application_with_drafts):
     app.run()
 
     app.radio(key="file_pick").set_value("sections/need.md").run()
-    (control,) = app.segmented_control
+    (control,) = _view_controls(app)
     assert control.value == "Rendered"
     # `required` is what the widget carries; deselection is a frontend gesture
     # AppTest cannot make, so the flag itself is the thing to pin.
@@ -1967,7 +2216,7 @@ def test_the_approval_view_toggle_cannot_be_deselected(monkeypatch):
     app.session_state["active_app_id"] = "zz-pytest-view"
     app.run()
 
-    (control,) = app.segmented_control
+    (control,) = _view_controls(app)
     assert control.proto.required, "the approval view toggle is deselectable"
 
 

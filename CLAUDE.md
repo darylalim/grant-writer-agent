@@ -336,7 +336,7 @@ runs, and still produces plausible output.
     the results block says which is which on screen rather than silently retargeting one
     of them. It is bounded on the other side by `turn_locked`, which is `busy or phase ==
     AWAITING`, not `busy` alone: on AWAITING the approval panel is asking a human to vet
-    a submission-bound write for `active_app_id`, and the file browser directly under it
+    a submission-bound write for `active_app_id`, and the file browser on the same page
     describing a different application is the one moment that context has to be right.
 
 11. **Starting a turn on a parked thread abandons the pending write, and `phase` cannot

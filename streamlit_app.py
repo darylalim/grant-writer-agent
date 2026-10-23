@@ -151,7 +151,7 @@ st.session_state.setdefault("payload", None)
 st.session_state.setdefault("active_app_id", "")
 # The scan the discovery graph is running on. A *separate* key from
 # `active_app_id` rather than a reuse of it, because the two name directories
-# in different trees and the file browser at the foot of the page reads
+# in different trees and the file browser in the drafting tab reads
 # `active_app_id` as a fallback -- parking a scan id there would send it
 # looking for `applications/<scan-id>/`, find nothing, and report an empty
 # application rather than a scan it was never asked about.
@@ -197,6 +197,25 @@ st.session_state.setdefault("error", "")
 # Bumped on every resume, and mixed into the approval widgets' keys so each
 # interrupt gets its own. See `resume_with`.
 st.session_state.setdefault("approval_round", 0)
+
+# The one height every scroll box derives from: the activity feed, the file
+# browser, and the PDF viewer inside it. Streamlit has no viewport API, so
+# the reader picks -- a fixed 480 overran a 768px laptop screen, and wasted a
+# tall monitor. Comfortable is the height the page had before this existed,
+# and each offset below keeps that old relationship, so the default page
+# looks exactly as it did.
+PANE_HEIGHTS = {"Compact": 320, "Comfortable": 480, "Tall": 720}
+st.session_state.setdefault("pane_height", "Comfortable")
+
+
+# Rendered drafts are capped at this many pixels wide; see `render_file`.
+PROSE_WIDTH = 780
+
+
+def pane_height(offset: int = 0) -> int:
+    """The chosen pane height in pixels, less `offset`."""
+    return PANE_HEIGHTS[st.session_state.pane_height] - offset
+
 
 # A script run that is stopped mid-stream -- the toolbar's Stop button, or any
 # widget interaction, which aborts the current pass at the next element call --
@@ -636,7 +655,7 @@ def approval_panel(requests: list[dict], unreadable: str = "") -> None:
     is the other thing this argument decides.
     """
     with st.container(border=True):
-        st.subheader("Approval required", anchor=False)
+        st.header("Approval required", anchor=False)
         # An empty list does not mean nothing is pending. The graph is parked on
         # an interrupt either way -- that is why the phase is AWAITING -- and
         # `pending_action_requests` returns [] just as readily for a renamed
@@ -794,7 +813,9 @@ def render_file(path: Path) -> None:
         return
 
     if suffix == ".pdf":
-        st.pdf(blob, height=430)
+        # 50 under the box that holds it, so the viewer's own toolbar fits
+        # without the box scrolling as well.
+        st.pdf(blob, height=pane_height(50))
         return
 
     if suffix != ".md" and suffix not in CODE_LANGUAGES:
@@ -837,7 +858,14 @@ def render_file(path: Path) -> None:
         label_visibility="collapsed",
     )
     if view == "Rendered":
-        st.markdown(text)
+        # A reading measure, about 80 characters. `layout="wide"` stays for
+        # the forms, feed and metrics, which use the width well; a draft does
+        # not, and on a wide monitor its lines ran edge to edge. A fixed width
+        # wider than its parent is clamped to the parent, so a narrow screen
+        # gets the full pane rather than a sideways scroll. The source view
+        # keeps the full width: code blocks need it.
+        with st.container(width=PROSE_WIDTH):
+            st.markdown(text)
     else:
         st.code(text, language="markdown", wrap_lines=True)
 
@@ -881,18 +909,22 @@ def file_browser(app_dir: Path, files: list[Path], gaps: int, verdict: str) -> N
 
     names = [str(path.relative_to(app_dir)) for path in files]
     picker_col, content_col = st.columns([1, 2], vertical_alignment="top")
-    with picker_col, st.container(height=480, border=True):
+    # The picker stretches to the row rather than taking the pane height: side
+    # by side it then matches the content box, and stacked on a phone -- where
+    # columns become rows -- it shrinks to its list instead of a fixed box
+    # holding three file names above a screen of empty border.
+    with picker_col, st.container(height="stretch", border=True):
         selected = st.radio(
             "File", names, key="file_pick", label_visibility="collapsed"
         )
-    with content_col, st.container(height=480, border=True):
+    with content_col, st.container(height=pane_height(), border=True):
         render_file(app_dir / selected)
 
 
 # --- Sidebar: run settings ---------------------------------------------------
 
 with st.sidebar:
-    st.subheader("Run settings", anchor=False)
+    st.header("Run settings", anchor=False)
     # Every control here takes an explicit key. Without one a widget's identity
     # is derived from its value-shaping parameters -- `label`, `value`,
     # `options`, `help`, `width` -- and a widget whose identity changes remounts
@@ -974,11 +1006,42 @@ existing_scan_ids = opportunity_scan_ids(settings) if profile == "local" else []
 
 # --- Header and run form -----------------------------------------------------
 
-st.title("Grant writer", anchor=False)
+with st.container(
+    horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"
+):
+    st.title("Grant writer", anchor=False)
+    # Here rather than in the sidebar, which is hidden on a phone and locked
+    # whole on AWAITING. This is a display preference, not a run setting: it
+    # starts no turn, so it is not gated on `turn_locked` and stays usable
+    # while an approval waits -- when reading a long `final/` write in a
+    # taller pane is the point. It is still gated on `busy`, like every
+    # widget on the page, because touching one mid-stream aborts the turn.
+    # Not part of `get_agent`'s key: it changes no graph. A text label beside
+    # the icon, so a screen reader announces more than the icon's name.
+    with st.popover("Display", icon=":material/tune:"):
+        st.segmented_control(
+            "Pane height",
+            tuple(PANE_HEIGHTS),
+            required=True,
+            key="pane_height",
+            disabled=busy,
+            help="Height of the activity feed and the file panes.",
+        )
 st.caption(
     "Turns a solicitation into a compliant proposal draft. It drafts; it does "
     "not submit. Every output needs human review before it goes to a funder."
 )
+
+# Reserved here, directly under the title, rather than with the other output
+# slots below the forms. On AWAITING the approval panel drawn into it is the
+# sole exit -- `turn_locked` disables everything else on the page -- and below
+# two forms and the feed it sat a screen and a half down on a phone, where
+# columns stack and nothing points the reader at it. First on the page, it is
+# also first in keyboard order. The banners and errors that share it move with
+# it, so a refusal like "Resolve the approval below" still sits over the panel
+# it names. Inline rather than `st.dialog`: a dialog can be dismissed, leaving a
+# page whose every control is disabled.
+status_slot = st.container()
 
 missing = require_api_keys(needs_search=search)
 if missing:
@@ -988,180 +1051,214 @@ if missing:
         icon=":material/key_off:",
     )
 
-# --- Discovery: find opportunities worth drafting -----------------------------
+# --- The two workflows, one tab each ------------------------------------------
 #
-# Above the drafting form because that is the order the work happens in: you
-# find an opportunity, then you write to it. Both sections start a turn, both
-# are gated on the same `turn_locked`, and both feed the same activity feed
-# below -- what differs is which graph runs and which tree it writes into.
-
-st.subheader("Find opportunities", anchor=False)
-st.caption(
-    "Searches grants.gov and the web, then scores each candidate against your "
-    "organization profile. Scoring is a rubric of verdicts with quoted "
-    "citations; the percentage is computed from those, never stated by the agent."
+# One workflow on screen at a time: both forms one above the other made the
+# page long before any output appeared, worst on a phone. Each tab holds its
+# form and that workflow's results; the activity feed and the follow-up input
+# stay below the tabs, because they belong to whichever run is active.
+#
+# `on_change` stays at its default, "ignore", deliberately. Switching tabs is
+# then a browser-side act that reruns nothing, so it is safe mid-stream (a
+# rerun there would abort the turn) and on AWAITING (it starts, resumes and
+# discards nothing). The price is that both tabs are computed on every pass --
+# which is what the page did before tabs existed, so the run logic is the same
+# code on the same passes. Lazy tabs would change which code runs when.
+#
+# `default` puts a fresh session -- a reload recovering a run included -- on
+# the tab of the run it last started. The key keeps the selection stable
+# across reruns after that.
+WORKFLOW_TABS = ("Find opportunities", "Draft a proposal")
+discover_tab, draft_tab = st.tabs(
+    WORKFLOW_TABS,
+    key="workflow_tab",
+    default=WORKFLOW_TABS[0]
+    if st.session_state.active_kind == DISCOVER
+    else WORKFLOW_TABS[1],
 )
 
-# Outside the form, and for the reason spelled out at the application id box
-# below: the shortlist at the foot of the page reads this back to decide which
-# scan to show, so inside a form it could only ever show a scan already
-# submitted this session -- making re-reading last week's scan cost a fresh
-# billed run.
-with st.container(horizontal=True):
-    scan_id = st.text_input(
-        "Scan id",
-        key="scan_id_input",
-        placeholder="rural-health-2026",
-        disabled=turn_locked,
-        help="Names the scan directory, and the discovery thread. Reuse it to "
-        "add to a scan, or to read one below.",
+# --- Discovery: find opportunities worth drafting -----------------------------
+#
+# The first tab because that is the order the work happens in: you find an
+# opportunity, then you write to it. Both tabs start a turn, both are gated on
+# the same `turn_locked`, and both feed the same activity feed below the tabs
+# -- what differs is which graph runs and which tree it writes into. The tab
+# label is the section's name, so neither tab repeats it as a heading.
+
+with discover_tab:
+    st.caption(
+        "Searches grants.gov and the web, then scores each candidate against your "
+        "organization profile. Scoring is a rubric of verdicts with quoted "
+        "citations; the percentage is computed from those, never stated by the agent."
     )
-    if existing_scan_ids:
-        st.selectbox(
-            "Browse an existing scan",
-            existing_scan_ids,
-            index=None,
-            key="scan_pick",
-            on_change=_pick_scan,
-            placeholder="Pick one to read…",
+
+    # Outside the form, and for the reason spelled out at the application id box
+    # below: the shortlist under the form reads this back to decide which
+    # scan to show, so inside a form it could only ever show a scan already
+    # submitted this session -- making re-reading last week's scan cost a fresh
+    # billed run.
+    with st.container(horizontal=True):
+        scan_id = st.text_input(
+            "Scan id",
+            key="scan_id_input",
+            placeholder="rural-health-2026",
             disabled=turn_locked,
-            help="Fills the id box on the left. Reading a scan does not start a run.",
+            help="Names the scan directory, and the discovery thread. Reuse it to "
+            "add to a scan, or to read one below.",
+        )
+        if existing_scan_ids:
+            st.selectbox(
+                "Browse an existing scan",
+                existing_scan_ids,
+                index=None,
+                key="scan_pick",
+                on_change=_pick_scan,
+                placeholder="Pick one to read…",
+                disabled=turn_locked,
+                help="Fills the id box on the left. Reading a scan does not start "
+                "a run.",
+            )
+
+    with st.form("discover", border=True):
+        focus = st.text_input(
+            "What to look for",
+            placeholder="afterschool STEM programs in rural districts",
+            help="Your programs and populations, in your own words. The scout "
+            "builds its search from this and the organization profile.",
+        )
+        agencies = st.text_input(
+            "Agencies (optional)",
+            placeholder="USDA|NSF",
+            help="Pipe-separated grants.gov agency codes. Leave empty to search "
+            "every agency — the results tell you which codes are worth filtering on.",
+        )
+        scan_notes = st.text_area(
+            "Additional context",
+            placeholder="Constraints, deadlines you cannot meet, funders to avoid.",
+            height=80,
+        )
+        discover_submitted = st.form_submit_button(
+            "Find opportunities",
+            icon=":material/search:",
+            # `turn_locked`, not `busy`, exactly as the drafting button is. A scan
+            # runs on its own thread so it cannot abandon a pending `final/` write
+            # the way a second draft brief would -- but it does clear the activity
+            # feed, which is the only on-screen record that one is pending, and on
+            # AWAITING the panel above is asking about that write.
+            disabled=bool(missing) or turn_locked,
+            help="Resolve the pending approval above before starting a new run."
+            if turn_locked and not busy
+            else None,
         )
 
-with st.form("discover", border=True):
-    focus = st.text_input(
-        "What to look for",
-        placeholder="afterschool STEM programs in rural districts",
-        help="Your programs and populations, in your own words. The scout "
-        "builds its search from this and the organization profile.",
-    )
-    agencies = st.text_input(
-        "Agencies (optional)",
-        placeholder="USDA|NSF",
-        help="Pipe-separated grants.gov agency codes. Leave empty to search "
-        "every agency — the results tell you which codes are worth filtering on.",
-    )
-    scan_notes = st.text_area(
-        "Additional context",
-        placeholder="Constraints, deadlines you cannot meet, funders to avoid.",
-        height=80,
-    )
-    discover_submitted = st.form_submit_button(
-        "Find opportunities",
-        icon=":material/search:",
-        # `turn_locked`, not `busy`, exactly as the drafting button is. A scan
-        # runs on its own thread so it cannot abandon a pending `final/` write
-        # the way a second draft brief would -- but it does clear the activity
-        # feed, which is the only on-screen record that one is pending, and on
-        # AWAITING the panel below is asking about that write.
-        disabled=bool(missing) or turn_locked,
-        help="Resolve the pending approval below before starting a new run."
-        if turn_locked and not busy
-        else None,
-    )
+    # Reserved before any slow work, like `activity_slot` below.
+    discovery_slot = st.container()
 
-st.divider()
-st.subheader("Draft a proposal", anchor=False)
+# --- Drafting: write a proposal to one solicitation ---------------------------
 
-# Outside the form, deliberately. `st.form` batches its widgets and sends them
-# only when Submit is pressed -- "the values of the widgets inside it are never
-# sent to your app" otherwise. This id is not just a run input: the file browser
-# at the bottom reads it back to decide which application to show. Inside the
-# form that read could only ever see an id already submitted this session, so
-# opening yesterday's drafts meant clicking Draft proposal and starting a fresh
-# billed run on them, and the caption below promising otherwise was unreachable.
-# Out here, committing the box reruns the script and the browser follows.
-#
-# The lock below is load-bearing *because* of the move, not decoration copied
-# from the sidebar. In the form this input could not trigger a rerun, so it was
-# harmless mid-stream; out here typing into it during a turn would abort the
-# streaming pass at the next element call and drop minutes of model calls into
-# STOPPED, exactly as an ungated sidebar widget would. The key keeps its
-# identity stable across that toggle -- see the sidebar block on why.
-#
-# The picker beside it is an input method for this box, not a second source of
-# truth -- see `_pick_application`. So this stays the one value both the run and
-# the browser read, and a text input rather than a selectbox with
-# `accept_new_options`: AppTest serialises a selectbox by *index*
-# (`Selectbox.index` does `options.index(value)`), so a typed id that is not
-# already an option raises ValueError in the harness. Every case that names a
-# new application -- including the ones pinning that `../evil` is refused --
-# would become untestable, and these AppTest cases are the only coverage this
-# file has.
-# `turn_locked` (defined at the top) covers this box for a reason of its own,
-# beyond the shared "no turn may start on a parked thread": on AWAITING the
-# approval panel below is asking a human to vet a `final/` write for
-# `active_app_id`, and retargeting the box there leaves that panel and the files
-# pane under it describing two different applications, at the one moment the
-# surrounding context has to be right.
+with draft_tab:
+    # Outside the form, deliberately. `st.form` batches its widgets and sends them
+    # only when Submit is pressed -- "the values of the widgets inside it are never
+    # sent to your app" otherwise. This id is not just a run input: the file browser
+    # under the form reads it back to decide which application to show. Inside the
+    # form that read could only ever see an id already submitted this session, so
+    # opening yesterday's drafts meant clicking Draft proposal and starting a fresh
+    # billed run on them, and the caption below promising otherwise was unreachable.
+    # Out here, committing the box reruns the script and the browser follows.
+    #
+    # The lock below is load-bearing *because* of the move, not decoration copied
+    # from the sidebar. In the form this input could not trigger a rerun, so it was
+    # harmless mid-stream; out here typing into it during a turn would abort the
+    # streaming pass at the next element call and drop minutes of model calls into
+    # STOPPED, exactly as an ungated sidebar widget would. The key keeps its
+    # identity stable across that toggle -- see the sidebar block on why.
+    #
+    # The picker beside it is an input method for this box, not a second source of
+    # truth -- see `_pick_application`. So this stays the one value both the run and
+    # the browser read, and a text input rather than a selectbox with
+    # `accept_new_options`: AppTest serialises a selectbox by *index*
+    # (`Selectbox.index` does `options.index(value)`), so a typed id that is not
+    # already an option raises ValueError in the harness. Every case that names a
+    # new application -- including the ones pinning that `../evil` is refused --
+    # would become untestable, and these AppTest cases are the only coverage this
+    # file has.
+    # `turn_locked` (defined at the top) covers this box for a reason of its own,
+    # beyond the shared "no turn may start on a parked thread": on AWAITING the
+    # approval panel at the top is asking a human to vet a `final/` write for
+    # `active_app_id`, and retargeting the box there leaves that panel and the files
+    # pane under it describing two different applications, at the one moment the
+    # surrounding context has to be right.
 
-with st.container(horizontal=True):
-    app_id = st.text_input(
-        "Application id",
-        key="app_id_input",
-        placeholder="nsf-aisl-2026",
-        disabled=turn_locked,
-        help="Also the LangGraph thread id. Reuse it to continue a run, or to "
-        "browse an earlier one below.",
-    )
-    # Only worth drawing once there is something to pick, and it never gates the
-    # id box: typing an id that does not exist yet is how a new run is named.
-    if existing_ids:
-        st.selectbox(
-            "Browse an existing application",
-            existing_ids,
-            index=None,
-            key="browse_pick",
-            on_change=_pick_application,
-            placeholder="Pick one to read…",
+    with st.container(horizontal=True):
+        app_id = st.text_input(
+            "Application id",
+            key="app_id_input",
+            placeholder="nsf-aisl-2026",
             disabled=turn_locked,
-            help="Fills the id box on the left. Reading an application does not "
-            "start a run.",
+            help="Also the LangGraph thread id. Reuse it to continue a run, or to "
+            "browse an earlier one below.",
+        )
+        # Only worth drawing once there is something to pick, and it never gates the
+        # id box: typing an id that does not exist yet is how a new run is named.
+        if existing_ids:
+            st.selectbox(
+                "Browse an existing application",
+                existing_ids,
+                index=None,
+                key="browse_pick",
+                on_change=_pick_application,
+                placeholder="Pick one to read…",
+                disabled=turn_locked,
+                help="Fills the id box on the left. Reading an application does not "
+                "start a run.",
+            )
+
+    with st.form("draft", border=True):
+        funder = st.text_input("Funder", placeholder="NSF")
+        rfp = st.file_uploader("Solicitation PDF", type="pdf")
+        notes = st.text_area(
+            "Additional context",
+            placeholder="Anything the agent should know that is not in the "
+            "solicitation.",
+            height=80,
+        )
+        rubric = st.file_uploader(
+            "Review criteria (optional)",
+            type=["md", "txt"],
+            help="The funder's published criteria. The agent grades itself against "
+            "them and iterates, up to 3 times.",
+        )
+        submitted = st.form_submit_button(
+            "Draft proposal",
+            type="primary",
+            icon=":material/play_arrow:",
+            # `turn_locked`, not `busy` -- this is a door into the parked state the
+            # id box and the follow-up input are already gated against. Submitting
+            # on AWAITING does not resume the interrupt: it sends a fresh
+            # `draft_request` on the same thread, abandoning the pending
+            # submission-bound write, and clears `activity` on the way so the feed
+            # keeps no trace that one was ever pending. Locking the id box does not
+            # cover it -- the brief is rebuilt from the id that box still holds.
+            #
+            # Only the phases this session knows about, though; the handler's
+            # `parked` check is what actually holds. Left enabled on STOPPED and
+            # FAILED on purpose: their banners tell you to re-submit the same id,
+            # which is right whenever no interrupt survived, and the handler
+            # refuses the case where one did.
+            disabled=bool(missing) or turn_locked,
+            help="Resolve the pending approval above before starting a new run."
+            if turn_locked and not busy
+            else None,
         )
 
-with st.form("draft", border=True):
-    funder = st.text_input("Funder", placeholder="NSF")
-    rfp = st.file_uploader("Solicitation PDF", type="pdf")
-    notes = st.text_area(
-        "Additional context",
-        placeholder="Anything the agent should know that is not in the solicitation.",
-        height=80,
-    )
-    rubric = st.file_uploader(
-        "Review criteria (optional)",
-        type=["md", "txt"],
-        help="The funder's published criteria. The agent grades itself against "
-        "them and iterates, up to 3 times.",
-    )
-    submitted = st.form_submit_button(
-        "Draft proposal",
-        type="primary",
-        icon=":material/play_arrow:",
-        # `turn_locked`, not `busy` -- this is a door into the parked state the
-        # id box and the follow-up input are already gated against. Submitting
-        # on AWAITING does not resume the interrupt: it sends a fresh
-        # `draft_request` on the same thread, abandoning the pending
-        # submission-bound write, and clears `activity` on the way so the feed
-        # keeps no trace that one was ever pending. Locking the id box does not
-        # cover it -- the brief is rebuilt from the id that box still holds.
-        #
-        # Only the phases this session knows about, though; the handler's
-        # `parked` check is what actually holds. Left enabled on STOPPED and
-        # FAILED on purpose: their banners tell you to re-submit the same id,
-        # which is right whenever no interrupt survived, and the handler
-        # refuses the case where one did.
-        disabled=bool(missing) or turn_locked,
-        help="Resolve the pending approval below before starting a new run."
-        if turn_locked and not busy
-        else None,
-    )
+    results_slot = st.container()
 
 # --- Reserve output slots before any slow work -------------------------------
+#
+# `status_slot` is reserved under the title instead, and the two result slots
+# inside their tabs; see there.
 
 activity_slot = st.container()
-status_slot = st.container()
-discovery_slot = st.container()
-results_slot = st.container()
 
 if discover_submitted:
     scan_id = scan_id.strip()
@@ -1384,8 +1481,10 @@ active_ref = (
 active_noun = "scan" if active_discovering else "application"
 
 with activity_slot:
-    st.subheader("Activity", anchor=False)
-    feed = st.container(height=440, border=True, autoscroll=True)
+    st.header("Activity", anchor=False)
+    # 40 under the file panes, as it always was: the follow-up input and its
+    # caption sit under it, and the two together come to about one pane.
+    feed = st.container(height=pane_height(40), border=True, autoscroll=True)
     with feed:
         render_feed(st.session_state.activity)
         # AWAITING is excluded, not just RUNNING. The reload-recovery path lands
@@ -1418,8 +1517,8 @@ with activity_slot:
         # `turn_locked` carries the AWAITING half of this: the graph is parked
         # on an interrupt there, and a fresh message starts a new turn rather
         # than answering it -- abandoning the pending write instead of approving
-        # or rejecting it. Resolve the approval first; its panel is directly
-        # below. Shared rather than spelled out here, so a phase added to that
+        # or rejecting it. Resolve the approval first; its panel is at the top
+        # of the page. Shared rather than spelled out here, so a phase added to that
         # expression reaches this input too; the extra clause is this control's
         # own precondition, that there is a thread to continue at all.
         disabled=(turn_locked or bool(missing) or not active_ref),
@@ -1585,7 +1684,7 @@ with status_slot:
         # the fragment -- see approval_panel on why it does not fetch its own.
         #
         # Guarded because AWAITING is the one phase with no enabled way out:
-        # every control that could start a turn is locked, so the panel below is
+        # every control that could start a turn is locked, so the panel here is
         # the only exit, and an exception escaping this read takes the panel with
         # it. The page then shows a traceback over a form it cannot submit, an id
         # box it cannot edit, and no Approve or Reject at all -- and every rerun
@@ -1656,14 +1755,14 @@ with discovery_slot:
         # is still enabled and still bills a full run under this profile, so a
         # section that simply does not appear reads as "nothing was found"
         # rather than "this profile keeps nothing to show you".
-        st.subheader("Opportunity shortlist", anchor=False)
+        st.header("Opportunity shortlist", anchor=False)
         st.info(
             "The `server` profile keeps scans in ephemeral graph state, not on "
             "disk. Switch to `local` to browse a shortlist.",
             icon=":material/cloud_off:",
         )
     elif browse_scan_id:
-        st.subheader("Opportunity shortlist", anchor=False)
+        st.header("Opportunity shortlist", anchor=False)
         try:
             # Same boundary as the write side. Without it a scan id of ".."
             # lists the repo root, and `render_file`'s download branch would
@@ -1702,7 +1801,7 @@ with discovery_slot:
 browse_id = app_id.strip() or st.session_state.active_app_id
 
 with results_slot:
-    st.subheader("Application files", anchor=False)
+    st.header("Application files", anchor=False)
 
     if profile == "server":
         st.info(
@@ -1719,7 +1818,7 @@ with results_slot:
         # The one thing the move out of the form gave up. `browse_id` follows a
         # live widget; the graph still runs on `active_app_id`, which only the
         # submit handler assigns. So after a run on A, picking B points this
-        # pane at B while the follow-up box above -- and any pending approval --
+        # pane at B while the follow-up box below -- and any pending approval --
         # still belong to A. Both behaviours are wanted (read an old draft
         # without spending a turn; keep a follow-up on the thread it continues),
         # so the divergence is allowed and said out loud rather than resolved by
@@ -1737,7 +1836,7 @@ with results_slot:
             # Names whatever the follow-up box actually continues, which after
             # a scan is the scan and not this application. Asserting
             # `active_app_id` unconditionally was a caption that contradicted
-            # the chat input's own placeholder two panes up -- and this caption
+            # the chat input's own placeholder under the tabs -- and this caption
             # exists precisely so two controls never disagree quietly about
             # which thread they address.
             if st.session_state.phase == AWAITING:
@@ -1748,11 +1847,11 @@ with results_slot:
             elif active_discovering:
                 st.caption(
                     f"Reading application `{browse_id}`. The follow-up box "
-                    f"above continues scan `{active_ref}`, not this application."
+                    f"below continues scan `{active_ref}`, not this application."
                 )
             else:
                 st.caption(
-                    f"Reading `{browse_id}`. The follow-up box above still "
+                    f"Reading `{browse_id}`. The follow-up box below still "
                     f"continues `{st.session_state.active_app_id}`."
                 )
         try:
