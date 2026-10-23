@@ -19,6 +19,13 @@ applications/
 # which funders were considered and rejected, which is nobody else's business.
 opportunities/
 
+# The organisation profile. Same reasoning again, and the agent writes to it on
+# its own: it records confirmed facts there, so the first real run puts the
+# organisation's data in this file. It is created from templates/org-profile.md,
+# which is what is tracked. Ignoring it is only half the fix -- git keeps
+# tracking a file it already tracks, which is why the template was moved.
+memories/org/AGENTS.md
+
 # Persisted checkpoint (conversation/todo state) written by the CLI.
 .grant_writer/
 

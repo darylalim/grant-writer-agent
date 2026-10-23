@@ -554,6 +554,28 @@ runs, and still produces plausible output.
     `refusal-surfaced` check is the end-to-end proof and can only pass offline: the live
     run declined 0 of 25.
 
+22. **The organization profile is not tracked, and its template sits outside every content
+    directory.** `memories/org/AGENTS.md` is the organisation's own record: the orchestrator
+    writes confirmed facts there (invariant 20), so the first real run puts names, figures and
+    possibly personnel data in it. It used to be tracked as the shipped template, and
+    `git commit -a` would have published all of that — the data `.gitignore` keeps out of
+    `applications/`, leaving by another door. It is now gitignored and created by
+    `Settings.ensure_dirs` from `templates/org-profile.md`, **once**: mode `"x"` refuses an
+    existing file, so a profile is never reset to the blank one. Ignoring alone would have
+    done nothing, since git keeps tracking a file it already tracks.
+
+    The template's location is the half that holds. Under `memories/`, the orchestrator's
+    `/memories/**` allow and `tools._DRAFTING_WRITE_DIRS` would both let an agent write the
+    tracked file and reopen the leak. Outside `CONTENT_DIRS`, the catch-all deny refuses it
+    and `_resolve_output_path` refuses it, with no rule naming it — and
+    `seed_store_from_disk`'s walk of `memories/` cannot pick it up as a second memory file.
+    That function falls back to the template for the profile key, and in the memories
+    namespace it **never overwrites a key the Store already holds** (decision 10: Store edits
+    win, disk only fills what is missing). Skills are the opposite — shipped, read-only to
+    every agent — so disk wins there and a deploy updates them. In-memory today that
+    distinction is invisible, because the Store starts empty; against E1's Postgres, seeding
+    over the profile would revert it on every restart.
+
 ## Backend profiles
 
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files

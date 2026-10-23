@@ -31,7 +31,7 @@ from deepagents.backends import (
 from deepagents.backends.utils import create_file_data
 from langgraph.store.base import BaseStore
 
-from grant_writer.config import CONTENT_DIRS, Settings
+from grant_writer.config import CONTENT_DIRS, MEMORY_FILE, Settings
 
 # Each routed prefix gets its OWN Store namespace. This matters: CompositeBackend
 # strips the route prefix before delegating (``/memories/org/x`` -> ``/org/x``),
@@ -42,6 +42,10 @@ _SEED_ROUTES = {
     "skills": ("/skills/", ("filesystem", "skills")),
     "memories": ("/memories/", ("filesystem", "memories")),
 }
+
+# The profile's key in the memories namespace, derived rather than restated so a
+# moved profile cannot leave the template fallback seeding a key nothing reads.
+_PROFILE_KEY = "/" + MEMORY_FILE.removeprefix(_SEED_ROUTES["memories"][0])
 
 
 def _namespace_factory(namespace: tuple[str, ...]) -> Callable[[Any], tuple[str, ...]]:
@@ -86,14 +90,28 @@ def seed_store_from_disk(store: BaseStore, settings: Settings) -> int:
     the drafter/reviewer silently get no section guides and no org profile.
     Keys are stored prefix-stripped and namespaced per route, matching how
     CompositeBackend addresses them. Returns the number of files seeded.
+
+    The two routes differ in which side wins (decision 10). Skills ship with
+    the code and no agent may write them, so disk always wins and a deploy
+    updates them. Memories are the organisation's own record, edited through
+    the Store, so disk only fills a key the Store does not have -- seeding it
+    over an edit would revert the profile on every restart once the Store
+    outlives the process. The profile is untracked, so a fresh checkout has
+    none on disk, and the template stands in for it.
     """
     count = 0
     for disk_dir, (_prefix, namespace) in _SEED_ROUTES.items():
         base = settings.root / disk_dir
-        if not base.is_dir():
-            continue
-        for path in sorted(base.rglob("*")):
+        files = sorted(base.rglob("*")) if base.is_dir() else []
+        # Prefix-stripped, leading slash: "/rfp-decomposition/SKILL.md".
+        sources = {"/" + p.relative_to(base).as_posix(): p for p in files}
+        keep_existing = disk_dir == "memories"
+        if keep_existing:
+            sources.setdefault(_PROFILE_KEY, settings.memory_template_path)
+        for key, path in sources.items():
             if not path.is_file():
+                continue
+            if keep_existing and store.get(namespace, key) is not None:
                 continue
             try:
                 content = path.read_text(encoding="utf-8")
@@ -101,8 +119,6 @@ def seed_store_from_disk(store: BaseStore, settings: Settings) -> int:
                 # Skip non-text files (e.g. a stray .DS_Store or image); they
                 # are not skills or memory, and one must not crash startup.
                 continue
-            # Prefix-stripped, leading slash: "/rfp-decomposition/SKILL.md".
-            key = "/" + path.relative_to(base).as_posix()
             store.put(namespace, key, create_file_data(content))
             count += 1
     return count
