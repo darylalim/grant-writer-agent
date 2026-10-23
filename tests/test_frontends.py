@@ -606,6 +606,17 @@ def test_a_stopped_run_does_not_wedge_the_app(monkeypatch):
     assert any("checkpointed" in warning.value for warning in app.warning)
 
 
+def test_both_billed_run_buttons_are_primary(monkeypatch):
+    """A scan costs money as a draft does, so it must not look like the
+    lesser action. G's tabs show one form at a time, so making both primary
+    never puts two primary buttons on screen together."""
+    app = _app_test(monkeypatch)
+    app.run()
+
+    for label in ("Find opportunities", "Draft proposal"):
+        assert _button(app, label).proto.type == "primary", label
+
+
 def test_the_run_button_is_disabled_while_a_turn_is_in_flight(monkeypatch):
     """`busy` is read near the top of the script, before the submit handler
     sets the phase, so the pass that starts a run would draw the form enabled
