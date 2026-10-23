@@ -1231,7 +1231,9 @@ def test_the_approval_panel_comes_before_everything_it_locks(monkeypatch):
 
 
 def _tree_order(app) -> list:
-    """Every node on the page, depth first -- the order the browser draws."""
+    """Every node on the page, depth first -- the order the browser draws.
+
+    Takes a block as well as an `AppTest`, to walk just that subtree."""
     nodes = []
 
     def walk(node):
@@ -1239,7 +1241,7 @@ def _tree_order(app) -> list:
         for child in getattr(node, "children", {}).values():
             walk(child)
 
-    walk(app._tree)
+    walk(getattr(app, "_tree", app))
     return nodes
 
 
@@ -1456,21 +1458,59 @@ def _pixel_heights(app) -> list[int]:
 
 
 def test_every_scroll_box_follows_the_pane_height(application_with_drafts):
-    """The feed and both file panes derive from one control, and the default
-    is the page as it was before the control existed: 440 for the feed, 480
-    for the panes. A box left on a literal would silently ignore the choice."""
+    """The feed and the file content pane derive from one control, and the
+    default is the page as it was before the control existed: 440 for the
+    feed, 480 for the pane. A box left on a literal would silently ignore the
+    choice. The file picker beside the pane stretches to the row instead, so
+    it matches the pane side by side and shrinks to its list when stacked."""
     app = _app_test()
     app.run()
     app.text_input(key="app_id_input").set_value(application_with_drafts)
     app.run()
     assert not app.exception
-    assert sorted(_pixel_heights(app)) == [440, 480, 480]
+    assert sorted(_pixel_heights(app)) == [440, 480]
+    picker = next(
+        node
+        for node in _tree_order(app)
+        if type(node).__name__ == "Block"
+        and any(getattr(c, "key", None) == "file_pick" for c in _tree_order(node))
+        and node.proto.flex_container.border
+    )
+    assert picker.proto.height_config.use_stretch
 
     app.segmented_control(key="pane_height").set_value("Tall").run()
-    assert sorted(_pixel_heights(app)) == [680, 720, 720]
+    assert sorted(_pixel_heights(app)) == [680, 720]
 
     app.segmented_control(key="pane_height").set_value("Compact").run()
-    assert sorted(_pixel_heights(app)) == [280, 320, 320]
+    assert sorted(_pixel_heights(app)) == [280, 320]
+
+
+def test_rendered_prose_keeps_a_reading_measure(application_with_drafts):
+    """A rendered draft is capped at a reading width on a wide screen, and
+    its source view is not -- code blocks need the room."""
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.run()
+    app.radio(key="file_pick").set_value("sections/need.md").run()
+    assert not app.exception
+
+    def widths_around(text):
+        """Pixel widths of every block that holds a markdown `text`."""
+        return [
+            node.proto.width_config.pixel_width
+            for node in _tree_order(app)
+            if type(node).__name__ == "Block"
+            and node.proto.width_config.pixel_width
+            and any(text in getattr(c, "value", "") for c in _tree_order(node))
+        ]
+
+    (control,) = _view_controls(app)
+    assert control.value == "Rendered"
+    assert widths_around("Working draft.") == [780]
+
+    control.set_value("Source").run()
+    assert widths_around("Working draft.") == []
 
 
 def test_the_pane_height_stays_usable_while_an_approval_waits(monkeypatch):

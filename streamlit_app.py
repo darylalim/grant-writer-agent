@@ -208,6 +208,10 @@ PANE_HEIGHTS = {"Compact": 320, "Comfortable": 480, "Tall": 720}
 st.session_state.setdefault("pane_height", "Comfortable")
 
 
+# Rendered drafts are capped at this many pixels wide; see `render_file`.
+PROSE_WIDTH = 780
+
+
 def pane_height(offset: int = 0) -> int:
     """The chosen pane height in pixels, less `offset`."""
     return PANE_HEIGHTS[st.session_state.pane_height] - offset
@@ -854,7 +858,14 @@ def render_file(path: Path) -> None:
         label_visibility="collapsed",
     )
     if view == "Rendered":
-        st.markdown(text)
+        # A reading measure, about 80 characters. `layout="wide"` stays for
+        # the forms, feed and metrics, which use the width well; a draft does
+        # not, and on a wide monitor its lines ran edge to edge. A fixed width
+        # wider than its parent is clamped to the parent, so a narrow screen
+        # gets the full pane rather than a sideways scroll. The source view
+        # keeps the full width: code blocks need it.
+        with st.container(width=PROSE_WIDTH):
+            st.markdown(text)
     else:
         st.code(text, language="markdown", wrap_lines=True)
 
@@ -898,7 +909,11 @@ def file_browser(app_dir: Path, files: list[Path], gaps: int, verdict: str) -> N
 
     names = [str(path.relative_to(app_dir)) for path in files]
     picker_col, content_col = st.columns([1, 2], vertical_alignment="top")
-    with picker_col, st.container(height=pane_height(), border=True):
+    # The picker stretches to the row rather than taking the pane height: side
+    # by side it then matches the content box, and stacked on a phone -- where
+    # columns become rows -- it shrinks to its list instead of a fixed box
+    # holding three file names above a screen of empty border.
+    with picker_col, st.container(height="stretch", border=True):
         selected = st.radio(
             "File", names, key="file_pick", label_visibility="collapsed"
         )
