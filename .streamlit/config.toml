@@ -1,13 +1,22 @@
-# shadcn/ui-inspired theme (zinc), light and dark.
+# Paper and ink: warm stone neutrals, one indigo accent, serif headings.
 #
-# Provenance: the theme templates' `shadcn.toml`, from inside the installed
-# streamlit package, at
-# `$(uv run python -c 'import streamlit,pathlib;print(pathlib.Path(streamlit.__file__).parent)')`
-# then `/.agents/skills/developing-with-streamlit/assets/templates/themes/
-# configs/shadcn.toml`. Every value is the template's except
-# `chartCategoricalColors` (replaced deliberately -- see below); the rest is only
-# redistributed across sections, so it still diffs by key on a version bump.
-# `tests/test_theme_config.py` pins that, so the deviation cannot grow silently.
+# Provenance: designed for this app in Track F of
+# `docs/plans/upgrade-and-deploy.md`, starting from the theme templates'
+# `shadcn.toml` (zinc), which this file used to copy unchanged. Kept from it:
+# the geometry, the 14px base, the type scale, the fonts for body and code, and
+# the semantic palette. Changed on purpose, and no longer diffable against it:
+#   - Tailwind **stone** in place of zinc, the same steps in the same roles, so
+#     long reading happens on warm paper rather than cool grey;
+#   - one **indigo** accent for `primaryColor` and `linkColor`. The template was
+#     monochrome, so *Draft proposal* (a billed run) and *Approve* (a write bound
+#     for submission) looked like every other dark-grey control. Indigo stays
+#     clear of the red, amber, green and blue the status colours use;
+#   - **Source Serif 4** for headings, so a page reads like a proposal rather
+#     than a console. Body text stays Inter, which is more legible at 14px;
+#   - `borderColor` raised to clear 3:1 (WCAG 1.4.11). See the borders note
+#     below before lightening it.
+# `tests/test_theme_config.py` recomputes every contrast figure quoted here, so
+# a colour edit that breaks one fails rather than only making a comment wrong.
 #
 # Chosen for this app: `showWidgetBorder`, because the layout is built almost
 # entirely from `st.container(border=True)`.
@@ -25,7 +34,7 @@
 # **Rolling this back is not "delete [theme.dark]".** Verified in 1.60: the
 # switch appears when *either* mode section exists, and with only [theme.light]
 # present the Dark entry is built from [theme] plus Streamlit's stock dark
-# palette -- a #0E1117 page with none of these zinc surfaces, which a dark
+# palette -- a #0E1117 page with none of these stone surfaces, which a dark
 # desktop then gets by default. That is worse than either the split or the
 # original. To actually go back, move [theme.light]'s keys into [theme] and
 # delete *both* dark sections.
@@ -55,26 +64,63 @@
 #
 # The semantic colours stay shared for a measured reason: `:gray[...]` and
 # friends do NOT render these values. Streamlit derives a per-mode
-# `grayTextColor` from `grayColor` and renders that, so on the dark page
-# `grayColor = #71717A` reaches the screen as #9898A0 at 6.95:1 -- already past
-# AA, at 36% of body-text contrast, which is the de-emphasis `TOOL` rows and
-# `PENDING_TODO_ICON` want. Overriding these per mode to "fix contrast" measures
-# a token nothing displays and flattens that hierarchy (a lifted zinc-400 lands
-# at 12.07:1, 63% of body text -- barely muted at all).
+# `grayTextColor` from `grayColor` by moving its HSL lightness 0.15 away from the
+# page, and renders that. On the dark page `grayColor = #78716C` reaches the
+# screen as #9E9793 at 6.87:1 -- past AA, at 36% of body-text contrast, which is
+# the de-emphasis `TOOL` rows and `PENDING_TODO_ICON` want. On the light page it
+# renders as #504B48 at 8.60:1. Overriding these per mode to "fix contrast"
+# measures a token nothing displays and flattens that hierarchy.
 #
-# ## The chart ramp, the one value not from shadcn.toml
+# ## Borders: one token, two jobs, and the stricter one wins
 #
-# The template ramp opens on a zinc scale tuned for a white page: #18181B scores
-# 1.12:1 on the dark surface, and four of its seven entries fall under 3:1 on at
+# Streamlit draws input outlines (text inputs, selects, text areas) *and* the
+# decorative `st.container(border=True)` boxes from the same `borderColor`, and
+# there is no theme-only way to set them apart. An input is identified by its
+# outline, so WCAG 1.4.11 asks 3:1 of it against every surface it can sit on.
+# The template's light borders reached 1.27:1 on the page. Raising the token to
+# pass makes every container visibly heavier, and that was decided as the right
+# trade: the inputs are where people type the facts the agent must not invent,
+# so finding the field matters more than lighter boxes.
+#
+# Each value is the lightest-looking one that passes, with a margin, searched
+# along the stone scale between 400 and 500 (on a dark page, lightest-looking
+# means least contrast, which puts it at the stone-500 end):
+#   - light #918A86, worst 3.11:1 (on the light sidebar's stone-100);
+#     #938D88, one step lighter, reaches only 3.005 there, with no margin;
+#   - dark  #78716C (stone-500), worst 3.16:1 (on the dark sidebar's
+#     stone-800). stone-600 falls to 1.99 there.
+# The test measures each against all four surfaces in its mode, page and
+# secondary, main and sidebar. Lighten one and it fails.
+#
+# `dataframeBorderColor` keeps the lighter stone steps: a grid line marks no
+# control, so it carries no 3:1 obligation.
+#
+# ## Focus: inputs pass, buttons are a documented exception
+#
+# A focused input redraws its border in solid `primaryColor`, which clears 3:1
+# on every surface. A focused *button* is drawn differently by Streamlit: a ring
+# of `primaryColor` at a fixed 50% alpha, which lands halfway to the page --
+# 2.50:1 light, 1.82:1 dark. No value here fixes that: a dark primary light
+# enough for a 3:1 ring fails the white button label (see `primaryColor` under
+# [theme.dark]), and CSS is ruled out. Accepted in Track F because the focused
+# button also darkens its fill, a second cue. `tests/test_theme_config.py` pins
+# the measured ratios, so a palette change that moves them gets re-decided.
+#
+# ## The chart ramp, the one value not changed by the redesign
+#
+# The template ramp opened on a zinc scale tuned for a white page: #18181B scored
+# 1.12:1 on the dark surface, and four of its seven entries fell under 3:1 on at
 # least one of the two page backgrounds. The ramp is defined once, in [theme]
 # (see the note above on why it isn't split per mode), so one ramp serves both
 # surfaces and has to clear both.
 #
 # The replacement is seven Tailwind steps -- the scale the semantic tokens above
 # already use -- searched rather than picked, then checked with the dataviz
-# skill's validator against #FFFFFF and #09090B. Hand-picking failed first on the
-# slot that looked safest: slate-500, as a neutral, at chroma 0.041 against a 0.10
-# floor, where a hue stops reading as a series and reads as gray.
+# skill's validator against the two pages. Hand-picking failed first on the slot
+# that looked safest: slate-500, as a neutral, at chroma 0.041 against a 0.10
+# floor, where a hue stops reading as a series and reads as gray. It was validated
+# against zinc-950 (#09090B); against stone-950 the worst entry is #B91C1C at
+# 3.05:1, still over the floor but by only 0.05.
 #
 # Verified limits -- **order is load-bearing**, so re-run the validator if you
 # touch it:
@@ -87,21 +133,20 @@
 #     are near-identical under it. A tritan-safe all-pairs chart uses the first
 #     four (dE 11.3).
 #   - The >=3:1 result covers the two *page* backgrounds only. A chart drawn on
-#     another surface is not covered: on the dark sidebar/secondary #18181B,
-#     #A21CAF is 2.80:1 and #B91C1C 2.74:1; on the light code background #F4F4F5,
-#     #D97706 is 2.90:1. A sidebar chart needs its own colours.
+#     another surface is not covered: on the dark sidebar/secondary #1C1917,
+#     #A21CAF is 2.77:1 and #B91C1C 2.70:1; on the light code background #F5F5F4,
+#     #D97706 is 2.92:1. A sidebar chart needs its own colours.
 #
 # What one shared token costs: the series separate by hue alone. Clearing 3:1 on
-# a white *and* a near-black page confines every entry to relative luminance
-# [0.108, 0.300] -- 64% of the range a light-only ramp gets -- so lightness is
-# spent on background contrast and cannot also separate series. Hence a floor,
-# not the last word: a chart wanting lightness separation should pass `color=`
-# per mode, which every Vega command accepts. Note `st.context.theme.type` is
-# documented as unreliable on first load and immediately after a mode switch
-# (streamlit#11920) -- the two renders where a per-mode palette is observable --
-# and returns None outside a script run, so branch on it defensively. A
-# `st.metric` sparkline has no colour argument at all, which is why the shared
-# default had to be the safe one.
+# a white *and* a near-black page confines every entry to a narrow band of
+# relative luminance, so lightness is spent on background contrast and cannot
+# also separate series. Hence a floor, not the last word: a chart wanting
+# lightness separation should pass `color=` per mode, which every Vega command
+# accepts. Note `st.context.theme.type` is documented as unreliable on first load
+# and immediately after a mode switch (streamlit#11920) -- the two renders where a
+# per-mode palette is observable -- and returns None outside a script run, so
+# branch on it defensively. A `st.metric` sparkline has no colour argument at
+# all, which is why the shared default had to be the safe one.
 #
 # The app currently draws no charts, so none of this renders yet. It is a floor
 # for the first one, not a description of anything on screen.
@@ -115,15 +160,16 @@ showWidgetBorder = true
 baseRadius = "6px"
 buttonRadius = "6px"
 font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+headingFont = "'Source Serif 4':https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@600;700&display=swap"
 codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
 codeFontSize = "0.875rem"
 headingFontSizes = ["36px", "30px", "24px", "20px", "16px", "14px"]
 headingFontWeights = [600, 600, 600, 600, 600, 600]
 linkUnderline = true
 
-# shadcn zinc palette. Shared, not per-mode -- Streamlit derives the rendered
+# Semantic palette. Shared, not per-mode -- Streamlit derives the rendered
 # `*TextColor` per mode from each of these; see the note above.
-grayColor = "#71717A"
+grayColor = "#78716C"  # stone-500, so muted text matches the warm neutrals
 blueColor = "#3B82F6"
 greenColor = "#22C55E"
 redColor = "#EF4444"
@@ -143,77 +189,83 @@ chartCategoricalColors = [
   "#0891B2",  # cyan-600
 ]
 
-# --- Light: shadcn.toml's surfaces, unchanged ---------------------------------
+# --- Light: paper and ink -----------------------------------------------------
+#
+# indigo-700 carries the accent: 7.90:1 as a link on the page, and 7.90:1 under
+# the white label Streamlit hardcodes on a primary button. Links keep
+# `linkUnderline` as a second cue, so they are not identified by hue alone.
 
 [theme.light]
-primaryColor = "#18181B"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#FAFAFA"
-codeBackgroundColor = "#F4F4F5"
-textColor = "#09090B"
-linkColor = "#18181B"
-borderColor = "#E4E4E7"
-codeTextColor = "#18181B"
-dataframeBorderColor = "#E4E4E7"
-dataframeHeaderBackgroundColor = "#FAFAFA"
+primaryColor = "#4338CA"              # indigo-700
+backgroundColor = "#FFFFFF"           # paper
+secondaryBackgroundColor = "#FAFAF9"  # stone-50
+codeBackgroundColor = "#F5F5F4"       # stone-100
+textColor = "#0C0A09"                 # stone-950, ink
+linkColor = "#4338CA"                 # indigo-700
+borderColor = "#918A86"               # 3:1 on every light surface; see the borders note
+codeTextColor = "#292524"             # stone-800
+dataframeBorderColor = "#E7E5E4"      # stone-200
+dataframeHeaderBackgroundColor = "#FAFAF9"
 
 [theme.light.sidebar]
-backgroundColor = "#FAFAFA"
-secondaryBackgroundColor = "#F4F4F5"
-codeBackgroundColor = "#E4E4E7"
-textColor = "#09090B"
-borderColor = "#E4E4E7"
-primaryColor = "#18181B"
-dataframeHeaderBackgroundColor = "#F4F4F5"
-dataframeBorderColor = "#E4E4E7"
+backgroundColor = "#FAFAF9"           # stone-50
+secondaryBackgroundColor = "#F5F5F4"  # stone-100
+codeBackgroundColor = "#E7E5E4"       # stone-200
+textColor = "#0C0A09"
+borderColor = "#918A86"
+primaryColor = "#4338CA"
+dataframeHeaderBackgroundColor = "#F5F5F4"
+dataframeBorderColor = "#E7E5E4"
 
-# --- Dark: the same zinc scale, inverted --------------------------------------
+# --- Dark: the same scales, inverted ------------------------------------------
 #
-# Surfaces mirror step for step -- white/zinc-50/zinc-100/zinc-200 above becomes
-# zinc-950/zinc-900/zinc-800/zinc-700 here -- so the layering that separates a
-# bordered container from the page, and a code block from its border, survives
-# the flip. Two values are deliberately not mirrors:
+# Surfaces mirror step for step -- white/stone-50/stone-100/stone-200 above
+# becomes stone-950/stone-900/stone-800/stone-700 here -- so the layering that
+# separates a bordered container from the page, and a code block from its
+# border, survives the flip. The accent keeps its hue and lifts its lightness.
+# Two values are deliberately not mirrors:
 #
-# `primaryColor` is zinc-500, a compromise rather than a choice, because
-# Streamlit puts this one token to two jobs that pull opposite ways:
+# `primaryColor` is #605EEF, searched rather than picked, because Streamlit puts
+# this one token to two jobs that pull opposite ways:
 #   A. it fills primary buttons, whose label Streamlit hardcodes to white
 #      (verified: set this to #FAFAFA and you get white on #FAFAFA, 1.04:1 -- it
 #      does not restyle the label to suit a light fill), so A wants it DARK;
 #   B. it is the foreground of selected controls -- the Source/Rendered segmented
 #      control in `render_file` and `approval_panel` draws its lit segment in this
 #      colour over a 10%-alpha wash of itself -- so B wants it LIGHT.
-# On a zinc-950 page the two curves cross around 4.4:1, so no value clears AA on
-# both. zinc-500 gives A 4.83:1 and B 3.82:1 against the composited wash
-# (#131316) the label actually sits on -- AA on the button label, over the 3:1
-# large-text floor on the segment. That order is deliberate: a button label has
-# no other cue, while a lit segment also carries its wash and border. zinc-600,
-# the surface-mirror choice, drops B to 2.45:1, and the Source/Rendered control is
-# the one thing saying whether the pane shows the bytes that get written.
+# On a near-black page the two curves cross around 4.4:1, and no hue escapes
+# that: contrast is luminance, and choosing a hue doesn't change luminance. No
+# Tailwind indigo step clears both -- indigo-500 gives 4.47 / 4.10 (the label
+# fails AA), indigo-600 gives 6.29 / 2.98 (the segment fails 3:1). #605EEF gives
+# A 4.83:1 and B 3.82:1 (3.30:1 on the dark sidebar), the same budget the zinc-500
+# it replaces had, with hue as a second cue. That order is deliberate: a button
+# label has no other cue, while a lit segment also carries its wash and border,
+# and the Source/Rendered control is the one thing saying whether the pane shows
+# the bytes that get written. Avoid #6365F1: it lands at exactly 4.50, with no
+# margin.
 #
-# `linkColor` is set explicitly to keep the light half's *relationship* -- a
-# shade off `textColor`, with `linkUnderline` doing the identifying. Left unset
-# Streamlit falls back to `blueTextColor`, not to `primaryColor`, so the default
-# here would be a light blue link rather than anything zinc: readable, but a
-# different design than the light half's.
+# `linkColor` is indigo-300 (9.91:1), the light link's hue lifted for a dark page.
+# Left unset, Streamlit falls back to `blueTextColor`, not to `primaryColor`, so
+# links would turn a light blue unrelated to the accent.
 
 [theme.dark]
-primaryColor = "#71717A"
-backgroundColor = "#09090B"
-secondaryBackgroundColor = "#18181B"
-codeBackgroundColor = "#27272A"
-textColor = "#FAFAFA"
-linkColor = "#E4E4E7"
-borderColor = "#3F3F46"
-codeTextColor = "#E4E4E7"
-dataframeBorderColor = "#3F3F46"
-dataframeHeaderBackgroundColor = "#18181B"
+primaryColor = "#605EEF"              # searched indigo; see above
+backgroundColor = "#0C0A09"           # stone-950
+secondaryBackgroundColor = "#1C1917"  # stone-900
+codeBackgroundColor = "#292524"       # stone-800
+textColor = "#FAFAF9"                 # stone-50
+linkColor = "#A5B4FC"                 # indigo-300
+borderColor = "#78716C"               # stone-500, 3:1 on every dark surface
+codeTextColor = "#E7E5E4"             # stone-200
+dataframeBorderColor = "#44403C"      # stone-700
+dataframeHeaderBackgroundColor = "#1C1917"
 
 [theme.dark.sidebar]
-backgroundColor = "#18181B"
-secondaryBackgroundColor = "#27272A"
-codeBackgroundColor = "#3F3F46"
-textColor = "#FAFAFA"
-borderColor = "#3F3F46"
-primaryColor = "#71717A"
-dataframeHeaderBackgroundColor = "#27272A"
-dataframeBorderColor = "#3F3F46"
+backgroundColor = "#1C1917"           # stone-900
+secondaryBackgroundColor = "#292524"  # stone-800
+codeBackgroundColor = "#44403C"       # stone-700
+textColor = "#FAFAF9"
+borderColor = "#78716C"
+primaryColor = "#605EEF"
+dataframeHeaderBackgroundColor = "#292524"
+dataframeBorderColor = "#44403C"

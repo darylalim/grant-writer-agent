@@ -175,6 +175,13 @@ The follow-up chat box is disabled while a turn is running or waiting for
 approval. Sending a message in either state would discard the write waiting
 for approval.
 
+The theme (`.streamlit/config.toml`) follows the desktop's light or dark mode, and
+the settings menu can override it. Text, links, input outlines and focused
+inputs meet WCAG AA contrast in both modes, and `tests/test_theme_config.py`
+recomputes every figure. One known exception: Streamlit draws a focused
+button's ring at half opacity, which reaches only 2.5:1 (light) and 1.8:1
+(dark). A focused button also darkens, so the focus is still visible.
+
 ## Architecture
 
 Two agent graphs share one set of infrastructure:
