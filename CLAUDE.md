@@ -23,6 +23,8 @@ uv run grant-writer discover --scan-id X --focus "rural health"   # before draft
 uv run grant-writer draft --app-id X --rfp path.pdf --funder NSF
 uv run grant-writer chat --app-id X           # resume the same thread
 uv run grant-writer db-setup                  # create/migrate Postgres tables; needs DATABASE_URL
+uv run grant-writer healthcheck               # readiness: exit 0 when the database answers
+uv run grant-writer ops-check                 # alerts: failed/declined/429/parked; exit 1 if any
 
 uv run streamlit run streamlit_app.py         # optional Streamlit front end
 ```
@@ -86,6 +88,9 @@ must not collide on a thread id even when a human reuses the name (invariant 12)
 submission-bound, so no interrupt rule reaches it. Accepted rather than split out so every
 subcommand takes the same flags and the UI's one sidebar can drive both graphs.
 
+`healthcheck` and `ops-check` are operator commands, exempt from `--operator` like `db-setup`:
+they read counts and thread ids, never a thread's content, and start no run.
+
 ## Architecture
 
 Two [Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview) graphs over shared
@@ -123,6 +128,7 @@ config.py  →  solicitation.py  ───────────────�
               activity.py, workspace.py, identity.py  ─────────────────────↗  streamlit_app.py
 activity.py ─→ refusals.py ─→ subagents.py, agent.py
 runs.py ─→ agent.py ─────────────────────────────────────────────────↗  streamlit_app.py
+ops.py ──────────────────────────────────────────────────→  cli.py, streamlit_app.py
 ```
 
 **`opportunities.py`** is a pure leaf — the fit rubric, the grammar a scout writes, the parser, and
@@ -142,7 +148,8 @@ was duplicated logic waiting to happen:
   disagrees with the interrupted calls leaves the graph stuck with no exception raised. Like
   `opportunities.py` it imports nothing from the package — the five leaves in the diagram above
   are `config.py`, `opportunities.py`, `identity.py` (invariants 23 and 26; its one `config`
-  import is under `TYPE_CHECKING`), `runs.py` (invariant 26), and this. It also owns the declined-reply sentence that
+  import is under `TYPE_CHECKING`), `runs.py` (invariant 26), `ops.py` (invariant 27), and
+  this. It also owns the declined-reply sentence that
   `refusals.py` writes into the graph (invariant 21), which is the one arrow running from it
   back toward the agent: a leaf can be imported by both sides, so the format has one home.
 - **`workspace.py`** reads an application directory back — file listing, `[NEEDS INPUT]` count,
@@ -704,6 +711,40 @@ runs, and still produces plausible output.
     recorded as `stopped`; a process that dies mid-turn holds its slot for
     `runs.STALE_AFTER_S` and no longer.
 
+27. **Every operational record is content-free by construction, and an approval is recorded
+    before it is sent.** E7 added three records that outlive any tracing decision: JSON log
+    lines (`ops.log_event`), the run table's `error_type`, and the append-only
+    `grant_writer_approvals` table. None may carry a message, a file's text, the profile or
+    a reject reason. That holds because each has a closed shape, not because callers are
+    careful: `log_event` refuses any field outside `ops.LOG_FIELDS`; `error_type` is a class
+    name, never a message; and an approval row is who, when, thread, run, tool, path and
+    decision, built by `runs.approvals_for`, which reads a decision's `type` and never its
+    `message`. Extending any of them is an argument made in `test_ops.py`, the
+    run-table column rule (invariant 26) applied to every record.
+    `configure_logging` attaches to the `grant_writer` logger and never the root: a root
+    handler would also ship what third-party libraries log, which nothing here can vet.
+
+    The approval is written in the same direction invariant 26's checks fail: **before** the
+    decision is sent, so a record that cannot be written refuses the approval and leaves the
+    panel up rather than trailing a submission-bound write nobody can account for. A
+    *rejection* still goes through on a failed write, because it writes nothing and is
+    AWAITING's safe exit — refusing it too would leave a broken database holding a thread
+    with no way out (invariant 11). The UI records when signed in and the CLI under
+    `--operator`; on one person's machine there is no one else to answer to.
+
+    Tracing follows decision 16. `ops.configure_tracing("hidden")` installs a LangSmith
+    client with `hide_inputs`, `hide_outputs` **and** `hide_metadata` as the global one,
+    which is what `LangChainTracer` takes when given none. Metadata is hidden too because
+    `trace_config` puts the rubric, funder and user-prefixed thread id there. Not done by
+    setting `LANGSMITH_HIDE_*`: `langsmith.utils.get_env_var` is `lru_cache`d, so a
+    variable set after its first read is never seen. `off` uses `langsmith.configure(
+    enabled=False)`, which outranks all four of invariant 19's spellings rather than adding
+    a fifth. `config.tracing_mode` picks `hidden` for any shared process (signed in, or on
+    `DATABASE_URL`) unless `GRANT_WRITER_TRACING` says otherwise, so a deployment that
+    forgot the variable sends no proposal text. The correlation key is the UI's generated
+    trace id: passed to `RunLedger.begin` as the row's `run_id` and set as the config's
+    root `run_id`, so a row, a log line and a trace share one value.
+
 ## Backend profiles
 
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files
@@ -743,7 +784,11 @@ checkout. Every consumer tests it with `if not os.getenv(...)`, so an empty stri
 cases build on `persistent_settings`, so a developer's URL would aim the offline suite at a real
 Postgres. The three limit variables (`GRANT_WRITER_DAILY_BUDGET_USD`,
 `GRANT_WRITER_MAX_CONCURRENT_RUNS`, `GRANT_WRITER_SEARCH_COST_USD`) and the two allowlists
-(`GRANT_WRITER_ALLOWED_DOMAINS`, `GRANT_WRITER_ALLOWED_EMAILS`) are blanked for the same reason.
+(`GRANT_WRITER_ALLOWED_DOMAINS`, `GRANT_WRITER_ALLOWED_EMAILS`) are blanked for the same reason, and so are E7's
+`GRANT_WRITER_TRACING`, `GRANT_WRITER_LOG_LEVEL` and `GRANT_WRITER_PARKED_ALERT_DAYS`.
+An autouse fixture there resets LangSmith's global client and switch after every case:
+`ops.configure_tracing` is process-global by design, and the CLI's `main` and the app's
+first pass both call it.
 `tests/test_database.py` pins the Postgres wiring with the pool's `open()` patched out. Any AppTest
 case that signs a user in must patch `agent.build_run_ledger` too, as `tests/test_users.py` and
 `tests/test_sign_in.py` do, or its turns land in the developer's own `.grant_writer/runs.sqlite`

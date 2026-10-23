@@ -275,6 +275,10 @@ def test_the_run_table_holds_no_content(tmp_path):
     The row is the one record that outlives every tracing decision, so it may
     say who, which thread, when, how it ended and what it spent -- and nothing
     a proposal says. A column added later has to be argued for here.
+
+    `error_type` (E7) is an exception's class name and never its message: the
+    rate-limit and pool-timeout alerts count it, and a message could quote
+    anything the failing call was handed.
     """
     ledger = _ledger(tmp_path)
     with sqlite3.connect(ledger.path) as conn:
@@ -296,6 +300,7 @@ def test_the_run_table_holds_no_content(tmp_path):
         "cache_write_tokens",
         "searches",
         "cost_usd",
+        "error_type",
     ]
 
 

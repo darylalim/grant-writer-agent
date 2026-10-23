@@ -16,6 +16,8 @@ installable by someone who then had no app to run.
 
 from __future__ import annotations
 
+import logging
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,7 @@ from grant_writer.activity import (
 )
 from grant_writer.agent import build_agent, build_discovery_agent, build_run_ledger
 from grant_writer.config import (
+    LOG_LEVEL,
     BackendProfile,
     application_dir,
     application_ids,
@@ -45,6 +48,7 @@ from grant_writer.config import (
     persistent_settings,
     require_api_keys,
     trace_config,
+    tracing_mode,
     user_thread_id,
 )
 from grant_writer.identity import NotSignedIn, admission, current_user, profile_for
@@ -54,8 +58,9 @@ from grant_writer.opportunities import (
     ScoredOpportunity,
     rank_opportunities,
 )
+from grant_writer.ops import configure_logging, configure_tracing, log_event
 from grant_writer.prompts import discovery_request, draft_request
-from grant_writer.runs import LimitReached, Limits, Outcome, UsageMeter
+from grant_writer.runs import LimitReached, Limits, Outcome, UsageMeter, approvals_for
 from grant_writer.solicitation import (
     MAX_PAGES,
     MAX_UPLOAD_MB,
@@ -124,6 +129,31 @@ if _session_user is None and persistent_settings().database_url is not None:
         icon=":material/lock:",
     )
     st.stop()
+
+
+@st.cache_resource
+def _operations(mode: str, level: str) -> None:
+    """Configure logging and tracing once per process (E7).
+
+    Process-wide, both of them -- a log handler and LangSmith's global client
+    -- so cached rather than redone each rerun, and keyed on the two values so
+    a changed setting takes effect. A shared process traces with content
+    hidden unless told otherwise (decision 16, `config.tracing_mode`).
+    """
+    configure_logging(level)
+    configure_tracing(mode)
+
+
+_operations(
+    tracing_mode(
+        shared=_session_user is not None
+        or persistent_settings().database_url is not None
+    ),
+    LOG_LEVEL,
+)
+# Content-free by construction: every line goes through `ops.log_event`, whose
+# fields are ids, phases, outcomes and an exception's class and message.
+logger = logging.getLogger("grant_writer.ui")
 
 # One turn's phases. The CLI runs this as a `while True` loop that blocks on
 # input() when an interrupt arrives (see cli._run); Streamlit reruns the script
@@ -241,6 +271,9 @@ st.session_state.setdefault("error", "")
 # Bumped on every resume, and mixed into the approval widgets' keys so each
 # interrupt gets its own. See `resume_with`.
 st.session_state.setdefault("approval_round", 0)
+# The ledger id of the metered turn that last ended, so an approval of the
+# write it parked on records which run asked (E7's correlation id).
+st.session_state.setdefault("last_run_id", None)
 
 # The one height every scroll box derives from: the activity feed, the file
 # browser, and the PDF viewer inside it. Streamlit has no viewport API, so
@@ -396,6 +429,14 @@ def parked_state(
         thread_id = user_thread_id(current_user(st.user), app_id)
         return is_parked(agent, {"configurable": {"thread_id": thread_id}}), ""
     except Exception as exc:  # noqa: BLE001 - the caller refuses the turn
+        log_event(
+            logger,
+            "parked_check.failed",
+            level=logging.ERROR,
+            exc=exc,
+            frontend="ui",
+            phase=st.session_state.phase,
+        )
         return None, f"{type(exc).__name__}: {exc}"
 
 
@@ -466,8 +507,17 @@ def stream_turn(agent: Any, payload: Any, config: dict) -> bool:
     return interrupted
 
 
-def resume_with(decisions: list[dict]) -> None:
-    """Queue a resume for the next rerun and trigger it.
+def resume_with(decisions: list[dict], requests: list[dict]) -> None:
+    """Record the decisions, then queue a resume for the next rerun.
+
+    Signed in, each decision is appended to the approval record first
+    (invariant 27): who, which thread and file, approve or reject, and not the
+    reason typed -- that goes to the agent only. Recorded *before* it is sent,
+    so a record that cannot be written refuses an approval instead of trailing
+    one: the panel stays up and the same click works once the database
+    answers. A rejection still goes through, because it writes nothing and is
+    the safe way out of AWAITING -- refusing it too would leave a broken
+    database holding a thread with no exit.
 
     Called from inside `approval_panel`, which is a fragment. `st.rerun()`
     defaults to `scope="app"` even there, and that default is load-bearing: the
@@ -476,6 +526,45 @@ def resume_with(decisions: list[dict]) -> None:
     graph stayed parked on its interrupt -- a dead button, no error. Leave the
     scope alone.
     """
+    user = current_user(st.user)
+    approving = any(d.get("type") == "approve" for d in decisions)
+    if user is not None:
+        try:
+            build_run_ledger(settings).record_approvals(
+                approvals_for(decisions, requests),
+                user_id=user,
+                thread_id=_active_thread_id(),
+                run_id=st.session_state.last_run_id,
+                frontend="ui",
+            )
+        except Exception as exc:  # noqa: BLE001 - an unrecorded approval is not sent
+            log_event(
+                logger,
+                "approval.unrecorded",
+                level=logging.ERROR,
+                exc=exc,
+                user_id=user,
+                thread_id=_active_thread_id(),
+                frontend="ui",
+            )
+            if approving:
+                st.session_state.error = (
+                    f"Not approved: the approval could not be recorded "
+                    f"({type(exc).__name__}: {exc}). Nothing was written; try "
+                    "again shortly."
+                )
+                st.rerun()
+    log_event(
+        logger,
+        "approval.decided",
+        user_id=user,
+        thread_id=_active_thread_id(),
+        run_id=st.session_state.last_run_id,
+        frontend="ui",
+        decision="approve" if approving else "reject",
+        count=len(decisions),
+    )
+    st.session_state.error = ""
     st.session_state.payload = Command(resume={"decisions": decisions})
     st.session_state.phase = RUNNING
     # `active_command` is deliberately untouched: a resume is the parked turn
@@ -819,9 +908,12 @@ def approval_panel(requests: list[dict], unreadable: str = "") -> None:
                 icon=":material/check:",
                 disabled=not acknowledged,
             ):
-                resume_with(approval_decisions(requests, approve=True))
+                resume_with(approval_decisions(requests, approve=True), requests)
             if st.button("Reject", icon=":material/close:"):
-                resume_with(approval_decisions(requests, approve=False, message=reason))
+                resume_with(
+                    approval_decisions(requests, approve=False, message=reason),
+                    requests,
+                )
 
 
 def render_file(path: Path) -> None:
@@ -1719,22 +1811,40 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
         # Signed-in sessions only. A single-user app spends its owner's own
         # key, and a shared database without sign-in never gets this far.
         run_id: str | None = None
+        # The trace's root run id and, signed in, the run row's: generated
+        # here rather than taken back from `begin`, so the two cannot differ.
+        trace_id = uuid.uuid4()
         refused = ""
+        run_kind = "discover" if active_discovering else "draft"
+        # Who and where, for every log line this turn writes; ids only.
+        where = {
+            "user_id": run_user,
+            "thread_id": _active_thread_id(),
+            "frontend": "ui",
+            "kind": run_kind,
+        }
         if run_user is not None:
             try:
                 ledger = build_run_ledger(settings)
                 run_id = ledger.begin(
                     user_id=run_user,
                     thread_id=_active_thread_id(),
-                    kind="discover" if active_discovering else "draft",
+                    kind=run_kind,
                     limits=Limits(
                         daily_budget_usd=settings.daily_budget_usd,
                         max_concurrent_runs=settings.max_concurrent_runs,
                     ),
+                    # Also the trace's root run id, below: one key for the
+                    # row, the log lines and the trace.
+                    run_id=trace_id.hex,
                 )
             except LimitReached as exc:
+                log_event(logger, "run.limited", level=logging.WARNING, context=where)
                 refused = str(exc)
             except Exception as exc:  # noqa: BLE001 - unknown is refused
+                log_event(
+                    logger, "run.unmetered", level=logging.ERROR, exc=exc, context=where
+                )
                 # The same rule `parked_state` keeps: a check that could not be
                 # read cannot be taken to have passed, so the turn is refused
                 # rather than run unmetered.
@@ -1767,6 +1877,7 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
         # aborted by Streamlit's Stop or a widget, which arrive as
         # BaseException and skip both handlers but not the `finally`.
         outcome: Outcome = "stopped"
+        error_type: str | None = None
         try:
             try:
                 # `get_agent` inside the try, the third site to need it and the one
@@ -1823,9 +1934,20 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
                 # builds, which `test_frontends.py` pins key for key.
                 if run_id is not None:
                     config["callbacks"] = [meter]
+                    config["run_id"] = trace_id
                 interrupted = stream_turn(agent, turn_payload, config)
             except Exception as exc:  # noqa: BLE001 - surface anything to the user
+                log_event(
+                    logger,
+                    "run.failed",
+                    level=logging.ERROR,
+                    exc=exc,
+                    run_id=run_id,
+                    phase=st.session_state.phase,
+                    context=where,
+                )
                 outcome = "failed"
+                error_type = type(exc).__name__
                 st.session_state.error = f"{type(exc).__name__}: {exc}"
                 st.session_state.phase = FAILED
             else:
@@ -1838,10 +1960,24 @@ if st.session_state.phase == RUNNING and st.session_state.payload is not None:
                 )
                 st.session_state.phase = AWAITING if interrupted else DONE
         finally:
+            log_event(
+                logger, "run.ended", outcome=outcome, run_id=run_id, context=where
+            )
+            st.session_state.last_run_id = run_id
             if run_id is not None:
                 try:
-                    build_run_ledger(settings).finish(run_id, outcome, meter)
+                    build_run_ledger(settings).finish(
+                        run_id, outcome, meter, error_type=error_type
+                    )
                 except Exception as exc:  # noqa: BLE001 - the turn itself is done
+                    log_event(
+                        logger,
+                        "run.unrecorded",
+                        level=logging.ERROR,
+                        exc=exc,
+                        run_id=run_id,
+                        context=where,
+                    )
                     # The run stays counted as in flight until it goes stale,
                     # and its spend is missing from today's total -- worth
                     # saying, never worth losing the turn's own result over.
@@ -1910,6 +2046,15 @@ with status_slot:
             pending = pending_action_requests(agent, config)
             unreadable = ""
         except Exception as exc:  # noqa: BLE001 - the panel is the only exit
+            log_event(
+                logger,
+                "approval_panel.unreadable",
+                level=logging.ERROR,
+                exc=exc,
+                user_id=current_user(st.user),
+                thread_id=_active_thread_id(),
+                frontend="ui",
+            )
             pending = []
             unreadable = f"{type(exc).__name__}: {exc}"
         approval_panel(pending, unreadable)

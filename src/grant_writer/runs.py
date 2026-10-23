@@ -18,6 +18,13 @@ Cost is an estimate made here, from the usage each model call reports and a
 price table, because the API returns tokens and not dollars. It errs high: a
 model id the table does not know is priced as the dearest one it does, so a
 rename overstates spending rather than making it free.
+
+The same database holds the **approval record** (E7): who approved or rejected
+each pending write, when, on which thread and file, and nothing the file said.
+A separate table, because the two are kept for different lengths of time --
+deleting a user's data removes their run rows, while the approvals survive it
+(decision 17) -- and append-only: nothing in this module updates or deletes a
+row there, and `test_ops.py` pins that no statement does.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -200,7 +207,22 @@ _COLUMNS = """
     cache_read_tokens BIGINT NOT NULL DEFAULT 0,
     cache_write_tokens BIGINT NOT NULL DEFAULT 0,
     searches INTEGER NOT NULL DEFAULT 0,
-    cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0
+    cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    error_type TEXT
+"""
+# The approval record. `user_id` is NULL for a single-user frontend -- the CLI
+# under `--operator` -- rather than a made-up name. `run_id` is the run that
+# parked, so a decision leads back to the turn that asked for it.
+_APPROVAL_COLUMNS = """
+    approval_id TEXT PRIMARY KEY,
+    decided_at DOUBLE PRECISION NOT NULL,
+    user_id TEXT,
+    thread_id TEXT NOT NULL,
+    run_id TEXT,
+    frontend TEXT NOT NULL,
+    tool TEXT,
+    path TEXT,
+    decision TEXT NOT NULL
 """
 _CREATE = (
     f"CREATE TABLE IF NOT EXISTS grant_writer_runs ({_COLUMNS})",
@@ -208,7 +230,14 @@ _CREATE = (
     "ON grant_writer_runs (user_id, started_at)",
     "CREATE INDEX IF NOT EXISTS grant_writer_runs_open "
     "ON grant_writer_runs (started_at) WHERE ended_at IS NULL",
+    f"CREATE TABLE IF NOT EXISTS grant_writer_approvals ({_APPROVAL_COLUMNS})",
+    "CREATE INDEX IF NOT EXISTS grant_writer_approvals_thread "
+    "ON grant_writer_approvals (thread_id, decided_at)",
 )
+# Columns added after a table may already exist. E4 created the run table
+# without `error_type`, and `CREATE TABLE IF NOT EXISTS` leaves an existing
+# table as it is, so without this every `finish` on such a table would fail.
+_ADDED_COLUMNS = (("grant_writer_runs", "error_type", "TEXT"),)
 # `?` is the placeholder; the Postgres ledger rewrites it to `%s`.
 _IN_FLIGHT = (
     "SELECT COUNT(*) FROM grant_writer_runs WHERE ended_at IS NULL AND started_at > ?"
@@ -224,8 +253,56 @@ _INSERT = (
 _FINISH = (
     "UPDATE grant_writer_runs SET ended_at = ?, outcome = ?, model_calls = ?, "
     "input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, "
-    "cache_write_tokens = ?, searches = ?, cost_usd = ? WHERE run_id = ?"
+    "cache_write_tokens = ?, searches = ?, cost_usd = ?, error_type = ? "
+    "WHERE run_id = ?"
 )
+_RECORD_APPROVAL = (
+    "INSERT INTO grant_writer_approvals (approval_id, decided_at, user_id, "
+    "thread_id, run_id, frontend, tool, path, decision) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+_SUMMARY = (
+    "SELECT outcome, error_type, COUNT(*) FROM grant_writer_runs "
+    "WHERE started_at >= ? GROUP BY outcome, error_type"
+)
+
+
+@dataclass(frozen=True)
+class Approval:
+    """One decision on one pending action. No content: the reject reason a
+    human typed is sent to the agent and recorded nowhere here."""
+
+    tool: str | None
+    path: str | None
+    decision: Literal["approve", "reject"]
+
+
+def approvals_for(
+    decisions: Sequence[Mapping[str, Any]], requests: Sequence[Mapping[str, Any]]
+) -> list[Approval]:
+    """One `Approval` per decision, naming the request it answers.
+
+    `decisions` can outnumber `requests` by one -- `approval_decisions`
+    floors the count at one for a parked thread whose requests could not be
+    read (invariant 5) -- and that decision is recorded with no tool or path
+    rather than borrowing a neighbour's: a blind approval is recorded as
+    blind. Only the decision's `type` is read; a reject's `message`, which a
+    human typed, stays out of the record.
+    """
+    approvals = []
+    for index, decision in enumerate(decisions):
+        request = requests[index] if index < len(requests) else {}
+        args = request.get("args") or {}
+        path = args.get("file_path") or args.get("path")
+        approvals.append(
+            Approval(
+                tool=str(request["name"]) if request.get("name") else None,
+                path=str(path) if path else None,
+                decision="approve" if decision.get("type") == "approve" else "reject",
+            )
+        )
+    return approvals
+
 
 Execute = Callable[[str, tuple[Any, ...]], list[tuple[Any, ...]]]
 
@@ -238,6 +315,7 @@ class RunLedger(Protocol):
         thread_id: str,
         kind: RunKind,
         limits: Limits,
+        run_id: str | None = None,
         now: float | None = None,
     ) -> str: ...
 
@@ -247,8 +325,22 @@ class RunLedger(Protocol):
         outcome: Outcome,
         meter: UsageMeter,
         *,
+        error_type: str | None = None,
         now: float | None = None,
     ) -> None: ...
+
+    def record_approvals(
+        self,
+        approvals: list[Approval],
+        *,
+        user_id: str | None,
+        thread_id: str,
+        run_id: str | None,
+        frontend: str,
+        now: float | None = None,
+    ) -> None: ...
+
+    def summary(self, *, since: float) -> list[tuple[str | None, str | None, int]]: ...
 
 
 class _Ledger:
@@ -264,15 +356,20 @@ class _Ledger:
         thread_id: str,
         kind: RunKind,
         limits: Limits,
+        run_id: str | None = None,
         now: float | None = None,
     ) -> str:
         """Claim a slot for one turn, or raise `LimitReached`.
 
         The checks and the insert share one locked transaction, so the limit
         holds under concurrent sessions; see the module docstring.
+
+        `run_id` is the caller's when it has one -- the UI passes the id it
+        also gives LangSmith as the trace's root run, so a row, a log line
+        and a trace share one key (E7's correlation id).
         """
         now = time.time() if now is None else now
-        run_id = uuid.uuid4().hex
+        run_id = run_id or uuid.uuid4().hex
         with self._transaction() as execute:
             ((in_flight,),) = execute(_IN_FLIGHT, (now - STALE_AFTER_S,))
             if in_flight >= limits.max_concurrent_runs:
@@ -298,9 +395,15 @@ class _Ledger:
         outcome: Outcome,
         meter: UsageMeter,
         *,
+        error_type: str | None = None,
         now: float | None = None,
     ) -> None:
-        """Record how a turn ended and what it spent, releasing its slot."""
+        """Record how a turn ended and what it spent, releasing its slot.
+
+        `error_type` is the class name of what failed it, and only that: the
+        `RateLimitError` and `PoolTimeout` alerts count it, and a message
+        could carry anything.
+        """
         now = time.time() if now is None else now
         with self._transaction() as execute:
             execute(
@@ -315,9 +418,51 @@ class _Ledger:
                     meter.cache_write_tokens,
                     meter.searches,
                     meter.cost_usd,
+                    error_type,
                     run_id,
                 ),
             )
+
+    def record_approvals(
+        self,
+        approvals: list[Approval],
+        *,
+        user_id: str | None,
+        thread_id: str,
+        run_id: str | None,
+        frontend: str,
+        now: float | None = None,
+    ) -> None:
+        """Append one row per decision, in one transaction: all or none.
+
+        Called *before* the decision is sent, so a record that cannot be
+        written can refuse an approval rather than trail it (invariant 27).
+        A recorded decision is one a human made, not one carried out -- the
+        next run row on the thread says what happened after.
+        """
+        now = time.time() if now is None else now
+        with self._transaction() as execute:
+            for approval in approvals:
+                execute(
+                    _RECORD_APPROVAL,
+                    (
+                        uuid.uuid4().hex,
+                        now,
+                        user_id,
+                        thread_id,
+                        run_id,
+                        frontend,
+                        approval.tool,
+                        approval.path,
+                        approval.decision,
+                    ),
+                )
+
+    def summary(self, *, since: float) -> list[tuple[str | None, str | None, int]]:
+        """Runs started since `since`, counted by outcome and error type."""
+        with self._transaction() as execute:
+            rows = execute(_SUMMARY, (since,))
+        return [(outcome, error_type, int(n)) for outcome, error_type, n in rows]
 
 
 class SqliteRunLedger(_Ledger):
@@ -335,6 +480,10 @@ class SqliteRunLedger(_Ledger):
         with self._transaction() as execute:
             for statement in _CREATE:
                 execute(statement, ())
+            for table, column, sql_type in _ADDED_COLUMNS:
+                present = {row[1] for row in execute(f"PRAGMA table_info({table})", ())}
+                if column not in present:
+                    execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}", ())
 
     @contextmanager
     def _transaction(self) -> Generator[Execute]:
@@ -374,6 +523,11 @@ class PostgresRunLedger(_Ledger):
         with self._transaction() as execute:
             for statement in _CREATE:
                 execute(statement, ())
+            for table, column, sql_type in _ADDED_COLUMNS:
+                execute(
+                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {sql_type}",
+                    (),
+                )
 
     @contextmanager
     def _transaction(self) -> Generator[Execute]:

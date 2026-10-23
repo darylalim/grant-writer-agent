@@ -122,6 +122,41 @@ DAILY_BUDGET_USD = float(os.getenv("GRANT_WRITER_DAILY_BUDGET_USD") or 10)
 MAX_CONCURRENT_RUNS = int(os.getenv("GRANT_WRITER_MAX_CONCURRENT_RUNS") or 3)
 SEARCH_COST_USD = float(os.getenv("GRANT_WRITER_SEARCH_COST_USD") or 0.008)
 
+# Operations (E7). The tracing mode is decision 16: `hidden` sends LangSmith
+# timing, tokens, errors and the call tree but no inputs, outputs or metadata.
+# Unset, it is chosen by `tracing_mode` from whether the process is shared.
+# Rejected at import when misspelt, like the pool sizes: a typo here must not
+# quietly fall back to sending full content from a deployment.
+TracingMode = Literal["full", "hidden", "off"]
+_TRACING_MODES: dict[str, TracingMode] = {
+    "full": "full",
+    "hidden": "hidden",
+    "off": "off",
+}
+_tracing_raw = (os.getenv("GRANT_WRITER_TRACING") or "").strip().lower()
+if _tracing_raw and _tracing_raw not in _TRACING_MODES:
+    msg = f"GRANT_WRITER_TRACING must be full, hidden or off, not {_tracing_raw!r}"
+    raise ValueError(msg)
+TRACING: TracingMode | None = _TRACING_MODES.get(_tracing_raw)
+LOG_LEVEL = os.getenv("GRANT_WRITER_LOG_LEVEL") or "INFO"
+# How long a thread may sit on an approval before `grant-writer ops-check`
+# reports it. Three days covers a weekend without paging anyone.
+PARKED_ALERT_DAYS = float(os.getenv("GRANT_WRITER_PARKED_ALERT_DAYS") or 3)
+
+
+def tracing_mode(*, shared: bool) -> TracingMode:
+    """The tracing mode for this process: the explicit setting, if any.
+
+    Otherwise `hidden` for a shared process -- signed in, or on the
+    deployment's database -- and `full` for one person's machine, where the
+    traces are that person's own and full content is what debugging needs.
+    The default leans toward hiding, so a deployment that forgot the variable
+    sends no proposal text.
+    """
+    if TRACING is not None:
+        return TRACING
+    return "hidden" if shared else "full"
+
 
 def _allowlist(name: str, *, strip: str = "") -> frozenset[str]:
     """A comma-separated variable as a set of lowercased entries."""
