@@ -163,7 +163,11 @@ font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;
 headingFont = "'Source Serif 4':https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@600;700&display=swap"
 codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
 codeFontSize = "0.875rem"
-headingFontSizes = ["36px", "30px", "24px", "20px", "16px", "14px"]
+# One step down from the defaults below h1: the page's sections are h2 for
+# the heading outline a screen reader navigates by, drawn at the 24px they
+# had as h3. Rendered drafts' own `##` headings follow, which suits the
+# 780px reading measure they sit in.
+headingFontSizes = ["36px", "24px", "20px", "18px", "16px", "14px"]
 headingFontWeights = [600, 600, 600, 600, 600, 600]
 linkUnderline = true
 

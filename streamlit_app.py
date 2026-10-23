@@ -655,7 +655,7 @@ def approval_panel(requests: list[dict], unreadable: str = "") -> None:
     is the other thing this argument decides.
     """
     with st.container(border=True):
-        st.subheader("Approval required", anchor=False)
+        st.header("Approval required", anchor=False)
         # An empty list does not mean nothing is pending. The graph is parked on
         # an interrupt either way -- that is why the phase is AWAITING -- and
         # `pending_action_requests` returns [] just as readily for a renamed
@@ -924,7 +924,7 @@ def file_browser(app_dir: Path, files: list[Path], gaps: int, verdict: str) -> N
 # --- Sidebar: run settings ---------------------------------------------------
 
 with st.sidebar:
-    st.subheader("Run settings", anchor=False)
+    st.header("Run settings", anchor=False)
     # Every control here takes an explicit key. Without one a widget's identity
     # is derived from its value-shaping parameters -- `label`, `value`,
     # `options`, `help`, `width` -- and a widget whose identity changes remounts
@@ -1481,7 +1481,7 @@ active_ref = (
 active_noun = "scan" if active_discovering else "application"
 
 with activity_slot:
-    st.subheader("Activity", anchor=False)
+    st.header("Activity", anchor=False)
     # 40 under the file panes, as it always was: the follow-up input and its
     # caption sit under it, and the two together come to about one pane.
     feed = st.container(height=pane_height(40), border=True, autoscroll=True)
@@ -1755,14 +1755,14 @@ with discovery_slot:
         # is still enabled and still bills a full run under this profile, so a
         # section that simply does not appear reads as "nothing was found"
         # rather than "this profile keeps nothing to show you".
-        st.subheader("Opportunity shortlist", anchor=False)
+        st.header("Opportunity shortlist", anchor=False)
         st.info(
             "The `server` profile keeps scans in ephemeral graph state, not on "
             "disk. Switch to `local` to browse a shortlist.",
             icon=":material/cloud_off:",
         )
     elif browse_scan_id:
-        st.subheader("Opportunity shortlist", anchor=False)
+        st.header("Opportunity shortlist", anchor=False)
         try:
             # Same boundary as the write side. Without it a scan id of ".."
             # lists the repo root, and `render_file`'s download branch would
@@ -1801,7 +1801,7 @@ with discovery_slot:
 browse_id = app_id.strip() or st.session_state.active_app_id
 
 with results_slot:
-    st.subheader("Application files", anchor=False)
+    st.header("Application files", anchor=False)
 
     if profile == "server":
         st.info(

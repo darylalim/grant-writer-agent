@@ -503,7 +503,7 @@ def test_streamlit_app_renders_without_error():
 
     assert not app.exception
     assert [title.value for title in app.title] == ["Grant writer"]
-    assert {"Activity", "Application files"} <= {s.value for s in app.subheader}
+    assert {"Activity", "Application files"} <= {s.value for s in app.header}
 
 
 def test_every_activity_event_kind_renders():
@@ -1173,7 +1173,7 @@ def test_the_approval_panel_renders_every_pending_write(monkeypatch):
     app.run()
 
     assert not app.exception
-    assert "Approval required" in {sub.value for sub in app.subheader}
+    assert "Approval required" in {sub.value for sub in app.header}
     # Both writes are offered, and the count is per request, not per interrupt.
     assert any("2 pending action(s)" in caption.value for caption in app.caption)
     assert {"Approve", "Reject"} <= {button.label for button in app.button}
@@ -1288,8 +1288,26 @@ def test_each_workflow_tab_holds_its_own_form(monkeypatch):
 
     # The feed belongs to whichever run is active, so it is in neither tab.
     for tab in (discover, draft):
-        assert "Activity" not in {sub.value for sub in tab.subheader}
-    assert "Activity" in {sub.value for sub in app.subheader}
+        assert "Activity" not in {sub.value for sub in tab.header}
+    assert "Activity" in {sub.value for sub in app.header}
+
+
+def test_the_heading_outline_skips_no_level(application_with_drafts):
+    """Heading navigation is how a screen reader skims a page, and an outline
+    that jumps from the title (h1) straight to h3 reads as a missing section.
+    The sections are h2; their look is set in the theme, not by the level."""
+    app = _app_test()
+    app.run()
+    app.text_input(key="app_id_input").set_value(application_with_drafts)
+    app.run()
+    assert not app.exception
+
+    assert [title.value for title in app.title] == ["Grant writer"]
+    assert {"Run settings", "Application files", "Activity"} <= {
+        header.value for header in app.header
+    }
+    assert {header.tag for header in app.header} == {"h2"}
+    assert not app.subheader, "a section drawn as h3 under the h1"
 
 
 def test_the_tab_opens_on_the_workflow_of_the_last_run(monkeypatch):
@@ -1531,7 +1549,7 @@ def test_the_pane_height_stays_usable_while_an_approval_waits(monkeypatch):
 
     assert not app.exception
     assert app.session_state["phase"] == "awaiting"
-    assert "Approval required" in {sub.value for sub in app.subheader}
+    assert "Approval required" in {sub.value for sub in app.header}
 
 
 def test_the_approval_preview_can_still_be_read_as_prose(monkeypatch):
@@ -1822,7 +1840,7 @@ def test_the_application_id_stays_frozen_while_an_approval_is_pending(
     app.run()
 
     assert not app.exception
-    assert "Approval required" in {sub.value for sub in app.subheader}
+    assert "Approval required" in {sub.value for sub in app.header}
     assert app.text_input(key="app_id_input").disabled
     assert app.selectbox(key="browse_pick").disabled
 
