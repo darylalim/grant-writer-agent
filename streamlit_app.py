@@ -1139,6 +1139,9 @@ with discover_tab:
         )
         discover_submitted = st.form_submit_button(
             "Find opportunities",
+            # Primary like "Draft proposal": both start a billed run, and the
+            # tabs show one form at a time, so the page never has two.
+            type="primary",
             icon=":material/search:",
             # `turn_locked`, not `busy`, exactly as the drafting button is. A scan
             # runs on its own thread so it cannot abandon a pending `final/` write

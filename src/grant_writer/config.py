@@ -222,6 +222,17 @@ class Settings:
         return self.root / "memories" / "org" / "AGENTS.md"
 
     @property
+    def memory_template_path(self) -> Path:
+        """The blank profile that ships, which `memory_path` is created from.
+
+        Deliberately outside every `CONTENT_DIRS` entry, so no agent can write
+        it: the catch-all deny covers it, and the real-disk writers refuse it.
+        Kept under `memories/`, the first real run's facts could land in a
+        tracked file -- exactly the leak untracking the profile closes.
+        """
+        return self.root / "templates" / "org-profile.md"
+
+    @property
     def default_checkpoint_db(self) -> Path:
         return self.root / ".grant_writer" / "checkpoints.sqlite"
 
@@ -233,10 +244,24 @@ class Settings:
         would need a special case for it anyway. The listing functions below
         tolerate a missing directory regardless -- this only means a fresh
         checkout has somewhere to put a scan before the first one runs.
+
+        It also creates the organisation profile from its template, which
+        only the `local` profile needs: `server` seeds the Store instead, and
+        `seed_store_from_disk` falls back to the same template itself.
         """
         self.applications_path.mkdir(parents=True, exist_ok=True)
         self.opportunities_path.mkdir(parents=True, exist_ok=True)
         self.memory_path.parent.mkdir(parents=True, exist_ok=True)
+        # The profile is the organisation's accumulated record and is not
+        # tracked, so a fresh checkout has none. Created from the template
+        # once, and never again: mode "x" refuses an existing file atomically,
+        # where an exists() check would race a second process.
+        if self.memory_template_path.is_file():
+            try:
+                with self.memory_path.open("x", encoding="utf-8") as profile:
+                    profile.write(self.memory_template_path.read_text(encoding="utf-8"))
+            except FileExistsError:
+                pass
 
 
 # An application id names a directory on disk and doubles as the LangGraph

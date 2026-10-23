@@ -25,6 +25,7 @@ so any other uv refuses to run here. `uv self update 0.13.4` installs it.
 ```bash
 uv sync
 cp .env.example .env             # add ANTHROPIC_API_KEY and TAVILY_API_KEY
+mkdir -p memories/org && cp templates/org-profile.md memories/org/AGENTS.md
 $EDITOR memories/org/AGENTS.md   # describe your organization
 
 # 1. Find opportunities worth applying to
@@ -36,6 +37,16 @@ uv run grant-writer draft --app-id nsf-aisl-2026 --rfp ~/Downloads/solicitation.
 # 3. Refine it later
 uv run grant-writer chat --app-id nsf-aisl-2026
 ```
+
+The profile isn't tracked by git, because it holds your organization's data.
+Skip the `cp` and the first run creates it from the template. That never
+overwrites a profile that already exists.
+
+> **Upgrading from 0.5.0 or earlier?** Back up `memories/org/AGENTS.md` before
+> you pull. It used to be a tracked file, and the commit that untracks it
+> deletes your copy. If you've edited it, git refuses the pull instead, and the
+> usual way out, `git stash` or `git checkout -- memories/`, can throw your
+> edits away. Copy the file aside, pull, then copy it back.
 
 ## Usage
 
@@ -204,7 +215,8 @@ judges the drafts without seeing the drafter's reasoning.
 
 | Path | Lifetime | Purpose |
 |---|---|---|
-| `memories/org/AGENTS.md` | Permanent | Organization profile, loaded every turn |
+| `memories/org/AGENTS.md` | Permanent, not tracked | Organization profile, loaded every turn. Created from the template on first run |
+| `templates/org-profile.md` | Tracked | The blank profile that ships. No agent can write it |
 | `skills/*/SKILL.md` | Permanent | Section drafting guides, loaded on demand |
 | `opportunities/<scan-id>/` | One scan | Candidate texts and scores |
 | `applications/<app-id>/` | One application | RFP, requirements, research, drafts, reviews |
