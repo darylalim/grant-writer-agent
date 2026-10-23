@@ -328,6 +328,8 @@ def _app_test(monkeypatch, user: str | None):
     streamlit.cache_resource.clear()
     monkeypatch.setattr("grant_writer.config.require_api_keys", lambda **_kwargs: [])
     monkeypatch.setattr("grant_writer.identity.current_user", lambda *_: user)
+    # Admitted: the allowlist is `test_sign_in.py`'s subject, not this file's.
+    monkeypatch.setattr("grant_writer.identity.admission", lambda *_a, **_k: None)
     # Signed in forces `server` (`identity.profile_for`), which would hide the
     # disk this file exists to prove is per-user: the real-disk tools and the
     # `@<user>/` directories still separate users under any profile, and

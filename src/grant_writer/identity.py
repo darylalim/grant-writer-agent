@@ -79,6 +79,49 @@ def current_user(claims: Mapping[str, Any]) -> str | None:
     return f"u{digest[:32]}"
 
 
+def admission(
+    claims: Mapping[str, Any],
+    *,
+    domains: frozenset[str],
+    emails: frozenset[str],
+) -> str | None:
+    """Why a signed-in session may not use this deployment, or None if it may.
+
+    Signing in proves only that the provider knows the account. A client
+    configured for any Google account admits anyone with one -- who could then
+    read the organisation profile every run loads, approve their own write to
+    it, and take a fresh daily budget per account. So the account must also be
+    on this deployment's list: its email's domain in `domains` (exactly; a
+    subdomain is a different organisation), or the address in `emails`.
+
+    Both lists empty is a refusal, never "everyone": a deployment that forgot
+    to set one would otherwise fail open, which is invariant 26's rule.
+
+    The email must be **verified** by the provider. An address a user can set
+    to anything is precisely how a stranger would claim `@yourorg.org`, so a
+    provider that does not send `email_verified` is refused rather than
+    trusted. `"true"` is accepted beside `True` because some providers send
+    the claim as a string. Returns a message for the page, which names no
+    address: the claim is the provider's, and it would be drawn as markdown.
+    """
+    if not domains and not emails:
+        return (
+            "No one is allowed to sign in yet: set `GRANT_WRITER_ALLOWED_DOMAINS` "
+            "or `GRANT_WRITER_ALLOWED_EMAILS` for this deployment."
+        )
+    email = claims.get("email")
+    verified = claims.get("email_verified")
+    if not isinstance(email, str) or "@" not in email or verified not in (True, "true"):
+        return (
+            "Your sign-in provider did not supply a verified email address, so "
+            "this deployment cannot tell whether you belong to it."
+        )
+    address = email.strip().lower()
+    if address in emails or address.rpartition("@")[2] in domains:
+        return None
+    return "This account is not on this deployment's list of allowed users."
+
+
 def profile_for(user_id: str | None, chosen: BackendProfile) -> BackendProfile:
     """The backend profile a run must use: always `server` once signed in.
 

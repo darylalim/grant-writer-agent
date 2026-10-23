@@ -14,7 +14,7 @@ import pytest
 
 from grant_writer import config
 from grant_writer.config import _SAFE_ID, PROJECT_ROOT, user_thread_id
-from grant_writer.identity import NotSignedIn, current_user, profile_for
+from grant_writer.identity import NotSignedIn, admission, current_user, profile_for
 from grant_writer.runs import LimitReached, UsageMeter
 
 ALICE = "zz-pytest-signed-in"
@@ -123,7 +123,7 @@ class _Agent:
         return iter(())
 
 
-def _app(monkeypatch, *, user, agent=None, ledger=None):
+def _app(monkeypatch, *, user, agent=None, ledger=None, admit=True):
     streamlit = pytest.importorskip("streamlit", reason="dev dependency; run `uv sync`")
     from streamlit.testing.v1 import AppTest
 
@@ -136,6 +136,8 @@ def _app(monkeypatch, *, user, agent=None, ledger=None):
         return user
 
     monkeypatch.setattr("grant_writer.identity.current_user", who)
+    if admit:
+        monkeypatch.setattr("grant_writer.identity.admission", lambda *_a, **_k: None)
     agent = agent or _Agent()
 
     def build(settings):
@@ -287,3 +289,119 @@ def test_a_single_user_turn_is_not_metered(monkeypatch):
     assert not app.exception
     (_payload, run_config) = agent.streamed[0]
     assert "callbacks" not in run_config
+
+
+# --- Who is allowed in ---------------------------------------------------------------
+
+ORG = frozenset({"example.org"})
+NOBODY: frozenset[str] = frozenset()
+
+
+def _claims(email="Pat@Example.org", verified=True):
+    return {
+        "is_logged_in": True,
+        "iss": ISSUER,
+        "sub": "1",
+        "email": email,
+        "email_verified": verified,
+    }
+
+
+def test_an_empty_allowlist_admits_nobody():
+    """Pins invariant 26.
+
+    "No list" read as "everyone" would admit any account the provider knows --
+    the whole internet, for a client open to any Google account.
+    """
+    refusal = admission(_claims(), domains=NOBODY, emails=NOBODY)
+    assert refusal is not None and "No one is allowed" in refusal
+
+
+def test_a_verified_address_in_an_allowed_domain_is_admitted():
+    assert admission(_claims(), domains=ORG, emails=NOBODY) is None
+    assert admission(_claims(verified="true"), domains=ORG, emails=NOBODY) is None
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        _claims(verified=False),
+        _claims(verified=None),
+        _claims(verified="false"),
+        {k: v for k, v in _claims().items() if k != "email_verified"},
+        _claims(email=None),
+        _claims(email="no-at-sign"),
+    ],
+)
+def test_an_unverified_or_missing_address_is_refused(claims):
+    """Pins invariant 26.
+
+    An address the user can set to anything is how a stranger claims the
+    organisation's domain, so verification is required, not assumed.
+    """
+    refusal = admission(claims, domains=ORG, emails=NOBODY)
+    assert refusal is not None and "verified email" in refusal
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        "pat@other.org",
+        "pat@sub.example.org",
+        "pat@example.org.evil.com",
+        "pat@xexample.org",
+    ],
+)
+def test_the_domain_must_match_exactly(email):
+    """Pins invariant 26.
+
+    A suffix match would admit `example.org.evil.com` and `xexample.org`; a
+    subdomain is somebody else's to vouch for.
+    """
+    refusal = admission(_claims(email=email), domains=ORG, emails=NOBODY)
+    assert refusal is not None and email not in refusal
+
+
+def test_a_listed_address_is_admitted_from_any_domain():
+    """The way in for an outside collaborator, and only for that address."""
+    emails = frozenset({"guest@partner.org"})
+    assert (
+        admission(_claims(email="Guest@Partner.org"), domains=ORG, emails=emails)
+        is None
+    )
+    assert admission(_claims(email="other@partner.org"), domains=ORG, emails=emails)
+
+
+def test_the_lists_are_read_lowercased_and_without_a_leading_at(monkeypatch):
+    monkeypatch.setenv("GRANT_WRITER_ALLOWED_DOMAINS", " @Example.ORG, ,other.org ")
+    assert config._allowlist("GRANT_WRITER_ALLOWED_DOMAINS", strip="@") == {
+        "example.org",
+        "other.org",
+    }
+
+
+@pytest.mark.parametrize(
+    ("domains", "shown"),
+    [
+        (NOBODY, "No one is allowed"),
+        # AppTest's own `st.user` carries an email but no `email_verified`,
+        # which is exactly a provider that does not vouch for the address.
+        (frozenset({"example.com"}), "verified email"),
+    ],
+)
+def test_a_signed_in_account_off_the_list_sees_only_the_refusal(
+    monkeypatch, domains, shown
+):
+    """Pins invariant 26.
+
+    Through the real `admission`, on the page: refused before any form or
+    graph exists, with only a way to sign out.
+    """
+    monkeypatch.setattr(config, "ALLOWED_DOMAINS", domains)
+    agent = _Agent()
+    app = _app(monkeypatch, user=ALICE, agent=agent, admit=False)
+    app.run()
+    assert not app.exception
+    assert shown in app.error[0].value
+    assert _labels(app) == {"Sign out"}
+    assert not agent.built_with

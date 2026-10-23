@@ -667,6 +667,16 @@ runs, and still produces plausible output.
     profile is always `server` (`identity.profile_for`, the one place that decides), since
     `local` writes every user's drafts into one tree.
 
+    **Signed in is not allowed in.** The provider vouches for the account, not for its
+    membership: a client open to any Google account admits anyone, who could then read the
+    organisation profile every run loads, approve their own write to it, and take a fresh
+    budget per account. `identity.admission` admits only a **verified** email whose domain
+    is in `GRANT_WRITER_ALLOWED_DOMAINS` (exact match — a suffix test would admit
+    `example.org.evil.com`) or whose address is in `GRANT_WRITER_ALLOWED_EMAILS`. Both
+    empty admits **nobody**, never everyone, and a provider that sends no `email_verified`
+    is refused, since an address the user sets is how a stranger claims the domain. The
+    page checks it on every pass, so removing someone takes effect on their next click.
+
     The limits (decision 13: estimated USD per user per UTC day, and runs in flight across
     the deployment) are checked in the **run block**, not in the handlers, because that is
     where the two forms, the follow-up box and the approval panel all meet; gating each
@@ -732,10 +742,13 @@ checkout. Every consumer tests it with `if not os.getenv(...)`, so an empty stri
 `DATABASE_URL` and the two `GRANT_WRITER_DB_POOL_*` sizes are blanked the same way: the AppTest
 cases build on `persistent_settings`, so a developer's URL would aim the offline suite at a real
 Postgres. The three limit variables (`GRANT_WRITER_DAILY_BUDGET_USD`,
-`GRANT_WRITER_MAX_CONCURRENT_RUNS`, `GRANT_WRITER_SEARCH_COST_USD`) are blanked for the same reason.
+`GRANT_WRITER_MAX_CONCURRENT_RUNS`, `GRANT_WRITER_SEARCH_COST_USD`) and the two allowlists
+(`GRANT_WRITER_ALLOWED_DOMAINS`, `GRANT_WRITER_ALLOWED_EMAILS`) are blanked for the same reason.
 `tests/test_database.py` pins the Postgres wiring with the pool's `open()` patched out. Any AppTest
 case that signs a user in must patch `agent.build_run_ledger` too, as `tests/test_users.py` and
-`tests/test_sign_in.py` do, or its turns land in the developer's own `.grant_writer/runs.sqlite`.
+`tests/test_sign_in.py` do, or its turns land in the developer's own `.grant_writer/runs.sqlite`
+— and patch `identity.admission` unless the allowlist is what it tests, since `AppTest`'s own
+`st.user` carries no `email_verified` and is refused.
 Tests that want a key set it with `monkeypatch`.
 
 **Two modules call `load_dotenv()`**, and both reach this suite: `config.py` at import, which every

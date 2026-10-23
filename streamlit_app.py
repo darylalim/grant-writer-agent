@@ -47,7 +47,7 @@ from grant_writer.config import (
     trace_config,
     user_thread_id,
 )
-from grant_writer.identity import NotSignedIn, current_user, profile_for
+from grant_writer.identity import NotSignedIn, admission, current_user, profile_for
 from grant_writer.opportunities import (
     MAX_TOTAL_POINTS,
     Citation,
@@ -102,6 +102,19 @@ except ValueError as exc:
     st.error(f"Sign-in did not identify you: {exc}.", icon=":material/error:")
     st.button("Sign out", on_click=st.logout)
     st.stop()
+# Signed in is not the same as allowed in: the provider vouches for the
+# account, this deployment decides whether that account is one of its own.
+# Checked on every pass, not once at sign-in, so removing someone from the
+# list takes effect on their next click rather than at their next login.
+if _session_user is not None:
+    _gate = persistent_settings()
+    _refusal = admission(
+        st.user, domains=_gate.allowed_domains, emails=_gate.allowed_emails
+    )
+    if _refusal is not None:
+        st.error(_refusal, icon=":material/lock:")
+        st.button("Sign out", on_click=st.logout)
+        st.stop()
 if _session_user is None and persistent_settings().database_url is not None:
     st.error(
         "This deployment has a shared database but no sign-in, so it will not "

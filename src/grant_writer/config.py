@@ -123,6 +123,22 @@ MAX_CONCURRENT_RUNS = int(os.getenv("GRANT_WRITER_MAX_CONCURRENT_RUNS") or 3)
 SEARCH_COST_USD = float(os.getenv("GRANT_WRITER_SEARCH_COST_USD") or 0.008)
 
 
+def _allowlist(name: str, *, strip: str = "") -> frozenset[str]:
+    """A comma-separated variable as a set of lowercased entries."""
+    raw = os.getenv(name) or ""
+    return frozenset(
+        item.strip().lower().lstrip(strip) for item in raw.split(",") if item.strip()
+    )
+
+
+# Who may sign in (invariant 26). Signing in proves only that the provider
+# knows the account; a provider configured for any Google account admits the
+# whole internet. Both empty means nobody: a signed-in deployment with no
+# allowlist refuses to start rather than admitting everyone.
+ALLOWED_DOMAINS = _allowlist("GRANT_WRITER_ALLOWED_DOMAINS", strip="@")
+ALLOWED_EMAILS = _allowlist("GRANT_WRITER_ALLOWED_EMAILS")
+
+
 def build_model(spec: str, *, effort: str) -> BaseChatModel:
     """Resolve a `provider:model` spec into a chat model with a real ceiling.
 
@@ -248,6 +264,12 @@ class Settings:
     max_concurrent_runs: int = 3
     """Signed-in turns that may be in flight at once across the deployment, so
     a busy hour is told to wait rather than failing part-way on HTTP 429."""
+
+    allowed_domains: frozenset[str] = frozenset()
+    """Email domains whose verified accounts may sign in, matched exactly."""
+
+    allowed_emails: frozenset[str] = frozenset()
+    """Individual verified addresses that may sign in, beside the domains."""
 
     search_cost_usd: float = 0.008
     """What one web search is estimated to cost, for the daily limit. Tavily
@@ -633,6 +655,8 @@ def persistent_settings(
         daily_budget_usd=DAILY_BUDGET_USD,
         max_concurrent_runs=MAX_CONCURRENT_RUNS,
         search_cost_usd=SEARCH_COST_USD,
+        allowed_domains=ALLOWED_DOMAINS,
+        allowed_emails=ALLOWED_EMAILS,
     )
     return replace(base, checkpoint_db=base.default_checkpoint_db)
 

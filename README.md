@@ -98,6 +98,8 @@ Set these in `.env` (see `.env.example`):
 | `GRANT_WRITER_DB_POOL_TIMEOUT` | No | Seconds to wait for a free connection before failing (default 30) |
 | `GRANT_WRITER_DAILY_BUDGET_USD` | No | Estimated spend each signed-in user may reach per UTC day (default 10) |
 | `GRANT_WRITER_MAX_CONCURRENT_RUNS` | No | Signed-in turns in flight at once, across the deployment (default 3) |
+| `GRANT_WRITER_ALLOWED_DOMAINS` | With sign-in | Comma-separated email domains whose verified accounts may sign in, matched exactly |
+| `GRANT_WRITER_ALLOWED_EMAILS` | No | Comma-separated individual addresses that may also sign in (outside collaborators) |
 | `GRANT_WRITER_SEARCH_COST_USD` | No | Estimated cost of one web search, counted toward the daily limit (default 0.008) |
 
 What those overrides replace:
@@ -208,6 +210,14 @@ client_id = "..."
 client_secret = "..."
 server_metadata_url = "https://your-provider/.well-known/openid-configuration"
 ```
+
+Signing in isn't enough to get in: the account's email must be **verified** by
+the provider and on this deployment's list, set with `GRANT_WRITER_ALLOWED_DOMAINS`
+(for example `yourorg.org`) or `GRANT_WRITER_ALLOWED_EMAILS`. Domains match
+exactly, so `yourorg.org` doesn't admit `sub.yourorg.org`. With sign-in on and
+both lists empty, nobody is admitted. A provider that doesn't send the
+`email_verified` claim can't be used, because an unverified address could
+claim any domain.
 
 Signed in, each person gets their own threads and folders, and every run uses
 the `server` profile. You are identified by a digest of the provider's
