@@ -102,6 +102,15 @@ def test_the_pool_connects_the_way_both_savers_require(unopened_pool) -> None:
     assert pool._check is ConnectionPool.check_connection
 
 
+def test_the_pool_is_closed_at_exit(monkeypatch, unopened_pool) -> None:
+    """Left to interpreter teardown, its threads cannot be joined: found live,
+    as a ~20s stall and four "couldn't stop thread" lines on every CLI exit."""
+    registered = []
+    monkeypatch.setattr(agent.atexit, "register", registered.append)
+    pool = agent._pool_for(replace(Settings(), database_url=URL))
+    assert registered == [pool.close]
+
+
 def test_a_restart_against_a_persistent_store_keeps_profile_edits(
     monkeypatch, unopened_pool
 ):

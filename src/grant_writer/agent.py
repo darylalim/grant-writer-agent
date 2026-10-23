@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import functools
 import sqlite3
 from collections.abc import Awaitable, Callable
@@ -110,17 +111,23 @@ def _connection_pool(
     """
     # Specialised for the type checker only: it says rows are dicts, which is
     # what `row_factory` makes true at run time and what both savers declare.
-    pool = ConnectionPool[Connection[DictRow]]
-    return pool(
+    pool_class = ConnectionPool[Connection[DictRow]]
+    pool = pool_class(
         url,
         connection_class=Connection[DictRow],
         min_size=1,
         max_size=max_size,
         timeout=timeout,
         kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
-        check=pool.check_connection,
+        check=pool_class.check_connection,
         name="grant-writer",
     )
+    # The cache keeps the pool alive to interpreter teardown, where its worker
+    # threads can no longer be joined: every CLI exit then stalled ~20s (four
+    # threads x psycopg_pool's 5s join timeout) printing "couldn't stop
+    # thread". Closing it at exit, while threads still run, ends cleanly.
+    atexit.register(pool.close)
+    return pool
 
 
 def _pool_for(settings: Settings) -> ConnectionPool[Connection[DictRow]]:
