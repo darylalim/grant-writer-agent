@@ -178,12 +178,22 @@ def test_the_profile_is_untracked_and_the_template_is_what_ships():
     "rules",
     [
         build_permissions(replace(Settings(), approve_final=True)),
+        build_permissions(Settings(backend_profile="server", approve_final=True)),
         drafting_subagent_permissions(replace(Settings(), approve_final=True)),
-        discovery_permissions(),
+        discovery_permissions(Settings()),
+        discovery_permissions(Settings(backend_profile="server")),
         scouting_permissions(),
         compliance_permissions(),
     ],
-    ids=["drafting", "drafting-subagent", "discovery", "scout", "compliance"],
+    ids=[
+        "drafting",
+        "drafting-server",
+        "drafting-subagent",
+        "discovery",
+        "discovery-server",
+        "scout",
+        "compliance",
+    ],
 )
 def test_no_agent_may_write_the_tracked_template(rules):
     """Pins invariant 22.

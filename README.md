@@ -268,6 +268,10 @@ with none.
 - **Deletes** follow the write rules: a file the agent can write, it can delete.
   It can never delete a directory.
 - **Discovery** cannot write to `/applications/` and never pauses for approval.
+- **The organization profile** (`/memories/`) is shared by every user on the
+  `server` profile, so there every drafting write to it pauses for approval,
+  whether or not `--approve` is on, and discovery can't write it at all.
+  On `local` it stays writable without a pause.
 - **The real-disk tool** (`fetch_grants_gov_opportunity`) bypasses these
   rules, so it limits itself to the folder its own graph may write to.
 - **Solicitations** are read before the run, never by the agent: the CLI and

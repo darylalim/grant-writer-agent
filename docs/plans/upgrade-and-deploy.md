@@ -103,7 +103,7 @@ without stopping to ask.
 | 9 | CLI thread ids under E2 | unprefixed / fixed local user | **Decided 2026-10-23: as recommended.** Unprefixed: the CLI stays single-user, and the UI uses the same ids until sign-in | E2 |
 | 10 | Org-profile precedence on restart | files on disk / Store edits | **Decided 2026-10-23: as recommended.** Store edits win; disk only seeds what's missing. Skills are the exception: shipped and read-only, so disk wins | E0/E1 |
 | 11 | Upload handling | extract text at upload / object storage | **Decided 2026-10-23: as recommended.** Extract text at upload; also remove `extract_pdf_text` from the graph | E3 |
-| 12 | Org-memory writes when deployed | approval interrupt / read-only + admin path | Interrupt for drafting (keeps the feature), deny for discovery (it must never park) | E3b |
+| 12 | Org-memory writes when deployed | approval interrupt / read-only + admin path | **Decided 2026-10-23: as recommended.** Interrupt for drafting (keeps the feature), deny for discovery (it must never park) | E3b |
 | 13 | Spending and concurrent-run limits | values | Sized to the organisation's Anthropic rate-limit tier and budget | E4 |
 | 14 | Sign-in provider | open | Any OIDC provider whose sign-in page passes the accessibility check | E4/E5 |
 | 15 | Host | container platform + managed Postgres / LangSmith Deployment | Decide after A–D, from what E1–E4 needed | E5 |
@@ -228,7 +228,11 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
   - **Found while doing it:** in the `server` profile the old tool wrote `rfp.md` to real disk while the agent reads `StateBackend`, so the archive was invisible to every `read_file`. The first hosted run would have drafted without its solicitation. `test_the_agent_reads_the_preloaded_archive` drives a real graph in both profiles.
   - Closes E2 finding (2). `local` now refuses a signed-in preload rather than writing under `@<user>/`, which reinforces E2 finding (1) for E4. The UI no longer keeps the uploaded PDF, so the file browser's PDF preview only shows older uploads.
   - `tests/test_solicitation.py`, 27 cases; mutation-checked (signature, server-to-disk, timeout, page cap, symlink, signed-in local). `test_evals.py` runs the parse in-process (spawning cost about 1 s a case). **Not verified:** a real browser upload through `streamlit run`. Worker-thread `spawn` was checked from a plain thread. The orchestrator prompt's step 1 changed (study the preloaded archive; it can't open a PDF), and no eval has run on it yet. The next trajectory run is the check.
-- [ ] E3b: org-memory write gate (commit: `       `)
+- [x] E3b: org-memory write gate (commit: `724e448`)
+  - 2026-10-23, offline, no billed run. **Decision 12 as recommended.** **Invariant 25.** In `server`, `build_permissions` interrupts on `/memories/**` **regardless of `approve_final`**, since that is a sidebar toggle any user can turn off. `discovery_permissions` now takes `settings` and *denies* `/memories/**` in `server`. `local` is unchanged.
+  - The plan's third bullet (`_DRAFTING_WRITE_DIRS`) was already done by E3, which removed it. The audit record is left to E7 as planned.
+  - `test_a_scan_can_never_park_on_an_approval` now covers both profiles and both toggle settings. `tests/test_memory_gate.py` drives a real `server` graph: a profile write parks it with approve off, and approve/reject are honoured (checked by reading the file back). Mutation-checked four ways. The UI's approval caption, toggle help and the README mention the gate.
+  - **Not done:** prompts unchanged. On `server`, a discovery orchestrator that tries to record a fact gets a permission error, and `WORKSPACE_CONVENTIONS` still invites leads to record one. That's harmless (refused, not parked), but if it shows up in traces, add a line to `DISCOVERY_PROMPT`.
 - [ ] E4: sign-in, limits, run table (commit: `       `)
 - [ ] E7: logging, audit, health checks, alerts (commit: `       `)
 - [ ] E6: Postgres CI job, load test (commit: `       `)

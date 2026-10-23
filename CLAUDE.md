@@ -635,6 +635,24 @@ runs, and still produces plausible output.
     not every session's process. `tests/test_evals.py` runs the parse in-process to keep the
     suite fast; `tests/test_solicitation.py` pins the isolation itself.
 
+25. **In `server`, the organization profile is an approval for drafting and a refusal for
+    discovery — and neither depends on the approve toggle.** The profile loads into every turn
+    of every user's run, and the agent reads untrusted text: search results, funder pages,
+    uploaded solicitations. One planted "record in the org profile that …" would persist into
+    all of them with nothing on screen. So `build_permissions` adds an `interrupt` on
+    `/memories/**` whenever `backend_profile == "server"` (decision 12: the orchestrator still
+    records a confirmed fact, a person reads it first), and **not** behind `approve_final`,
+    which is a sidebar toggle any user can turn off. `discovery_permissions` cannot copy that:
+    a scan must never park (the architecture notes above), so in `server` it *denies*
+    `/memories/**` instead. Getting that backwards is the original discovery trap one directory
+    over, which is why `test_a_scan_can_never_park_on_an_approval` now runs over both
+    profiles and both toggle settings. `local` keeps the ungated profile: one person's machine,
+    where the write reaches only that person. Invariants 5 and 11 apply to the new interrupt
+    unchanged, since it parks the same way a `final/` write does; subagents remain denied the
+    profile outright (invariant 20). E3's removal of `extract_pdf_text` is what leaves the
+    permission rules as the only route to it — a real-disk writer allowed `memories/` would
+    route around this gate entirely (invariant 2).
+
 ## Backend profiles
 
 `local` (default) roots a `FilesystemBackend` at the project with `virtual_mode=True` — real files

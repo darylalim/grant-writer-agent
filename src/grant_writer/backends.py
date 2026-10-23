@@ -165,8 +165,31 @@ def _write_rules(
     return rules
 
 
+# The organization profile, gated in a shared deployment (invariant 25). It
+# loads into every turn of every user's run, and the agent reads untrusted text
+# -- search results, funder pages, uploaded solicitations -- so one planted
+# "record in the org profile that ..." would otherwise persist into all of
+# them with nothing on screen. `server` is the deployed profile; `local` stays
+# one person's machine, where the write reaches only that person.
+_MEMORY_WRITES = "/memories/**"
+
+
+def _memory_gated(settings: Settings) -> bool:
+    return settings.backend_profile == "server"
+
+
 def build_permissions(settings: Settings) -> list[FilesystemPermission]:
-    """Confine the drafting agent's writes to content directories."""
+    """Confine the drafting agent's writes to content directories.
+
+    In `server`, every write to the organization profile is also an approval,
+    and **not** behind `approve_final`: that is a sidebar toggle any user can
+    turn off, and the profile is shared by all of them. The interrupt keeps the
+    feature (decision 12) -- the orchestrator still records a fact a person
+    confirmed -- while making each such write something a human reads first.
+    """
+    interrupt = ["/applications/*/final/**"] if settings.approve_final else []
+    if _memory_gated(settings):
+        interrupt.append(_MEMORY_WRITES)
     return _write_rules(
         # Derived from `config.CONTENT_DIRS`, which `_resolve_output_path` also
         # reads. The two enforce this boundary in different shapes -- globs
@@ -176,7 +199,7 @@ def build_permissions(settings: Settings) -> list[FilesystemPermission]:
         # Submission-bound files get a human in the loop. Deliberately narrower
         # than `interrupt_on={"write_file": True}`, which would stop on every
         # scratch note and train you to rubber-stamp approvals.
-        interrupt=["/applications/*/final/**"] if settings.approve_final else (),
+        interrupt=interrupt,
     )
 
 
@@ -203,7 +226,7 @@ def drafting_subagent_permissions(settings: Settings) -> list[FilesystemPermissi
     )
 
 
-def discovery_permissions() -> list[FilesystemPermission]:
+def discovery_permissions(settings: Settings) -> list[FilesystemPermission]:
     """Write rules for the discovery graph. **Never returns an interrupt rule.**
 
     This is what makes "a scan cannot park on an approval" a structural fact
@@ -221,16 +244,21 @@ def discovery_permissions() -> list[FilesystemPermission]:
     invariant 11's failure, reached through the graph built to be exempt from
     it. The claim has to be enforced here, not argued from the roster.
 
-    `/memories/` stays writable because the shared conventions text invites the
-    agent to record durable facts about the organization there, and no rule
-    interrupts a write to it -- so allowing it keeps the prompt honest without
-    reopening the hole.
+    `/memories/` stays writable in `local`, because the shared conventions text
+    invites the agent to record durable facts about the organization there.
+    In `server` it is **denied**, not interrupted (invariant 25): the drafting
+    graph gates the shared profile with an approval, and this graph is the one
+    that must never park, so deny is the only gate it can have. Gating it the
+    drafting way here would reopen exactly the hole described above.
 
     Note what is not passed: `_write_rules` takes `interrupt` and this omits
     it. The guarantee in the first line is therefore visible on one line of
     code rather than argued from the shape of a hand-built list.
     """
-    return _write_rules(allow=["/opportunities/**", "/memories/**"])
+    allow = ["/opportunities/**"]
+    if not _memory_gated(settings):
+        allow.append(_MEMORY_WRITES)
+    return _write_rules(allow=allow)
 
 
 def scouting_permissions() -> list[FilesystemPermission]:

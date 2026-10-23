@@ -721,7 +721,8 @@ def approval_panel(requests: list[dict], unreadable: str = "") -> None:
             st.caption(
                 f"{len(requests)} pending action(s) — {', '.join(names)}. "
                 "Read each one before approving: a `final/` write is "
-                "submission-bound, and a delete cannot be undone."
+                "submission-bound, an organization-profile write reaches every "
+                "later run, and a delete cannot be undone."
             )
         for index, request in enumerate(requests):
             args = request.get("args") or {}
@@ -972,7 +973,9 @@ with st.sidebar:
         value=True,
         key="approve_toggle",
         disabled=turn_locked,
-        help="Pause before each submission-bound file and show it for review.",
+        help="Pause before each submission-bound file and show it for review. "
+        "On the server profile, writes to the organization profile always pause, "
+        "whatever this says.",
     )
     search = st.toggle(
         "Web search",
