@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import sqlite3
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -16,7 +17,11 @@ from langchain.agents.middleware import (
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 
 from grant_writer.backends import (
     build_backend,
@@ -79,14 +84,68 @@ class PlainTodoListMiddleware(TodoListMiddleware):
         return await handler(request)
 
 
+@functools.cache
+def _connection_pool(
+    url: str, max_size: int, timeout: float
+) -> ConnectionPool[Connection[DictRow]]:
+    """One pool per database per process, shared by every graph built in it.
+
+    Cached because the frontends build more than one graph -- the UI caches
+    one per `(profile, approve, search)` and per workflow -- and a pool apiece
+    would multiply the connections a deployment holds by however many sidebar
+    combinations its users happened to try. Keyed on the three values rather
+    than on `Settings`, so graphs differing only in `approve_final` share it.
+
+    The connection kwargs are the ones `PostgresSaver.from_conn_string` uses,
+    and both savers need them: `autocommit` for `setup()`'s migrations,
+    `dict_row` because they read rows by column name, `prepare_threshold=0`
+    so a pooler in transaction mode does not trip over prepared statements.
+    `check` re-tests a connection on checkout, so a database restart costs a
+    reconnect rather than an error on the next run.
+
+    Both savers borrow a connection per query and return it, under their own
+    lock, so a long drafting run does not hold one for its duration: the size
+    bounds concurrent *queries*, and `timeout` is what turns an exhausted pool
+    or an unreachable server into `PoolTimeout` instead of a hung run.
+    """
+    # Specialised for the type checker only: it says rows are dicts, which is
+    # what `row_factory` makes true at run time and what both savers declare.
+    pool = ConnectionPool[Connection[DictRow]]
+    return pool(
+        url,
+        connection_class=Connection[DictRow],
+        min_size=1,
+        max_size=max_size,
+        timeout=timeout,
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        check=pool.check_connection,
+        name="grant-writer",
+    )
+
+
+def _pool_for(settings: Settings) -> ConnectionPool[Connection[DictRow]]:
+    assert settings.database_url is not None
+    return _connection_pool(
+        settings.database_url, settings.db_pool_max_size, settings.db_pool_timeout
+    )
+
+
 def _build_checkpointer(settings: Settings) -> BaseCheckpointSaver:
     """A checkpointer is mandatory for interrupts and is what makes `thread_id`
     resume work rather than start over.
 
+    With ``database_url`` set, use Postgres: the deployment case, where threads
+    must outlive the process and be shared by every replica. Its tables come
+    from ``grant-writer db-setup``, not from here -- `setup()` runs migrations,
+    which is a deploy step and not something every graph build should race.
     With ``checkpoint_db`` set, use SQLite so conversation and todos survive
     across separate processes (what the CLI needs for `draft` then `chat`).
     Otherwise use an in-memory saver -- correct for tests and single-process use.
     """
+    if settings.database_url is not None:
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        return PostgresSaver(_pool_for(settings))
     if settings.checkpoint_db is None:
         return InMemorySaver()
     settings.checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
@@ -96,6 +155,50 @@ def _build_checkpointer(settings: Settings) -> BaseCheckpointSaver:
     # threads. The process owns the file for its lifetime.
     conn = sqlite3.connect(str(settings.checkpoint_db), check_same_thread=False)
     return SqliteSaver(conn)
+
+
+def _build_store(settings: Settings) -> BaseStore:
+    """The Store behind `/skills/` and `/memories/` in the server profile.
+
+    One function for both graphs, because two copies is the shape invariant 2's
+    history warns against: one learning about Postgres and the other not would
+    give a scan an empty org profile and nothing raised. Postgres when
+    ``database_url`` is set, on the checkpointer's pool; memory otherwise.
+
+    Seeding is here too, and is safe to repeat against a Store that outlives
+    the process: `seed_store_from_disk` overwrites skills and only fills a
+    memory key that is missing (decision 10). The local profile reads both
+    straight off disk and never consults the Store, so it is not seeded.
+    """
+    if settings.database_url is not None:
+        from langgraph.store.postgres import PostgresStore
+
+        store: BaseStore = PostgresStore(_pool_for(settings))
+    else:
+        store = InMemoryStore()
+    # In the server profile, /skills/ and /memories/ are served from the Store,
+    # so it must be filled from disk or the drafter gets no guides and no
+    # org profile.
+    if settings.backend_profile == "server":
+        seed_store_from_disk(store, settings)
+    return store
+
+
+def setup_database(settings: Settings) -> None:
+    """Create or migrate the checkpoint and Store tables. Idempotent.
+
+    What ``grant-writer db-setup`` runs, once per deploy, before any graph is
+    built against the database. Both `setup()`s apply only migrations not yet
+    recorded, so running it on every deploy is safe and is the intended use.
+    """
+    if settings.database_url is None:
+        raise ValueError("DATABASE_URL is not set; there is no database to set up.")
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from langgraph.store.postgres import PostgresStore
+
+    pool = _pool_for(settings)
+    PostgresSaver(pool).setup()
+    PostgresStore(pool).setup()
 
 
 def build_agent(settings: Settings | None = None):
@@ -114,12 +217,7 @@ def build_agent(settings: Settings | None = None):
         tools.append(search)
 
     checkpointer = _build_checkpointer(settings)
-    store = InMemoryStore()
-    # In the server profile, /skills/ and /memories/ are served from the Store,
-    # so it must be filled from disk or the drafter gets no guides and no
-    # org profile. The local profile reads these straight off disk instead.
-    if settings.backend_profile == "server":
-        seed_store_from_disk(store, settings)
+    store = _build_store(settings)
 
     return create_deep_agent(
         model=build_model(DRAFTING_MODEL, effort=DRAFTING_EFFORT),
@@ -196,9 +294,7 @@ def build_discovery_agent(settings: Settings | None = None):
         tools.append(search)
 
     checkpointer = _build_checkpointer(settings)
-    store = InMemoryStore()
-    if settings.backend_profile == "server":
-        seed_store_from_disk(store, settings)
+    store = _build_store(settings)
 
     # Annotated so ty does not infer a union from the elements. A lone
     # `[PlainTodoListMiddleware()]` took its type from the parameter; adding a

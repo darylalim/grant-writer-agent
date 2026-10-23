@@ -57,6 +57,7 @@ overwrites a profile that already exists.
 | `discover --scan-id ID` | Search, triage, and score candidates; print a ranked shortlist |
 | `draft --app-id ID` | Extract requirements, research, draft, audit, and assemble |
 | `chat --app-id ID` | Resume an application's thread to refine it |
+| `db-setup` | Create or migrate the Postgres tables named by `DATABASE_URL` (deployments only; bills nothing) |
 
 State is saved to `.grant_writer/checkpoints.sqlite`, so running `chat` or
 `draft` again with the same ID resumes the same plan and history. You can reuse
@@ -91,6 +92,9 @@ Set these in `.env` (see `.env.example`):
 | `GRANT_WRITER_*_MODEL` | No | Override the model for a role (`DRAFTING`, `RESEARCH`, `COMPLIANCE`, `GRADER`, `DISCOVERY`) |
 | `GRANT_WRITER_*_EFFORT` | No | Override the reasoning effort for a role, same role names (`low`, `medium`, `high`, `xhigh`, `max`) |
 | `GRANT_WRITER_ROOT` | No | Project root, when the console script is installed outside the repo |
+| `DATABASE_URL` | Deployments only | Postgres for checkpoints and the `Store`. Unset means SQLite |
+| `GRANT_WRITER_DB_POOL_MAX_SIZE` | No | Most Postgres connections per process (default 10) |
+| `GRANT_WRITER_DB_POOL_TIMEOUT` | No | Seconds to wait for a free connection before failing (default 30) |
 
 What those overrides replace:
 
@@ -238,8 +242,18 @@ sqlite3 .grant_writer/checkpoints.sqlite ".backup .grant_writer/checkpoints.pre-
 | `local` (default) | Real files on disk | Real files on disk | CLI and local UI |
 | `server` | Graph state | `Store` seeded from disk at startup | Web deployments |
 
-Never use `local` inside a web server. The `server` profile's `InMemoryStore` is
-lost when the process exits; replace it with `PostgresStore` before deploying.
+Never use `local` inside a web server. Without `DATABASE_URL`, the `server`
+profile's Store is in memory and is lost when the process exits. With it set,
+checkpoints and the Store both live in Postgres; run `grant-writer db-setup`
+once per deploy, before the app starts, to create or migrate the tables.
+
+On every start, skills are refreshed from disk, while the organization profile
+is only seeded when the Store has none, so edits made through the app survive
+a restart.
+
+**SQLite history does not move to Postgres.** No tool copies checkpoints from
+one to the other, so threads started locally stay local and a deployment starts
+with none.
 
 ### Permissions
 
