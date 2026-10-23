@@ -1174,6 +1174,44 @@ def test_the_approval_panel_renders_every_pending_write(monkeypatch):
     assert "Drafted text." not in " ".join(block.value for block in app.markdown)
 
 
+def test_the_approval_panel_comes_before_everything_it_locks(monkeypatch):
+    """On AWAITING the panel is the only enabled way out, so it is drawn
+    first: above both run forms and the activity feed, every one of which is
+    disabled while it waits. Below them it sat a screen and a half down on a
+    phone, and last in keyboard order.
+
+    Order is the point here, so this one case asserts on it deliberately --
+    by heading text, which a layout change cannot silently retarget."""
+    requests = [
+        {
+            "name": "write_file",
+            "args": {"file_path": "/applications/x/final/narrative.md"},
+        }
+    ]
+    agent = SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[
+                SimpleNamespace(
+                    interrupts=[SimpleNamespace(value={"action_requests": requests})]
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-approval-first"
+    app.run()
+
+    assert not app.exception
+    headings = [sub.value for sub in app.subheader]
+    first = headings.index("Approval required")
+    for later in ("Find opportunities", "Draft a proposal", "Activity"):
+        assert first < headings.index(later), later
+
+
 def test_the_approval_caption_names_a_pending_delete(monkeypatch):
     """Pins invariant 18.
 
@@ -1261,7 +1299,7 @@ def test_an_unreadable_interrupt_does_not_offer_a_plain_approve(monkeypatch):
     assert not next(b for b in app.button if b.label == "Reject").disabled
 
     # Approving is reachable, but only as a second deliberate act.
-    app.checkbox[0].set_value(True).run()
+    app.checkbox(key="blind_approve_0").set_value(True).run()
     assert not next(b for b in app.button if b.label == "Approve").disabled
 
 
@@ -1336,7 +1374,9 @@ def test_the_approval_preview_can_still_be_read_as_prose(monkeypatch):
     app.session_state["active_app_id"] = "zz-pytest-view"
     app.run()
 
-    control = app.segmented_control[0]
+    # By key, not `[0]`: the file browser draws a "View" control too, so an
+    # index names whichever one the layout happens to emit first.
+    control = app.segmented_control(key="view_0_0")
     assert control.value == "Source"
     control.set_value("Rendered").run()
 

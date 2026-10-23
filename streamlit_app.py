@@ -980,6 +980,17 @@ st.caption(
     "not submit. Every output needs human review before it goes to a funder."
 )
 
+# Reserved here, directly under the title, rather than with the other output
+# slots below the forms. On AWAITING the approval panel drawn into it is the
+# sole exit -- `turn_locked` disables everything else on the page -- and below
+# two forms and the feed it sat a screen and a half down on a phone, where
+# columns stack and nothing points the reader at it. First on the page, it is
+# also first in keyboard order. The banners and errors that share it move with
+# it, so a refusal like "Resolve the approval below" still sits over the panel
+# it names. Inline rather than `st.dialog`: a dialog can be dismissed, leaving a
+# page whose every control is disabled.
+status_slot = st.container()
+
 missing = require_api_keys(needs_search=search)
 if missing:
     st.error(
@@ -1053,9 +1064,9 @@ with st.form("discover", border=True):
         # runs on its own thread so it cannot abandon a pending `final/` write
         # the way a second draft brief would -- but it does clear the activity
         # feed, which is the only on-screen record that one is pending, and on
-        # AWAITING the panel below is asking about that write.
+        # AWAITING the panel above is asking about that write.
         disabled=bool(missing) or turn_locked,
-        help="Resolve the pending approval below before starting a new run."
+        help="Resolve the pending approval above before starting a new run."
         if turn_locked and not busy
         else None,
     )
@@ -1090,7 +1101,7 @@ st.subheader("Draft a proposal", anchor=False)
 # file has.
 # `turn_locked` (defined at the top) covers this box for a reason of its own,
 # beyond the shared "no turn may start on a parked thread": on AWAITING the
-# approval panel below is asking a human to vet a `final/` write for
+# approval panel at the top is asking a human to vet a `final/` write for
 # `active_app_id`, and retargeting the box there leaves that panel and the files
 # pane under it describing two different applications, at the one moment the
 # surrounding context has to be right.
@@ -1151,15 +1162,16 @@ with st.form("draft", border=True):
         # which is right whenever no interrupt survived, and the handler
         # refuses the case where one did.
         disabled=bool(missing) or turn_locked,
-        help="Resolve the pending approval below before starting a new run."
+        help="Resolve the pending approval above before starting a new run."
         if turn_locked and not busy
         else None,
     )
 
 # --- Reserve output slots before any slow work -------------------------------
+#
+# `status_slot` is reserved under the title instead; see there.
 
 activity_slot = st.container()
-status_slot = st.container()
 discovery_slot = st.container()
 results_slot = st.container()
 
@@ -1418,8 +1430,8 @@ with activity_slot:
         # `turn_locked` carries the AWAITING half of this: the graph is parked
         # on an interrupt there, and a fresh message starts a new turn rather
         # than answering it -- abandoning the pending write instead of approving
-        # or rejecting it. Resolve the approval first; its panel is directly
-        # below. Shared rather than spelled out here, so a phase added to that
+        # or rejecting it. Resolve the approval first; its panel is at the top
+        # of the page. Shared rather than spelled out here, so a phase added to that
         # expression reaches this input too; the extra clause is this control's
         # own precondition, that there is a thread to continue at all.
         disabled=(turn_locked or bool(missing) or not active_ref),
@@ -1585,7 +1597,7 @@ with status_slot:
         # the fragment -- see approval_panel on why it does not fetch its own.
         #
         # Guarded because AWAITING is the one phase with no enabled way out:
-        # every control that could start a turn is locked, so the panel below is
+        # every control that could start a turn is locked, so the panel here is
         # the only exit, and an exception escaping this read takes the panel with
         # it. The page then shows a traceback over a form it cannot submit, an id
         # box it cannot edit, and no Approve or Reject at all -- and every rerun
