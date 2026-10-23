@@ -275,7 +275,7 @@ def build_discovery_agent(settings: Settings | None = None):
     produce one graph that sometimes can be parked and sometimes cannot, which
     is a far harder thing to keep true than two graphs that differ honestly.
 
-    Note it is `discovery_permissions()` and *not* `build_permissions(settings)`
+    Note it is `discovery_permissions(settings)` and *not* `build_permissions(settings)`
     here. Sharing the latter looked right and was not: it allows
     `/applications/**` and, under `--approve`, interrupts on
     `/applications/*/final/**` -- and this orchestrator has `write_file` like
@@ -330,7 +330,7 @@ def build_discovery_agent(settings: Settings | None = None):
         # passed here at all and why the prompt is left out.
         middleware=discovery_middleware,
         backend=build_backend(settings),
-        permissions=discovery_permissions(),
+        permissions=discovery_permissions(settings),
         checkpointer=checkpointer,
         store=store,
         name="opportunity-discovery",

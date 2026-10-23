@@ -209,7 +209,7 @@ def test_delete_is_governed_as_a_write(rules_name, target, denied):
     """
     rules = {
         "draft": lambda: build_permissions(Settings(approve_final=False)),
-        "discovery": discovery_permissions,
+        "discovery": lambda: discovery_permissions(Settings()),
         "compliance": compliance_permissions,
     }[rules_name]()
     patterns = _find_delete_deny_patterns(rules, target, has_descendants=False)
@@ -233,7 +233,8 @@ def test_delete_refuses_a_directory_everywhere(target):
     for rules in (
         build_permissions(Settings(approve_final=False)),
         build_permissions(Settings(approve_final=True)),
-        discovery_permissions(),
+        discovery_permissions(Settings()),
+        discovery_permissions(Settings(backend_profile="server")),
         compliance_permissions(),
     ):
         assert _find_delete_deny_patterns(rules, target, has_descendants=True)
@@ -460,7 +461,8 @@ def test_the_rubric_iteration_cap_comes_from_settings():
     [
         (build_permissions(Settings(approve_final=False)), "drafting"),
         (build_permissions(Settings(approve_final=True)), "drafting --approve"),
-        (discovery_permissions(), "discovery"),
+        (discovery_permissions(Settings()), "discovery"),
+        (discovery_permissions(Settings(backend_profile="server")), "discovery server"),
         (scouting_permissions(), "scout"),
         (compliance_permissions(), "compliance"),
         (drafting_subagent_permissions(Settings(approve_final=False)), "subagent"),
@@ -1134,11 +1136,15 @@ def test_discovery_subagents_get_an_explicit_output_ceiling():
         "/opportunities/s/candidates/a.md",
         # A directory that merely looks like the protected one.
         "/opportunities/s/final/a.md",
+        # The path the drafting graph *does* interrupt on in `server`
+        # (invariant 25) -- the same trap as `final/`, one directory over.
         "/memories/org/AGENTS.md",
         "/src/grant_writer/agent.py",
     ],
 )
-def test_a_scan_can_never_park_on_an_approval(path):
+@pytest.mark.parametrize("profile", ["local", "server"])
+@pytest.mark.parametrize("approve", [False, True])
+def test_a_scan_can_never_park_on_an_approval(path, profile, approve):
     """The property the whole discovery design rests on.
 
     Both frontends start a scan without the `parked_state` check that guards a
@@ -1155,7 +1161,8 @@ def test_a_scan_can_never_park_on_an_approval(path):
     setting that produces it elsewhere. Anything but allow-or-deny here means
     the frontends' missing guard has become a hole.
     """
-    verdict = _check_fs_permission(discovery_permissions(), "write", path)
+    settings = Settings(backend_profile=profile, approve_final=approve)
+    verdict = _check_fs_permission(discovery_permissions(settings), "write", path)
     assert verdict != "interrupt", path
     assert verdict in {"allow", "deny"}, path
 
@@ -1168,7 +1175,7 @@ def test_the_discovery_graph_cannot_write_into_an_application():
     `/applications/` is denied outright: a scan has no business editing drafts,
     and denial is what keeps the no-interrupt guarantee above true.
     """
-    rules = discovery_permissions()
+    rules = discovery_permissions(Settings())
     assert (
         _check_fs_permission(rules, "write", "/opportunities/s/scored/a.md") == "allow"
     )
