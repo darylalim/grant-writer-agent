@@ -55,6 +55,12 @@ from grant_writer.opportunities import (
     rank_opportunities,
 )
 from grant_writer.prompts import discovery_request, draft_request
+from grant_writer.solicitation import (
+    MAX_PAGES,
+    MAX_UPLOAD_MB,
+    extract_solicitation,
+    preload_solicitation,
+)
 from grant_writer.workspace import (
     application_files,
     compliance_verdict,
@@ -112,7 +118,6 @@ TOOL_ICONS = {
     "ls": ":material/folder_open:",
     "glob": ":material/search:",
     "grep": ":material/search:",
-    "extract_pdf_text": ":material/picture_as_pdf:",
     "measure_text": ":material/straighten:",
     "tavily_search": ":material/travel_explore:",
     "write_todos": ":material/checklist:",
@@ -1232,7 +1237,12 @@ with draft_tab:
 
     with st.form("draft", border=True):
         funder = st.text_input("Funder", placeholder="NSF")
-        rfp = st.file_uploader("Solicitation PDF", type="pdf")
+        rfp = st.file_uploader(
+            "Solicitation PDF",
+            type="pdf",
+            help=f"Up to {MAX_UPLOAD_MB} MB and {MAX_PAGES} pages. Its text is "
+            "extracted when you submit; the PDF itself is not kept.",
+        )
         notes = st.text_area(
             "Additional context",
             placeholder="Anything the agent should know that is not in the "
@@ -1349,7 +1359,7 @@ if submitted:
         # `application_dir` is the boundary. Joining the raw id would escape
         # `applications/` outright: pathlib discards the left operand for an
         # absolute right one, so an id of "/Users/me/.ssh" writes there.
-        app_dir = application_dir(settings, app_id, user_id=current_user())
+        application_dir(settings, app_id, user_id=current_user())
 
         # Ask the graph, not the phase. `turn_locked` greys this button out
         # whenever *this* session remembers parking on an interrupt, but that
@@ -1419,18 +1429,21 @@ if submitted:
             st.session_state.phase = AWAITING
             st.rerun()
 
-        rfp_path = None
+        # The text, never the file (invariant 24): extracted here under the
+        # size, signature, page and time bounds, then preloaded where the
+        # graph's own backend reads `rfp.md`. Nothing keeps the PDF, so
+        # nothing on one replica's disk has to be visible to another, and the
+        # agent has no path to open. `rfp.name` is client-supplied; take its
+        # last component only. A refusal is a `ValueError` and lands in the
+        # banner below.
+        preload: dict[str, Any] = {}
         if rfp is not None:
-            # Keep the source PDF beside the drafts rather than in a temp file,
-            # so the same app id works again tomorrow. Written by the app, not
-            # the agent, so FilesystemPermission does not cover it -- which is
-            # exactly why the id and the upload name are both bounded here.
-            # `rfp.name` is client-supplied; take its last component only.
             filename = Path(rfp.name).name or "solicitation.pdf"
-            target = app_dir / filename
-            app_dir.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(rfp.getvalue())
-            rfp_path = str(target)
+            with st.spinner(f"Reading {filename}…"):
+                text = extract_solicitation(rfp.getvalue(), filename)
+            preload = preload_solicitation(
+                settings, app_id, text, user_id=current_user()
+            )
 
         payload: dict[str, Any] = {
             "messages": [
@@ -1438,12 +1451,13 @@ if submitted:
                     "role": "user",
                     "content": draft_request(
                         app_id,
-                        rfp_path=rfp_path,
+                        solicitation=rfp is not None,
                         funder=funder.strip() or None,
                         notes=notes.strip() or None,
                     ),
                 }
-            ]
+            ],
+            **preload,
         }
         if rubric is not None:
             # RubricMiddleware is dormant until this key is in invocation state.

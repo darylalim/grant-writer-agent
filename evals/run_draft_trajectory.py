@@ -208,6 +208,7 @@ def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]
     from grant_writer.agent import build_agent
     from grant_writer.config import Settings
     from grant_writer.prompts import draft_request
+    from grant_writer.solicitation import extract_solicitation, preload_solicitation
 
     _prepare_root(root)
 
@@ -216,8 +217,13 @@ def run_once(root: Path, *, repeat: int, recursion_limit: int) -> dict[str, Any]
     error = None
     stopped = None
     try:
-        agent = build_agent(Settings(root=root, enable_search=False))
-        brief = draft_request(APP_ID, rfp_path=str(RFP), funder=FUNDER)
+        settings = Settings(root=root, enable_search=False)
+        # As a frontend would: the text is preloaded before the run (invariant
+        # 24), so the trajectory starts from the archive the product gives it.
+        text = extract_solicitation(RFP.read_bytes(), RFP.name)
+        preload_solicitation(settings, APP_ID, text, user_id=None)
+        agent = build_agent(settings)
+        brief = draft_request(APP_ID, solicitation=True, funder=FUNDER)
         run_config: Any = {
             "configurable": {"thread_id": f"{APP_ID}-{repeat}-{_BATCH}"},
             "recursion_limit": recursion_limit,

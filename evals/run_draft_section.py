@@ -176,22 +176,23 @@ def _script(case: DraftCase) -> _ScriptedOrchestrator:
 def prepare_root(root: Path, case: DraftCase) -> str:
     """Seed `root` the way a real run would have it; return the rfp text.
 
-    `rfp.md` comes from the real `extract_pdf_text`, built on this root, so the
-    drafter reads exactly what an orchestrator's extraction would have left.
+    `rfp.md` comes from the real `extract_solicitation` and
+    `preload_solicitation`, so the drafter reads exactly what a frontend's
+    upload would have left.
     Skills are copied, not symlinked: the local backend refuses a path that
     resolves outside its root.
     """
-    from grant_writer.tools import build_extract_pdf_tool
+    from grant_writer.config import Settings
+    from grant_writer.solicitation import extract_solicitation, preload_solicitation
 
     (root / "memories" / "org").mkdir(parents=True)
     (root / "memories" / "org" / "AGENTS.md").write_text(case.profile, "utf-8")
     shutil.copytree(REPO / "skills", root / "skills")
-    reply = build_extract_pdf_tool(root).invoke(
-        {"pdf_path": str(RFP_PDF), "out_path": case.rfp_path}
-    )
+    text = extract_solicitation(RFP_PDF.read_bytes(), RFP_PDF.name)
+    preload_solicitation(Settings(root=root), case.app_id, text, user_id=None)
     rfp = root / case.rfp_path.lstrip("/")
     if not rfp.is_file():
-        raise RuntimeError(f"rfp extraction failed: {reply}")
+        raise RuntimeError(f"rfp preload did not land at {case.rfp_path}")
     return rfp.read_text(encoding="utf-8")
 
 

@@ -335,11 +335,11 @@ def application_dir(settings: Settings, app_id: str, *, user_id: str | None) -> 
     """Resolve an application id to its directory, refusing anything unsafe.
 
     Frontends that touch the real filesystem must route through this rather
-    than joining user input inline. `extract_pdf_text` needs the same boundary
-    for a different input (a virtual path from the model) and enforces it in
-    `tools._resolve_output_path`; both use the same ordering -- resolve first,
-    check second -- because validating the raw string lets `..` pass the prefix
-    test and escape when it collapses.
+    than joining user input inline. `fetch_grants_gov_opportunity` needs the
+    same boundary for a different input (a virtual path from the model) and
+    enforces it in `tools._resolve_output_path`; both use the same ordering --
+    resolve first, check second -- because validating the raw string lets `..`
+    pass the prefix test and escape when it collapses.
 
     `user_id` is required, with no default, for the reason `build_model`'s
     `effort` is: a default is how a new call site would land in the shared

@@ -29,7 +29,6 @@ from grant_writer.backends import (
 from grant_writer.config import CONTENT_DIRS, PROJECT_ROOT, Settings
 from grant_writer.tools import (
     _DISCOVERY_WRITE_DIRS,
-    _DRAFTING_WRITE_DIRS,
     _resolve_output_path,
 )
 
@@ -201,12 +200,14 @@ def test_no_agent_may_write_the_tracked_template(rules):
     assert _check_fs_permission(rules, "write", virtual) == "deny"
 
 
-@pytest.mark.parametrize("allowed", [_DRAFTING_WRITE_DIRS, _DISCOVERY_WRITE_DIRS])
+@pytest.mark.parametrize("allowed", [CONTENT_DIRS, _DISCOVERY_WRITE_DIRS])
 def test_the_real_disk_writers_refuse_the_tracked_template(allowed, tmp_path):
     """Pins invariant 22.
 
-    The second enforcement point (invariant 2): `extract_pdf_text` writes to
-    real disk and never consults the permission rules above.
+    The second enforcement point (invariant 2): a real-disk writer never
+    consults the permission rules above. Checked against the whole
+    `CONTENT_DIRS` union as well as the one writer's own set, so a future
+    writer handed the widest set still cannot reach the template.
     """
     with pytest.raises(ValueError):
         _resolve_output_path(

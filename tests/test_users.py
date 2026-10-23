@@ -35,9 +35,7 @@ from grant_writer.config import (
 )
 from grant_writer.tools import (
     _DISCOVERY_WRITE_DIRS,
-    _DRAFTING_WRITE_DIRS,
     _resolve_output_path,
-    build_extract_pdf_tool,
     build_fetch_opportunity_tool,
 )
 
@@ -163,70 +161,46 @@ def test_a_tool_write_lands_in_the_callers_own_directory(tmp_path):
     caller only from the run. Mapped here, never named by the agent.
     """
     mapped = _resolve_output_path(
-        f"/applications/{APP}/rfp.md", _DRAFTING_WRITE_DIRS, tmp_path, user_id=BOB
-    )
-    assert mapped == tmp_path.resolve() / "applications" / f"@{BOB}" / APP / "rfp.md"
-    mapped = _resolve_output_path(
         f"/opportunities/{APP}/candidates/1.md",
         _DISCOVERY_WRITE_DIRS,
         tmp_path,
         user_id=BOB,
     )
-    assert mapped.is_relative_to(tmp_path.resolve() / "opportunities" / f"@{BOB}")
+    assert mapped == (
+        tmp_path.resolve() / "opportunities" / f"@{BOB}" / APP / "candidates" / "1.md"
+    )
 
 
 @pytest.mark.parametrize("user_id", [None, BOB])
 @pytest.mark.parametrize(
     "out_path",
     [
-        f"/applications/@{ALICE}/{APP}/final/a.md",
-        f"/applications/{APP}/../@{ALICE}/{APP}/a.md",
-        f"/applications/x/@{ALICE}/a.md",
+        f"/opportunities/@{ALICE}/{APP}/scored/a.md",
+        f"/opportunities/{APP}/../@{ALICE}/{APP}/a.md",
+        f"/opportunities/x/@{ALICE}/a.md",
     ],
 )
 def test_a_tool_cannot_name_a_user_directory(tmp_path, out_path, user_id):
     """The mapping adds the user segment; an `@` segment of the agent's own is
     refused rather than nested, from the single-user tree as well."""
     with pytest.raises(ValueError, match="user directory"):
-        _resolve_output_path(out_path, _DRAFTING_WRITE_DIRS, tmp_path, user_id=user_id)
+        _resolve_output_path(out_path, _DISCOVERY_WRITE_DIRS, tmp_path, user_id=user_id)
 
 
 def test_a_symlink_in_a_users_directory_cannot_carry_a_write_out(tmp_path):
     """Invariant 2's resolve-then-check, applied again after the mapping."""
-    alice = tmp_path / "applications" / f"@{ALICE}"
+    alice = tmp_path / "opportunities" / f"@{ALICE}"
     alice.mkdir(parents=True)
-    bob = tmp_path / "applications" / f"@{BOB}"
+    bob = tmp_path / "opportunities" / f"@{BOB}"
     bob.mkdir(parents=True)
     (bob / APP).symlink_to(alice)
     with pytest.raises(ValueError, match="your own directory"):
         _resolve_output_path(
-            f"/applications/{APP}/rfp.md", _DRAFTING_WRITE_DIRS, tmp_path, user_id=BOB
+            f"/opportunities/{APP}/c/1.md",
+            _DISCOVERY_WRITE_DIRS,
+            tmp_path,
+            user_id=BOB,
         )
-
-
-def _blank_pdf(path: Path) -> Path:
-    from pypdf import PdfWriter
-
-    writer = PdfWriter()
-    writer.add_blank_page(width=72, height=72)
-    with path.open("wb") as handle:
-        writer.write(handle)
-    return path
-
-
-def test_extract_pdf_text_reads_the_user_from_the_thread_id(tmp_path):
-    """End to end through the real tool, with the config LangGraph hands it."""
-    pdf = _blank_pdf(tmp_path / "rfp.pdf")
-    root = tmp_path / "root"
-    tool = build_extract_pdf_tool(root)
-    args = {"pdf_path": str(pdf), "out_path": f"/applications/{APP}/rfp.md"}
-
-    tool.invoke(args, config={"configurable": {"thread_id": BOB_THREAD}})
-    tool.invoke(args, config={"configurable": {"thread_id": APP}})
-
-    assert (root / "applications" / f"@{BOB}" / APP / "rfp.md").is_file()
-    assert (root / "applications" / APP / "rfp.md").is_file()
-    assert not (root / "applications" / f"@{ALICE}").exists()
 
 
 def test_fetch_opportunity_reads_the_user_from_the_thread_id(tmp_path, monkeypatch):
@@ -247,25 +221,24 @@ def test_fetch_opportunity_reads_the_user_from_the_thread_id(tmp_path, monkeypat
     assert not (root / "opportunities" / APP).exists()
 
 
-def test_a_malformed_thread_id_writes_nothing(tmp_path):
-    pdf = _blank_pdf(tmp_path / "rfp.pdf")
+def test_a_malformed_thread_id_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "grant_writer.tools._grants_gov_post", lambda *_a: {"id": 1, "title": "T"}
+    )
+    monkeypatch.setattr("grant_writer.tools._format_opportunity", lambda _d: "text")
     root = tmp_path / "root"
-    receipt = build_extract_pdf_tool(root).invoke(
-        {"pdf_path": str(pdf), "out_path": f"/applications/{APP}/rfp.md"},
+    receipt = build_fetch_opportunity_tool(root).invoke(
+        {"opportunity_id": "1", "out_path": f"/opportunities/{APP}/c/1.md"},
         config={"configurable": {"thread_id": "user:a/b:x"}},
     )
     assert receipt.startswith("Error:")
-    assert not (root / "applications").exists()
+    assert not (root / "opportunities").exists()
 
 
 def test_the_injected_config_is_not_shown_to_the_model(tmp_path):
     """`config` is injected by `@tool`; in the schema it would invite the model
     to supply its own thread id -- and with it, its own user."""
-    for tool in (
-        build_extract_pdf_tool(tmp_path),
-        build_fetch_opportunity_tool(tmp_path),
-    ):
-        assert "config" not in tool.args
+    assert "config" not in build_fetch_opportunity_tool(tmp_path).args
 
 
 # --- CLI (decisions 9 and 18) --------------------------------------------------

@@ -119,6 +119,7 @@ Module dependencies flow one way:
 ```
 config.py  →  tools.py, backends.py  →  subagents.py  →  agent.py  →  cli.py
 opportunities.py ─→ prompts.py, workspace.py, cli.py ─────────────────────↗
+config.py  →  solicitation.py  ─────────────────────────────────→  cli.py, streamlit_app.py
               activity.py, workspace.py, identity.py  ─────────────────────↗  streamlit_app.py
 activity.py ─→ refusals.py ─→ subagents.py, agent.py
 ```
@@ -231,8 +232,8 @@ runs, and still produces plausible output.
 2. **Anything writing to the real filesystem bypasses `FilesystemPermission` entirely** — the
    permission rules only cover writes that go through the backend. Two mechanisms do not, and each
    enforces the boundary its own way: `tools.py::_resolve_output_path` for the virtual paths
-   `extract_pdf_text` and `fetch_grants_gov_opportunity` write to, and
-   `config.py::_resolve_content_id` for the ids a frontend joins onto a path. Both resolve `..`
+   `fetch_grants_gov_opportunity` writes to, and `config.py::_resolve_content_id` for the ids a
+   frontend joins onto a path (including `solicitation.preload_solicitation`'s `rfp.md`). Both resolve `..`
    *before* the prefix check — validating the raw string lets `/applications/../src/x` pass and
    then escape when `..` collapses. A further such writer needs the same treatment, not its own
    variant.
@@ -245,17 +246,18 @@ runs, and still produces plausible output.
    `fetch_grants_gov_opportunity`, and `discovery_permissions` denies it `/applications/**` — but
    those rules govern the *backend*, and a tool writing to real disk never consults them, so one
    `out_path="/applications/x/final/proposal.md"` overwrote a submission-bound file with no
-   approval interrupt and no error. `tools._DRAFTING_WRITE_DIRS` and `_DISCOVERY_WRITE_DIRS` are
-   each narrower than the union and neither is a superset of the other. A permission rule and a
-   real-disk writer are two enforcement points, not one, and only the first knows about graphs.
+   approval interrupt and no error. `tools._DISCOVERY_WRITE_DIRS` is narrower than the union, and
+   a future writer gets its own set the same way. A permission rule and a real-disk writer are two
+   enforcement points, not one, and only the first knows about graphs. Drafting used to carry a
+   writer too, `extract_pdf_text`; invariant 24 removed it.
 
-   **The root comes from the caller too.** The two writers are built per graph by
-   `tools.build_extract_pdf_tool` / `build_fetch_opportunity_tool` from `Settings.root`, and
+   **The root comes from the caller too.** The writer is built per graph by
+   `tools.build_fetch_opportunity_tool` from `Settings.root`, and
    `_resolve_output_path` takes that root as a required argument. It used to read
    `config.PROJECT_ROOT`, so a graph built on any other root archived into this checkout's
    `applications/` and then looked for the file under its own. That never escaped a content
    directory, but it was the wrong tree, and nothing said so. Don't reintroduce a module-level instance
-   of either tool: it could only resolve against `PROJECT_ROOT`.
+   of it: it could only resolve against `PROJECT_ROOT`.
 
    The two id boundaries *are* one function: `application_dir` and `opportunities_dir` both call
    `_resolve_content_id`, which takes the noun only to shape the message. Fixing an ordering bug in
@@ -484,7 +486,7 @@ runs, and still produces plausible output.
     set only the third. `LANGCHAIN_TRACING_V2=true` — the spelling LangChain's own docs emitted
     for years, still exported in plenty of shells — outranks it outright, and the suite this file
     calls offline by contract POSTs its runs to the developer's real `grant-writer` project.
-    `measure_text`, `extract_pdf_text` and `fetch_grants_gov_opportunity` are `@tool`s, so every
+    `measure_text` and `fetch_grants_gov_opportunity` are `@tool`s, so every
     `.invoke` in `test_wiring.py` opens a run. Measured against a dead endpoint: `4 passed`, and
     4KB of runs left with it. Nothing raises — `LangChainTracer` logs its own failures and
     swallows them — and the symptom arrives later, as a polluted project someone is reading to
@@ -566,7 +568,7 @@ runs, and still produces plausible output.
     done nothing, since git keeps tracking a file it already tracks.
 
     The template's location is the half that holds. Under `memories/`, the orchestrator's
-    `/memories/**` allow and `tools._DRAFTING_WRITE_DIRS` would both let an agent write the
+    `/memories/**` allow and any real-disk writer allowed `memories/` would both let an agent write the
     tracked file and reopen the leak. Outside `CONTENT_DIRS`, the catch-all deny refuses it
     and `_resolve_output_path` refuses it, with no rule naming it — and
     `seed_store_from_disk`'s walk of `memories/` cannot pick it up as a second memory file.
@@ -609,6 +611,29 @@ runs, and still produces plausible output.
     `tests/test_users.py` impersonates two users through every entry point — run form,
     follow-up, approval panel, file browser and picker — and each case was mutation-checked
     against reverting one of those routes to the bare id.
+
+24. **A solicitation reaches the agent as text in its own backend, never as a path.** The
+    frontends extract an uploaded PDF *before* the run (`solicitation.extract_solicitation`) and
+    `preload_solicitation` puts the text at `/applications/<id>/rfp.md` where the graph reads
+    it: on disk for `local`, as the payload's `files` key for `server`. The agent has no tool
+    that opens a PDF. Two silent failures made this the design. The `server` profile keeps
+    drafts in `StateBackend`, and the old `extract_pdf_text` tool wrote `rfp.md` to *real disk*:
+    the write succeeded, the receipt said so, and every `read_file` afterwards found nothing, so
+    the first hosted run would have drafted without its solicitation. And that tool opened any
+    `pdf_path` the model named, so on a shared server one user's agent could read another's
+    upload by guessing where it was saved. A file in the backend has no path to guess.
+    `local` refuses a signed-in preload rather than writing under `@<user>/`, where its shared
+    `FilesystemBackend` would never look (signed in must mean `server`, E4).
+
+    **The parse is untrusted input on a shared process, and it is bounded four ways.** Size,
+    by `MAX_UPLOAD_MB`, which must equal `server.maxUploadSize` in `.streamlit/config.toml`:
+    Streamlit enforces one and the CLI the other, and both are pinned to agree. Type, by the
+    `%PDF-` signature in the bytes, never the client's name or MIME type. Pages, by
+    `MAX_PAGES`, *refused* above the cap rather than truncated, because a silently missing tail
+    is the abridgement the archive exists to prevent. And time: `pypdf` runs in a `spawn`ed
+    child killed at `EXTRACT_TIMEOUT_S`, so a crafted file that loops forever costs one upload,
+    not every session's process. `tests/test_evals.py` runs the parse in-process to keep the
+    suite fast; `tests/test_solicitation.py` pins the isolation itself.
 
 ## Backend profiles
 

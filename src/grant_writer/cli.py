@@ -31,6 +31,7 @@ from grant_writer.config import (
 )
 from grant_writer.opportunities import rank_opportunities
 from grant_writer.prompts import discovery_request, draft_request
+from grant_writer.solicitation import extract_solicitation, preload_solicitation
 from grant_writer.workspace import (
     count_gaps,
     read_scored_opportunities,
@@ -170,21 +171,33 @@ def _draft(args: argparse.Namespace) -> int:
         print("Copy .env.example to .env and fill it in.", file=sys.stderr)
         return 1
 
-    rfp_path: str | None = None
+    # Extracted here, before the graph exists, through the same bounded parse
+    # the UI uses (invariant 24): the agent has no tool that opens a PDF.
+    preload: dict = {}
     if args.rfp:
         rfp = Path(args.rfp).expanduser().resolve()
         if not rfp.is_file():
             print(f"No such RFP file: {rfp}", file=sys.stderr)
             return 1
-        rfp_path = str(rfp)
+        print(f"Extracting {rfp.name}...", flush=True)
+        try:
+            text = extract_solicitation(rfp.read_bytes(), rfp.name)
+            # The CLI is single-user (decision 9), so no user id.
+            preload = preload_solicitation(settings, args.app_id, text, user_id=None)
+        except (ValueError, OSError) as exc:
+            print(f"Could not use {rfp.name}: {exc}", file=sys.stderr)
+            return 1
 
     instruction = draft_request(
         args.app_id,
-        rfp_path=rfp_path,
+        solicitation=bool(args.rfp),
         funder=args.funder,
         notes=args.notes,
     )
-    payload: dict = {"messages": [{"role": "user", "content": instruction}]}
+    payload: dict = {
+        "messages": [{"role": "user", "content": instruction}],
+        **preload,
+    }
 
     rubric_name: str | None = None
     if args.rubric:

@@ -22,7 +22,7 @@ from grant_writer.opportunities import VERDICTS, rubric_brief
 def draft_request(
     app_id: str,
     *,
-    rfp_path: str | None = None,
+    solicitation: bool = False,
     funder: str | None = None,
     notes: str | None = None,
 ) -> str:
@@ -33,15 +33,16 @@ def draft_request(
     subtly different briefs would produce subtly different proposals from the
     same inputs.
 
-    ``rfp_path`` is a real path on the host, not a virtual one -- the agent
-    reads the PDF through ``extract_pdf_text``, which touches the real
-    filesystem, and only its *output* path is virtual.
+    ``solicitation`` says the frontend has already preloaded the extracted
+    text with `solicitation.preload_solicitation`. The brief names only the
+    virtual path, never a disk path: the agent has no tool that opens a PDF
+    (invariant 24).
     """
     parts = [f"Prepare a proposal in /applications/{app_id}/."]
-    if rfp_path:
+    if solicitation:
         parts.append(
-            f"The solicitation is the PDF at {rfp_path}. Extract it with "
-            f"extract_pdf_text and save it to /applications/{app_id}/rfp.md."
+            f"The solicitation's full text is already archived at "
+            f"/applications/{app_id}/rfp.md."
         )
     if funder:
         parts.append(f"The funder is {funder}.")
@@ -119,13 +120,14 @@ draft.
 
 ## How to work
 
-1. **Archive the solicitation first, in one step.** If given a PDF, call
-   `extract_pdf_text` with `out_path="/applications/<app-id>/rfp.md"`. That
-   writes the complete text to disk directly. Never read a long PDF into
-   context and re-type it into `write_file` -- relayed text gets silently
-   abridged, and every compliance check afterwards would run against a
-   document with pages missing. Once it is archived, read `rfp.md` back in
-   ranges to study it.
+1. **Study the solicitation from its archive.** When one was supplied, its
+   complete text is already at `/applications/<app-id>/rfp.md` before you
+   start, with a `--- page N ---` marker per page. Read it in ranges. Never
+   re-type it, in whole or in part, into another file -- relayed text gets
+   silently abridged, and every compliance check afterwards would run against
+   a document with pages missing. You cannot open a PDF yourself. If there is
+   no `rfp.md`, ask for the solicitation rather than rebuilding it from search
+   results.
 2. **Extract requirements before writing anything.** Produce
    `requirements.md`: every required section, its page or word limit, the
    stated review criteria and their weights, eligibility rules, deadlines,

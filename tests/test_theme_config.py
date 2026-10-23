@@ -100,6 +100,21 @@ def test_every_theme_key_is_a_real_config_option() -> None:
     )
 
 
+def test_every_server_key_is_a_real_config_option() -> None:
+    """`[server]` fails the same quiet way `[theme]` does.
+
+    It holds the upload cap (invariant 24). A misspelt `maxUploadSize` is
+    dropped with a server-log line, and Streamlit's 200 MB default comes back
+    while the file still reads 50 -- the check that it agrees with
+    `solicitation.MAX_UPLOAD_MB` would pass against a value nothing enforces.
+    """
+    st_config.get_config_options()
+    valid = set(st_config._config_options_template)
+    server = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))["server"]
+    unknown = sorted(f"server.{k}" for k in server if f"server.{k}" not in valid)
+    assert not unknown, f"not valid Streamlit config options: {unknown}"
+
+
 def test_top_level_only_options_stay_top_level() -> None:
     """The specific trap the file's comment describes, pinned by name.
 
