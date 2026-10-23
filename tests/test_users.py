@@ -286,7 +286,8 @@ def test_the_operator_override_is_logged_and_keeps_unprefixed_ids(monkeypatch, c
     monkeypatch.setattr("grant_writer.cli.build_agent", lambda _s: object())
     seen = []
     monkeypatch.setattr(
-        "grant_writer.cli._run", lambda _agent, _payload, cfg: seen.append(cfg)
+        "grant_writer.cli._run",
+        lambda _agent, _payload, cfg, _settings=None: seen.append(cfg),
     )
 
     with caplog.at_level(logging.WARNING, logger="grant_writer.cli"):
@@ -302,7 +303,8 @@ def test_without_a_database_the_cli_needs_no_flag(monkeypatch, caplog):
     monkeypatch.setattr("grant_writer.cli.build_agent", lambda _s: object())
     seen = []
     monkeypatch.setattr(
-        "grant_writer.cli._run", lambda _agent, _payload, cfg: seen.append(cfg)
+        "grant_writer.cli._run",
+        lambda _agent, _payload, cfg, _settings=None: seen.append(cfg),
     )
 
     with caplog.at_level(logging.WARNING, logger="grant_writer.cli"):
@@ -349,6 +351,9 @@ class _NoLimits:
         return "run"
 
     def finish(self, *_args, **_kwargs):
+        return None
+
+    def record_approvals(self, *_args, **_kwargs):
         return None
 
 

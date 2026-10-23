@@ -7,6 +7,8 @@ network call.
 
 import os
 
+import pytest
+
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-dummy-for-tests")
 
 # Keep runs off the network and out of the user's LangSmith project.
@@ -69,7 +71,29 @@ os.environ["GRANT_WRITER_MAX_CONCURRENT_RUNS"] = ""
 os.environ["GRANT_WRITER_SEARCH_COST_USD"] = ""
 os.environ["GRANT_WRITER_ALLOWED_DOMAINS"] = ""
 os.environ["GRANT_WRITER_ALLOWED_EMAILS"] = ""
+# Operations (E7). The tracing mode for the parse-at-import reason and because
+# a developer's `hidden` or `off` would change what every CLI and AppTest case
+# installs as LangSmith's global client; the threshold because `ops-check`'s
+# default is read from it.
+os.environ["GRANT_WRITER_TRACING"] = ""
+os.environ["GRANT_WRITER_LOG_LEVEL"] = ""
+os.environ["GRANT_WRITER_PARKED_ALERT_DAYS"] = ""
 
 # Non-empty on purpose: if a run ever does escape, it lands somewhere visibly
 # wrong rather than in `default` or in the real `grant-writer`.
 os.environ["LANGSMITH_PROJECT"] = "grant-writer-tests-should-be-empty"
+
+
+@pytest.fixture(autouse=True)
+def _reset_langsmith_globals():
+    """Undo `ops.configure_tracing` after every case.
+
+    It is process-global by design -- one LangSmith client, one switch -- and
+    the CLI's `main` and the app's first pass both call it, so without this a
+    case that ran either would hand its tracing mode to every case after it.
+    `None` for both is LangSmith's own unconfigured state.
+    """
+    yield
+    import langsmith
+
+    langsmith.configure(client=None, enabled=None)

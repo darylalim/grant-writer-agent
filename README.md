@@ -58,6 +58,8 @@ overwrites a profile that already exists.
 | `draft --app-id ID` | Extract requirements, research, draft, audit, and assemble |
 | `chat --app-id ID` | Resume an application's thread to refine it |
 | `db-setup` | Create or migrate the Postgres tables named by `DATABASE_URL` (deployments only; bills nothing) |
+| `healthcheck` | Exit 0 when the database answers; a readiness probe (bills nothing) |
+| `ops-check` | Report failed, declined, rate-limited and long-parked runs as JSON; exit 1 if any need attention |
 
 State is saved to `.grant_writer/checkpoints.sqlite`, so running `chat` or
 `draft` again with the same ID resumes the same plan and history. You can reuse
@@ -237,9 +239,38 @@ the turn that resumes an approval:
   At the limit you're asked to try again shortly, instead of starting a run that
   would fail partway on rate limits.
 
-Each signed-in turn adds one row to a run table: who ran it, on which thread,
-when, how it ended, and its tokens, searches and estimated cost. The row holds
-no proposal content.
+### What is recorded
+
+A shared deployment keeps four records about your runs. None of them holds
+proposal content: no messages, no file text, no organization profile, and no
+rejection reason.
+
+- **A run table**, one row per signed-in turn: who ran it (a pseudonymous id),
+  on which thread, when, how it ended, its tokens, searches and estimated
+  cost, and the class name of any error that stopped it.
+- **An approval record**, one row per approve or reject decision on a pending
+  write: who, when, which thread and file, and the decision. It is written
+  before the decision is sent. If it can't be written, the approval is refused
+  and you can try again; a rejection still goes through.
+- **Server logs**, as JSON lines on stderr for the host to collect. Each line
+  holds ids, a phase, an outcome, and an error's type and message.
+- **LangSmith traces**, if tracing is on. A signed-in deployment hides inputs,
+  outputs and metadata by default, so traces keep timing, token counts, errors
+  and the call tree without any proposal text. Set `GRANT_WRITER_TRACING` to
+  `full`, `hidden` or `off` to choose.
+
+The run table and the approval record live in Postgres when `DATABASE_URL` is
+set, otherwise in `.grant_writer/runs.sqlite`. How long each is kept, and what
+deleting a user's data removes, is the deployment's retention policy. The
+approval record is meant to outlive a user's deletion, which is why it holds
+ids and decisions and nothing else.
+
+For the host: `/_stcore/health` is Streamlit's liveness endpoint, and
+`grant-writer healthcheck` is the readiness check. Run `grant-writer ops-check`
+on a schedule. It reports failed and declined runs above 10% of the last 24
+hours, any rate-limit or pool-timeout failures, and any thread parked on an
+approval for more than 3 days. Alert on the `run.limited`, `run.failed` and
+`approval.unrecorded` log events as well.
 
 The theme (`.streamlit/config.toml`) follows the desktop's light or dark mode, and
 the settings menu can override it. Text, links, input outlines and focused

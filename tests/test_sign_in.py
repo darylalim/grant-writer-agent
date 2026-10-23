@@ -91,6 +91,9 @@ class _Ledger:
         self.refuse = refuse
         self.begun: list[dict] = []
         self.finished: list[tuple[str, str, UsageMeter]] = []
+        self.approvals: list[tuple[list, dict]] = []
+        self.refuse_record: Exception | None = None
+        self.error_types: list[str | None] = []
 
     def begin(self, **kwargs):
         if self.refuse is not None:
@@ -98,8 +101,14 @@ class _Ledger:
         self.begun.append(kwargs)
         return f"run-{len(self.begun)}"
 
-    def finish(self, run_id, outcome, meter, **_kwargs):
+    def finish(self, run_id, outcome, meter, *, error_type=None, **_kwargs):
         self.finished.append((run_id, outcome, meter))
+        self.error_types.append(error_type)
+
+    def record_approvals(self, approvals, **kwargs):
+        if self.refuse_record is not None:
+            raise self.refuse_record
+        self.approvals.append((approvals, kwargs))
 
 
 class _Agent:

@@ -204,6 +204,28 @@ def build_run_ledger(settings: Settings) -> RunLedger:
     return SqliteRunLedger(settings.run_table_db)
 
 
+def build_checkpointer(settings: Settings) -> BaseCheckpointSaver:
+    """The checkpointer a graph built on `settings` would use.
+
+    Public for `grant-writer ops-check`, which reads parked threads from it
+    without building a graph -- and so without model keys.
+    """
+    return _build_checkpointer(settings)
+
+
+def check_database(settings: Settings) -> None:
+    """Raise unless the deployment's database answers. A no-op without one.
+
+    The readiness half of E7's health checks: a replica whose pool cannot
+    reach Postgres should not take traffic, since every turn would fail on
+    its first checkpoint write.
+    """
+    if settings.database_url is None:
+        return
+    with _pool_for(settings).connection() as conn:
+        conn.execute("SELECT 1")
+
+
 def setup_database(settings: Settings) -> None:
     """Create or migrate the checkpoint, Store and run tables. Idempotent.
 

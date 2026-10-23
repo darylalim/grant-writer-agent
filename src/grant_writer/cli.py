@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 from langgraph.types import Command
@@ -19,18 +21,35 @@ from grant_writer.activity import (
     iter_activity,
     pending_action_requests,
 )
-from grant_writer.agent import build_agent, build_discovery_agent, setup_database
+from grant_writer.agent import (
+    build_agent,
+    build_checkpointer,
+    build_discovery_agent,
+    build_run_ledger,
+    check_database,
+    setup_database,
+)
 from grant_writer.config import (
+    LOG_LEVEL,
+    PARKED_ALERT_DAYS,
     Settings,
     discovery_thread_id,
     opportunities_dir,
     persistent_settings,
     require_api_keys,
     trace_config,
+    tracing_mode,
     user_thread_id,
 )
 from grant_writer.opportunities import rank_opportunities
+from grant_writer.ops import (
+    configure_logging,
+    configure_tracing,
+    log_event,
+    parked_threads,
+)
 from grant_writer.prompts import discovery_request, draft_request
+from grant_writer.runs import approvals_for
 from grant_writer.solicitation import extract_solicitation, preload_solicitation
 from grant_writer.workspace import (
     count_gaps,
@@ -118,9 +137,17 @@ def _print_activity(chunk: dict) -> None:
                 print(f"     {event.detail}", flush=True)
 
 
-def _resolve_interrupt(agent, config: dict) -> dict | None:
+def _resolve_interrupt(
+    agent, config: dict, settings: Settings | None = None
+) -> dict | None:
     """Prompt for approval on pending writes. Returns a resume Command payload
-    with one decision per pending action, or None to stop."""
+    with one decision per pending action, or None to stop.
+
+    Against the shared database (an `--operator` run, decision 18) each
+    decision is recorded before it is sent, as the UI records a signed-in
+    one (invariant 27). On a laptop there is no one else to answer to, and no
+    record is written.
+    """
     requests = pending_action_requests(agent, config)
     n = max(len(requests), 1)
     print(f"\n--- approval required ({n} pending write(s)) ---", flush=True)
@@ -134,16 +161,45 @@ def _resolve_interrupt(agent, config: dict) -> dict | None:
     except (EOFError, KeyboardInterrupt):
         return None
     if answer.startswith("a"):
-        return {"decisions": approval_decisions(requests, approve=True)}
-    if answer.startswith("r"):
+        decisions = approval_decisions(requests, approve=True)
+    elif answer.startswith("r"):
         reason = input("reason (sent back to the agent): ").strip()
-        return {
-            "decisions": approval_decisions(requests, approve=False, message=reason)
-        }
-    return None
+        decisions = approval_decisions(requests, approve=False, message=reason)
+    else:
+        return None
+    if settings is not None and settings.database_url is not None:
+        thread_id = config["configurable"]["thread_id"]
+        try:
+            build_run_ledger(settings).record_approvals(
+                approvals_for(decisions, requests),
+                user_id=CLI_USER,
+                thread_id=thread_id,
+                run_id=None,
+                frontend="cli",
+            )
+        except Exception as exc:  # noqa: BLE001 - an unrecorded approval is not sent
+            log_event(
+                logger,
+                "approval.unrecorded",
+                level=logging.ERROR,
+                exc=exc,
+                thread_id=thread_id,
+                frontend="cli",
+            )
+            if answer.startswith("a"):
+                # An approval nobody can account for is not sent; the thread
+                # stays parked and the same decision can be made again.
+                print(
+                    f"Not approved: the approval could not be recorded ({exc}).",
+                    file=sys.stderr,
+                )
+                return None
+    return {"decisions": decisions}
 
 
-def _run(agent, payload: dict | Command, config: dict) -> None:
+def _run(
+    agent, payload: dict | Command, config: dict, settings: Settings | None = None
+) -> None:
     """Stream one turn, resolving interrupts until the agent finishes."""
     while True:
         interrupted = False
@@ -154,7 +210,7 @@ def _run(agent, payload: dict | Command, config: dict) -> None:
             _print_activity(chunk)
         if not interrupted:
             return
-        decision = _resolve_interrupt(agent, config)
+        decision = _resolve_interrupt(agent, config, settings)
         if decision is None:
             print("Stopped. Resume later with the same --app-id.", flush=True)
             return
@@ -227,7 +283,7 @@ def _draft(args: argparse.Namespace) -> int:
             "rubric": rubric_name,
         },
     )
-    _run(agent, payload, config)
+    _run(agent, payload, config, settings)
     print(f"\nDone. Output in ./applications/{args.app_id}/", flush=True)
     return 0
 
@@ -270,7 +326,7 @@ def _chat(args: argparse.Namespace) -> int:
             return 0
         if not line:
             continue
-        _run(agent, {"messages": [{"role": "user", "content": line}]}, config)
+        _run(agent, {"messages": [{"role": "user", "content": line}]}, config, settings)
 
 
 def _print_shortlist(scan_dir: Path, scan_id: str, settings: Settings) -> None:
@@ -347,6 +403,83 @@ def _db_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _healthcheck(args: argparse.Namespace) -> int:
+    """Readiness: exit 0 when the database this process would use answers.
+
+    For a host's exec probe (E5); liveness is Streamlit's own
+    `/_stcore/health`. Without `DATABASE_URL` there is no database to wait
+    on and the check passes, so the same probe works on a laptop.
+    """
+    settings = persistent_settings()
+    try:
+        check_database(settings)
+    except Exception as exc:  # noqa: BLE001 - any failure is "not ready"
+        log_event(logger, "health.unready", level=logging.ERROR, exc=exc)
+        print(f"not ready: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print("ready")
+    return 0
+
+
+def _ops_check(args: argparse.Namespace) -> int:
+    """Report what needs an operator's attention; exit 1 if anything does.
+
+    For a host's scheduled job (E7 alerts). Reads only counts and ids: the
+    run table grouped by outcome and error type, and the checkpoint's parked
+    threads. Limit hits and the rest arrive as log events, which a host
+    alerts on from its log collector rather than from this.
+    """
+    settings = persistent_settings()
+    now = time.time()
+    since = now - args.hours * 3600
+    counts = build_run_ledger(settings).summary(since=since)
+    total = sum(n for _outcome, _error, n in counts)
+
+    def share(outcome: str) -> float:
+        hits = sum(n for o, _error, n in counts if o == outcome)
+        return hits / total if total else 0.0
+
+    by_error: dict[str, int] = {}
+    for _outcome, error_type, n in counts:
+        if error_type:
+            by_error[error_type] = by_error.get(error_type, 0) + n
+    parked = parked_threads(
+        build_checkpointer(settings).list(None),
+        older_than_s=args.parked_days * 86400,
+        now=now,
+    )
+    alerts = []
+    if total >= args.min_runs and share("failed") > args.max_failed_share:
+        alerts.append(f"failed runs: {share('failed'):.0%} of {total}")
+    if total >= args.min_runs and share("refused") > args.max_refused_share:
+        alerts.append(f"declined runs: {share('refused'):.0%} of {total}")
+    for error_type in ("RateLimitError", "PoolTimeout"):
+        if by_error.get(error_type):
+            alerts.append(f"{error_type}: {by_error[error_type]} run(s)")
+    alerts.extend(
+        f"parked on an approval since "
+        f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(p.since))} UTC: {p.thread_id}"
+        for p in parked
+    )
+    print(
+        json.dumps(
+            {
+                "hours": args.hours,
+                "runs": total,
+                "outcomes": {
+                    o or "running": sum(n for oo, _e, n in counts if oo == o)
+                    for o in {o for o, _e, _n in counts}
+                },
+                "errors": by_error,
+                "parked": [p.thread_id for p in parked],
+                "alerts": alerts,
+            },
+            indent=2,
+        )
+    )
+    return 1 if alerts else 0
+
+
 def _discover(args: argparse.Namespace) -> int:
     settings = _settings_from_args(args)
     if _refuses_shared_database(settings, args):
@@ -389,7 +522,12 @@ def _discover(args: argparse.Namespace) -> int:
             "agencies": args.agencies,
         },
     )
-    _run(agent, {"messages": [{"role": "user", "content": instruction}]}, config)
+    _run(
+        agent,
+        {"messages": [{"role": "user", "content": instruction}]},
+        config,
+        settings,
+    )
 
     _print_shortlist(scan_dir, args.scan_id, settings)
     print(
@@ -493,11 +631,49 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     db_setup.set_defaults(func=_db_setup)
 
+    # Operator commands, exempt from `--operator` like `db-setup`: they read
+    # counts and thread ids, never a thread's content, and start no run.
+    health = sub.add_parser(
+        "healthcheck", help="exit 0 when the database answers (readiness probe)"
+    )
+    health.set_defaults(func=_healthcheck)
+
+    ops_check = sub.add_parser(
+        "ops-check", help="report failed, declined and long-parked runs (alerts)"
+    )
+    ops_check.add_argument(
+        "--hours", type=float, default=24, help="window to count runs over"
+    )
+    ops_check.add_argument(
+        "--parked-days",
+        type=float,
+        default=PARKED_ALERT_DAYS,
+        help=f"report threads parked this long (default: {PARKED_ALERT_DAYS:g})",
+    )
+    ops_check.add_argument(
+        "--max-failed-share", type=float, default=0.1, help="default: 0.1"
+    )
+    ops_check.add_argument(
+        "--max-refused-share", type=float, default=0.1, help="default: 0.1"
+    )
+    ops_check.add_argument(
+        "--min-runs",
+        type=int,
+        default=5,
+        help="runs needed before a share alerts (default: 5)",
+    )
+    ops_check.set_defaults(func=_ops_check)
+
     return parser
 
 
 def main() -> int:
     args = _build_parser().parse_args()
+    configure_logging(LOG_LEVEL)
+    # Shared means the deployment's database; the CLI has no sign-in.
+    configure_tracing(
+        tracing_mode(shared=persistent_settings().database_url is not None)
+    )
     return args.func(args)
 
 
