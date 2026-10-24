@@ -802,7 +802,8 @@ Cases share it and `TRUNCATE` on entry. They claim no invariant, since each prop
 offline test; they exist for what constructs fine and fails on the first query, and earned that on
 the first run, surfacing psycopg_pool's deprecated `open` default. CI runs them in a `postgres` job
 of its own, so `test` stays the proof that the suite needs no database; that job fails on a skip
-too, or a renamed variable would make it a green run of nothing. `tests/load_postgres.py` is the
+too, or a renamed variable would make it a green run of nothing. It is in `release`'s `needs:`, so
+a release cannot ship a broken Postgres path that no day-to-day use exercises. `tests/load_postgres.py` is the
 fake-model load test: never collected, run by hand before a go-live, and kept from rotting by one
 small `postgres` case. Any AppTest
 case that signs a user in must patch `agent.build_run_ledger` too, as `tests/test_users.py` and
@@ -936,6 +937,8 @@ to `/applications/*/review/` and cannot edit what it reviews; `final/` files are
 once as a complete `write_file`, never built up by `edit_file` (each write there may be a separate
 human approval).
 
-An `execute` tool is advertised to the model but inert on `FilesystemBackend` (not a
-`SandboxBackendProtocol`). `test_execute_tool_is_not_a_permission_bypass` guards that — if it ever
-becomes live, the write permissions stop being a real boundary.
+An `execute` tool is advertised to the model but inert on both profiles' backends — neither
+`FilesystemBackend` nor `server`'s `CompositeBackend` and its routes is a
+`SandboxBackendProtocol`. `test_execute_tool_is_not_a_permission_bypass` guards that over both,
+checking each route itself, since `supports_execution` asks only a composite's default — if it
+ever becomes live, the write permissions stop being a real boundary.
