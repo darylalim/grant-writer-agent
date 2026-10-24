@@ -17,6 +17,7 @@ installable by someone who then had no app to run.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -629,6 +630,26 @@ def _pick_scan() -> None:
         st.session_state.scan_pick = None
 
 
+# Every ASCII punctuation character, which is exactly the set CommonMark lets a
+# backslash make literal -- so escaping all of them is always safe, where
+# escaping a hand-picked few is a list waiting for the next syntax Streamlit adds.
+_MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")
+
+
+def _literal(text: str) -> str:
+    """Scout-written text, made safe to embed in markdown.
+
+    Everything a scored file supplies -- title, fields, citations, notes,
+    warnings quoting them -- is the funder's or the profile's words, and
+    `st.markdown`, `st.caption`, `st.warning` and an expander label all render
+    markdown. The format the scout is asked for puts two dollar amounts on
+    one line (`Award range: $100,000 to $500,000`), which Streamlit typesets
+    as a formula; a `*` or `:red[` in a quote restyles it. A citation is only
+    checkable if it reads as the source does, so none of it is interpreted.
+    """
+    return _MARKDOWN_PUNCTUATION.sub(r"\\\1", text)
+
+
 def _verdict_markup(criterion: Any) -> str:
     """One rubric row, coloured by verdict.
 
@@ -714,13 +735,12 @@ def opportunity_browser(
         # reader, and that decision made twice is how one frontend starts
         # printing the other's answer.
         flag = " · INELIGIBLE" if opportunity.disqualified else ""
-        with st.expander(
-            f"{position}. {opportunity.display_title} — {opportunity.score_label}{flag}"
-        ):
+        title = _literal(opportunity.display_title)
+        with st.expander(f"{position}. {title} — {opportunity.score_label}{flag}"):
             if opportunity.fields:
                 st.caption(
                     " · ".join(
-                        f"{label}: {value}"
+                        f"{_literal(label)}: {_literal(value)}"
                         for label, value in opportunity.fields.items()
                     )
                 )
@@ -730,20 +750,21 @@ def opportunity_browser(
                     # A gap marker is not a quote and must not be italicised
                     # like one -- it is the scout saying it had nothing to
                     # quote, which is the opposite claim.
-                    quoted = citation.text if citation.is_gap else f"*{citation.text}*"
-                    st.markdown(f"  :gray[↳ {citation.source}:] {quoted}")
+                    text = _literal(citation.text)
+                    quoted = text if citation.is_gap else f"*{text}*"
+                    st.markdown(f"  :gray[↳ {_literal(citation.source)}:] {quoted}")
                 if criterion.note:
-                    st.caption(f"↳ {criterion.note}")
+                    st.caption(f"↳ {_literal(criterion.note)}")
             for warning in opportunity.warnings:
-                st.warning(warning, icon=":material/report:")
+                st.warning(_literal(warning), icon=":material/report:")
             # Checked, not assumed. The scout has no tools, so a quote it wrote
             # that is not in the archive reached it through the orchestrator's
             # delegation -- probably true, and unverifiable by whoever reads
             # this afterwards, because the source pane below cannot show it.
             for citation in unverifiable.get(opportunity.key, ()):
                 st.warning(
-                    f"Not found in the {citation.source} it cites: "
-                    f"“{citation.text[:120]}…”",
+                    f"Not found in the {_literal(citation.source)} it cites: "
+                    f"“{_literal(citation.text[:120])}…”",
                     icon=":material/unknown_document:",
                 )
             # The raw file, under the reading of it. The scoring is the
