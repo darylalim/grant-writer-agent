@@ -399,6 +399,11 @@ uv run python -m evals.run_scout                     # prompt eval: live model, 
 - **Tests** cover wiring failures that raise no error: a subagent missing its
   skills, a misordered permission rule, or an approval step with no checkpointer.
   See the invariants in `CLAUDE.md`.
+- **Postgres tests** are opt-in. Set `TEST_DATABASE_URL` to a server where you
+  can create databases (each run makes a scratch one and drops it), then run
+  `uv run pytest tests/ -q -m postgres`. Without the variable they're skipped,
+  and CI runs them in a job of their own. `uv run python -m tests.load_postgres`
+  load-tests the database with a stub model, which costs nothing.
 - **Evals** in `evals/` are not part of the suite. The tests can't check prompt
   quality, so run the evals by hand after editing a prompt. See `evals/README.md`.
 - **CI** runs on Python 3.13 and 3.14, with pinned `ruff` and `ty` versions.

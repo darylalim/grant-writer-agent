@@ -83,6 +83,46 @@ os.environ["GRANT_WRITER_PARKED_ALERT_DAYS"] = ""
 # wrong rather than in `default` or in the real `grant-writer`.
 os.environ["LANGSMITH_PROJECT"] = "grant-writer-tests-should-be-empty"
 
+# The opt-in database for the `postgres`-marked cases (E6), read from the shell
+# *before* anything imports config.py and blanked straight after, for the
+# load_dotenv reason above turned around: a developer's .env must not be able
+# to switch these on. Only a value the shell (or CI's job env) set does. The
+# cases create a database of their own on it and drop it afterwards, so it
+# needs CREATEDB and is never the deployment's own.
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or None
+os.environ["TEST_DATABASE_URL"] = ""
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip the `postgres` cases unless TEST_DATABASE_URL is set.
+
+    The marker is the one declaration, so a case cannot be marked and still run
+    offline, or run against a database without being marked. Skipped rather
+    than deselected, so the default run says how many it left out.
+    """
+    del config
+    if TEST_DATABASE_URL is not None:
+        return
+    skip = pytest.mark.skip(reason="needs TEST_DATABASE_URL (opt-in Postgres case)")
+    for item in items:
+        if "postgres" in item.keywords:
+            item.add_marker(skip)
+
+
+@pytest.fixture(scope="session")
+def postgres_url():
+    """A scratch database on TEST_DATABASE_URL, migrated by `db-setup`'s code.
+
+    One per session, dropped at the end; cases isolate themselves within it.
+    Only a `postgres`-marked case should ask for this, and the skip above
+    reaches such a case before its fixtures do.
+    """
+    assert TEST_DATABASE_URL is not None, "mark the case `postgres`"
+    from tests.load_postgres import scratch_database
+
+    with scratch_database(TEST_DATABASE_URL) as url:
+        yield url
+
 
 @pytest.fixture(autouse=True)
 def _reset_langsmith_globals():
