@@ -3,30 +3,41 @@
 [![CI](https://github.com/darylalim/grant-writer-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/grant-writer-agent/actions/workflows/ci.yml)
 
 An AI grant-writing agent built on LangChain
-[Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview). It finds
-funding opportunities, fit-scores them with quoted evidence, and drafts proposals
-with human approval of final files. Where a fact is unknown, it marks the gap for
-you to fill instead of inventing data.
+[Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview) and Claude.
 
-- **`discover`** searches grants.gov and the web for funding opportunities and
-  scores how well each one fits your organization.
-- **`draft`** turns a solicitation into a proposal: it extracts the
-  requirements, researches the funder, drafts and audits each section, and
-  assembles the result.
+- **`discover`** finds funding opportunities on grants.gov and the web, then scores how well
+  each fits your organization, with a quoted citation for every judgement.
+- **`draft`** turns a solicitation into a proposal: it extracts the requirements, researches
+  the funder, drafts and audits each section, and assembles the result.
 
-> **This drafts proposals; it does not submit them.** Every output needs human
-> review before it goes to a funder. See [Guardrails](#guardrails).
+Where a fact is unknown, it writes `[NEEDS INPUT: <question>]` instead of inventing one.
+
+> [!IMPORTANT]
+> This drafts proposals; it does not submit them. Every output needs human review before it
+> goes to a funder. See [Guardrails](#guardrails).
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Usage](#usage)
+- [Finding opportunities](#finding-opportunities)
+- [Drafting a proposal](#drafting-a-proposal)
+- [Web UI](#web-ui)
+- [Deploying](#deploying)
+- [Architecture](#architecture)
+- [Guardrails](#guardrails)
+- [Development](#development)
 
 ## Quick start
 
-Needs **uv 0.13.4** exactly: `pyproject.toml` pins it with `required-version`,
-so any other uv refuses to run here. `uv self update 0.13.4` installs it.
+Requires Python 3.13+ and **uv 0.13.4** exactly (`uv self update 0.13.4`); `pyproject.toml`
+pins it, so other versions refuse to run.
 
 ```bash
 uv sync
-cp .env.example .env             # add ANTHROPIC_API_KEY and TAVILY_API_KEY
+cp .env.example .env                  # add ANTHROPIC_API_KEY and TAVILY_API_KEY
 mkdir -p memories/org && cp templates/org-profile.md memories/org/AGENTS.md
-$EDITOR memories/org/AGENTS.md   # describe your organization
+$EDITOR memories/org/AGENTS.md        # describe your organization
 
 # 1. Find opportunities worth applying to
 uv run grant-writer discover --scan-id rural-health-2026 --focus "rural health education"
@@ -38,15 +49,14 @@ uv run grant-writer draft --app-id nsf-aisl-2026 --rfp ~/Downloads/solicitation.
 uv run grant-writer chat --app-id nsf-aisl-2026
 ```
 
-The profile isn't tracked by git, because it holds your organization's data.
-Skip the `cp` and the first run creates it from the template. That never
-overwrites a profile that already exists.
+The organization profile holds your data, so git ignores it. If you skip the `cp`, the first
+run creates it from the template; an existing profile is never overwritten.
 
-> **Upgrading from 0.5.0 or earlier?** Back up `memories/org/AGENTS.md` before
-> you pull. It used to be a tracked file, and the commit that untracks it
-> deletes your copy. If you've edited it, git refuses the pull instead, and the
-> usual way out, `git stash` or `git checkout -- memories/`, can throw your
-> edits away. Copy the file aside, pull, then copy it back.
+> [!WARNING]
+> **Upgrading from 0.5.0 or earlier?** Copy `memories/org/AGENTS.md` somewhere safe before
+> you pull, then copy it back afterwards. The profile used to be tracked, and the commit that
+> untracks it deletes your copy (or, if you edited it, blocks the pull — and `git stash` or
+> `git checkout` can discard your edits).
 
 ## Usage
 
@@ -57,54 +67,48 @@ overwrites a profile that already exists.
 | `discover --scan-id ID` | Search, triage, and score candidates; print a ranked shortlist |
 | `draft --app-id ID` | Extract requirements, research, draft, audit, and assemble |
 | `chat --app-id ID` | Resume an application's thread to refine it |
-| `db-setup` | Create or migrate the Postgres tables named by `DATABASE_URL` (deployments only; bills nothing) |
-| `healthcheck` | Exit 0 when the database answers; a readiness probe (bills nothing) |
-| `ops-check` | Report failed, declined, rate-limited and long-parked runs as JSON; exit 1 if any need attention |
+| `db-setup` | Create or migrate the Postgres tables (deployments only) |
+| `healthcheck` | Exit 0 when the database answers (readiness probe) |
+| `ops-check` | Report runs that need attention as JSON; exit 1 if any |
 
-State is saved to `.grant_writer/checkpoints.sqlite`, so running `chat` or
-`draft` again with the same ID resumes the same plan and history. You can reuse
-one name for a scan and an application; they are kept on separate threads.
+Only `discover`, `draft`, and `chat` call the model and cost money.
+
+State is saved to `.grant_writer/checkpoints.sqlite`, so rerunning `draft` or `chat` with the
+same ID resumes the same plan and history. A scan and an application can share a name; they
+are kept on separate threads.
 
 ### Flags
 
-Flags go **after** the subcommand, e.g. `grant-writer draft --app-id X --approve`.
+Flags go **after** the subcommand: `grant-writer draft --app-id X --approve`.
 
 | Flag | Commands | Effect |
 |---|---|---|
 | `--focus TEXT` | `discover` | What to search for |
 | `--agencies CODES` | `discover` | Pipe-separated grants.gov agency codes, e.g. `USDA\|NSF` |
-| `--rfp FILE` | `draft` | The solicitation PDF, extracted to `rfp.md` before the run |
+| `--rfp FILE` | `draft` | Solicitation PDF, extracted to `rfp.md` before the run |
 | `--funder NAME` | `draft` | Funder name, e.g. `NSF` |
-| `--rubric FILE` | `draft` | Grade the draft against the funder's review criteria and iterate |
+| `--rubric FILE` | `draft` | Grade the draft against the funder's review criteria and revise |
 | `--notes TEXT` | `discover`, `draft` | Extra context for this run |
-| `--approve` | all | Require approval before writing to `final/` (no effect on `discover`) |
+| `--approve` | all | Pause for approval before writing to `final/` (no effect on `discover`) |
 | `--no-search` | all | Skip web search; no `TAVILY_API_KEY` needed |
 | `--profile server` | all | Keep drafts in graph state instead of on disk |
-| `--recursion-limit N` | all | Max graph steps per turn (default: `150`) |
-| `--operator` | all | Allow a run while `DATABASE_URL` is set; without it the CLI refuses the shared database (logged) |
+| `--recursion-limit N` | all | Max graph steps per turn (default `150`) |
+| `--operator` | all | Allow a run while `DATABASE_URL` is set (logged) |
 
 ### Configuration
 
-Set these in `.env` (see `.env.example`):
+Set these in `.env` (see `.env.example`).
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Yes | Model provider |
 | `TAVILY_API_KEY` | Unless `--no-search` | Web search for funder research and non-federal opportunities |
 | `LANGSMITH_API_KEY` | Recommended | Tracing; a multi-agent run is hard to debug from stdout alone |
-| `GRANT_WRITER_*_MODEL` | No | Override the model for a role (`DRAFTING`, `RESEARCH`, `COMPLIANCE`, `GRADER`, `DISCOVERY`) |
-| `GRANT_WRITER_*_EFFORT` | No | Override the reasoning effort for a role, same role names (`low`, `medium`, `high`, `xhigh`, `max`) |
-| `GRANT_WRITER_ROOT` | No | Project root, when the console script is installed outside the repo |
-| `DATABASE_URL` | Deployments only | Postgres for checkpoints and the `Store`. Unset means SQLite. While set, `draft`/`chat`/`discover` need `--operator` |
-| `GRANT_WRITER_DB_POOL_MAX_SIZE` | No | Most Postgres connections per process (default 10) |
-| `GRANT_WRITER_DB_POOL_TIMEOUT` | No | Seconds to wait for a free connection before failing (default 30) |
-| `GRANT_WRITER_DAILY_BUDGET_USD` | No | Estimated spend each signed-in user may reach per UTC day (default 10) |
-| `GRANT_WRITER_MAX_CONCURRENT_RUNS` | No | Signed-in turns in flight at once, across the deployment (default 3) |
-| `GRANT_WRITER_ALLOWED_DOMAINS` | With sign-in | Comma-separated email domains whose verified accounts may sign in, matched exactly |
-| `GRANT_WRITER_ALLOWED_EMAILS` | No | Comma-separated individual addresses that may also sign in (outside collaborators) |
-| `GRANT_WRITER_SEARCH_COST_USD` | No | Estimated cost of one web search, counted toward the daily limit (default 0.008) |
+| `GRANT_WRITER_<ROLE>_MODEL` | No | Override a role's model (roles below) |
+| `GRANT_WRITER_<ROLE>_EFFORT` | No | Override a role's effort: `low`, `medium`, `high`, `xhigh`, `max` |
+| `GRANT_WRITER_ROOT` | No | Project root, when the console script runs outside the repo |
 
-What those overrides replace:
+Deployment variables are listed under [Deploying](#deploying).
 
 | Role | Does | Default model | Default effort |
 |---|---|---|---|
@@ -114,9 +118,9 @@ What those overrides replace:
 | `GRADER` | Scores a draft against `--rubric` | Claude Opus 5.5 | `high` |
 | `DISCOVERY` | Orchestrates a scan; scores candidates | Claude Sonnet 5.5 | `medium` |
 
-Only discovery runs at `medium`: it scores each candidate separately, and a person reads the
-shortlist before acting on it. Funder research stays at `high` because every section is framed
-on it, and it is a small part of a drafting run's cost.
+Discovery runs at `medium` because a person reads the shortlist before acting on it. Funder
+research stays at `high` because every section builds on it, and it is a small share of a
+drafting run's cost.
 
 ## Finding opportunities
 
@@ -125,32 +129,29 @@ uv run grant-writer discover --scan-id rural-health-2026 \
     --focus "afterschool STEM in rural districts" --agencies "USDA|NSF"
 ```
 
-Results are written to `opportunities/<scan-id>/`, and the ranked shortlist is
-printed when the run ends.
+The ranked shortlist prints when the run ends. Files are written to
+`opportunities/<scan-id>/`:
 
 | Path | Contents |
 |---|---|
 | `candidates/` | Full text of each candidate opportunity |
 | `scored/` | One fit-scoring file per candidate |
 
-grants.gov needs no API key, so `--no-search` still finds US federal
-opportunities. Web search adds private foundations, state agencies, and non-US
-funders.
+grants.gov needs no API key, so `--no-search` still finds US federal opportunities. Web search
+adds private foundations, state agencies, and non-US funders.
 
 ### How scoring works
 
-The agent rates each candidate on six criteria: eligibility, mission alignment,
-program fit, track record, award size fit, and timeline feasibility. Each rating
-is a verdict word (`STRONG` to `NONE`) backed by a quoted citation. The weights
-live in `opportunities.py` and are never shown to the model, so the fit
-percentage is computed from the verdicts, never asserted by the model.
+Each candidate is rated on six criteria: eligibility, mission alignment, program fit, track
+record, award size fit, and timeline feasibility. Each rating is a verdict word (`STRONG` to
+`NONE`) backed by a quoted citation. The weights live in `opportunities.py` and are never shown
+to the model, so the fit percentage is computed from the verdicts rather than asserted.
 
-- **Unknowns** become `[NEEDS INPUT: …]`, never a guess.
-- **Unparseable** candidates show as *unscored*, not 0%.
-- **Ineligible** candidates (`NONE` on eligibility) sink below the scored ones
-  but keep their score and evidence, so the call can be checked.
-- **Citations** are checked against the file they name. Any that can't be found
-  there are flagged. The check ignores line wrapping, emphasis, and case.
+- **Unparseable** candidates show as *unscored*, never 0%.
+- **Ineligible** candidates (`NONE` on eligibility) sort below the scored ones but keep their
+  score and evidence, so the call can be checked.
+- **Citations** are checked against the file they name, ignoring line wrapping, emphasis, and
+  case. Any that can't be found are flagged.
 
 ## Drafting a proposal
 
@@ -159,7 +160,7 @@ uv run grant-writer draft --app-id nsf-aisl-2026 \
     --rfp ~/Downloads/solicitation.pdf --funder NSF --rubric criteria.md
 ```
 
-Results are written to `applications/<app-id>/`:
+Files are written to `applications/<app-id>/`:
 
 | Path | Contents |
 |---|---|
@@ -167,12 +168,12 @@ Results are written to `applications/<app-id>/`:
 | `requirements.md` | Every required section, limit, review criterion, and deadline, with citations |
 | `research/` | Funder priorities, recent awards, and program language |
 | `sections/` | One file per narrative section; all revision happens here |
-| `review/` | Compliance reports and `gaps.md`, which collects every `[NEEDS INPUT]` question |
+| `review/` | Compliance reports, plus `gaps.md` collecting every `[NEEDS INPUT]` question |
 | `final/` | Assembled submission-ready text, written once per file |
 
-With `--rubric`, a grader scores the draft against the funder's published review
-criteria each time the agent finishes, and sends it back for revision if it
-falls short (up to 3 iterations).
+With `--rubric`, a grader scores the draft against the funder's published review criteria
+each time the agent finishes, and sends it back for revision if it falls short (up to 3
+rounds).
 
 ## Web UI
 
@@ -182,27 +183,76 @@ An optional Streamlit front end runs both workflows on one page:
 uv run streamlit run streamlit_app.py
 ```
 
-It shares the CLI's checkpoint, so a run started in the browser can continue
-with `grant-writer chat` and the other way round. Compared with the CLI, it adds:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/landing-dark.png">
+  <img alt="The Grant writer page: run settings in the sidebar, and the drafting form with application id, funder, solicitation upload, and review criteria" src="docs/images/landing-light.png">
+</picture>
 
-- **Approval previews**: the full content of each `final/` write, not just its
-  path. Approval is on by default.
-- **Gap count**: how many `[NEEDS INPUT]` markers remain across the drafts.
-- **Shortlist detail**: each candidate's six verdicts and citations, with the
-  source text one click away.
-- **File browser**: shows source by default, with a toggle for rendered markdown.
-  Files under `final/` always open as source, so what you approve is exactly what
-  gets written.
+It shares the CLI's checkpoint, so a run started in the browser can continue with
+`grant-writer chat`, and the other way round. On top of the CLI it adds:
 
-The follow-up chat box is disabled while a turn is running or waiting for
-approval. Sending a message in either state would discard the write waiting
-for approval.
+- **Shortlist detail.** Each candidate's six verdicts and citations, with the source text one
+  click away.
 
-### Sign-in and limits
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/shortlist-dark.png">
+    <img alt="An opportunity shortlist: three candidates, a 96% best fit, and the top candidate expanded to show each verdict with its quoted citations" src="docs/images/shortlist-light.png">
+  </picture>
 
-With an `[auth]` section in `.streamlit/secrets.toml`, the app requires sign-in
-through Streamlit's OIDC support (`st.login`), which works with any OpenID Connect
-provider. For a single provider:
+- **File browser and gap count.** Each application's files, how many `[NEEDS INPUT]` markers
+  remain, and the latest compliance verdict. Source view by default, with a rendered-markdown
+  toggle; files in `final/` always open as source, so what you approve is exactly what gets
+  written.
+
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/files-dark.png">
+    <img alt="Application files: 8 files, 3 needing input, compliance NOT-READY, with a project summary draft showing two NEEDS INPUT markers" src="docs/images/files-light.png">
+  </picture>
+
+- **Approval previews.** The full content of each pending `final/` write, not just its path.
+  Approval is on by default.
+
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/approval-dark.png">
+    <img alt="An approval panel for a pending write to final/project-narrative.md, expanded to show the full text that would be written" src="docs/images/approval-light.png">
+  </picture>
+
+Screenshots use a fictional organization and fictional solicitations.
+
+Controls that start a turn are disabled while one is running or waiting for approval, since
+starting another would discard the pending write.
+
+The theme follows the system's light or dark mode and meets WCAG AA contrast in both; see
+`.streamlit/config.toml`. One known exception: Streamlit draws a focused button's ring at half
+opacity (2.5:1 light, 1.8:1 dark), though the button also darkens.
+
+## Deploying
+
+The [web UI](#web-ui) can serve a team. A shared deployment needs sign-in, the `server`
+profile, and Postgres.
+
+### Deployment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | unset (SQLite) | Postgres for checkpoints, the `Store`, and the run table |
+| `GRANT_WRITER_DB_POOL_MAX_SIZE` | `10` | Most Postgres connections per process |
+| `GRANT_WRITER_DB_POOL_TIMEOUT` | `30` | Seconds to wait for a free connection |
+| `GRANT_WRITER_ALLOWED_DOMAINS` | empty | Comma-separated email domains allowed to sign in, matched exactly |
+| `GRANT_WRITER_ALLOWED_EMAILS` | empty | Comma-separated addresses also allowed (outside collaborators) |
+| `GRANT_WRITER_DAILY_BUDGET_USD` | `10` | Estimated spend per signed-in user per UTC day |
+| `GRANT_WRITER_MAX_CONCURRENT_RUNS` | `3` | Signed-in turns running at once, across the deployment |
+| `GRANT_WRITER_SEARCH_COST_USD` | `0.008` | Estimated cost of one web search, counted toward the budget |
+| `GRANT_WRITER_TRACING` | `hidden` when shared | LangSmith tracing: `full`, `hidden`, or `off` |
+
+Run `grant-writer db-setup` once per deploy, before the app starts. With `DATABASE_URL` set,
+`draft`, `chat`, and `discover` refuse to run without `--operator`, because the CLI has no
+sign-in and could reach any user's thread. SQLite history does not migrate to Postgres.
+
+### Sign-in
+
+Add an `[auth]` section to `.streamlit/secrets.toml` to require sign-in through Streamlit's
+OIDC support (`st.login`), which works with any OpenID Connect provider:
 
 ```toml
 [auth]
@@ -213,71 +263,47 @@ client_secret = "..."
 server_metadata_url = "https://your-provider/.well-known/openid-configuration"
 ```
 
-Signing in isn't enough to get in: the account's email must be **verified** by
-the provider and on this deployment's list, set with `GRANT_WRITER_ALLOWED_DOMAINS`
-(for example `yourorg.org`) or `GRANT_WRITER_ALLOWED_EMAILS`. Domains match
-exactly, so `yourorg.org` doesn't admit `sub.yourorg.org`. With sign-in on and
-both lists empty, nobody is admitted. A provider that doesn't send the
-`email_verified` claim can't be used, because an unverified address could
-claim any domain.
+- **Allowlist.** The provider must report the email as verified, and it must match
+  `GRANT_WRITER_ALLOWED_DOMAINS` or `GRANT_WRITER_ALLOWED_EMAILS`. Both empty admits nobody.
+  Domains match exactly, so `yourorg.org` doesn't admit `sub.yourorg.org`.
+- **Isolation.** Each user gets their own threads and folders, identified by a digest of the
+  provider's issuer and subject, never by email.
+- **Profile.** Signed-in runs always use the `server` profile.
+- **No open deployments.** With `DATABASE_URL` set and no `[auth]`, the app refuses to start.
 
-Signed in, each person gets their own threads and folders, and every run uses
-the `server` profile. You are identified by a digest of the provider's
-issuer and subject, never by your email address. A deployment with
-`DATABASE_URL` set and no `[auth]` refuses to start, since anyone with the link
-could otherwise read every thread.
+### Limits
 
-Two limits apply to signed-in users, checked before each turn starts, including
-the turn that resumes an approval:
+Both are checked before each signed-in turn, including one that resumes an approval.
 
-- **A daily spending limit per user**, $10 by default, in estimated model and
-  web-search cost. The estimate uses list prices, and any model the price table
-  doesn't know is charged at the most expensive known rate. A turn already
-  running is allowed to finish, so the limit stops the next turn rather than
-  cutting one off. It resets at 00:00 UTC.
-- **A limit on turns running at once**, 3 by default across the whole deployment.
-  At the limit you're asked to try again shortly, instead of starting a run that
-  would fail partway on rate limits.
+- **Daily budget per user.** Estimated at list prices; an unknown model is charged at the most
+  expensive known rate. A running turn is allowed to finish, and the budget resets at 00:00 UTC.
+- **Concurrent turns.** At the limit you're asked to try again shortly, rather than starting a
+  run that would fail partway on rate limits.
 
 ### What is recorded
 
-A shared deployment keeps four records about your runs. None of them holds
-proposal content: no messages, no file text, no organization profile, and no
-rejection reason.
+None of these records hold proposal content: no messages, file text, organization profile, or
+rejection reasons.
 
-- **A run table**, one row per signed-in turn: who ran it (a pseudonymous id),
-  on which thread, when, how it ended, its tokens, searches and estimated
-  cost, and the class name of any error that stopped it.
-- **An approval record**, one row per approve or reject decision on a pending
-  write: who, when, which thread and file, and the decision. It is written
-  before the decision is sent. If it can't be written, the approval is refused
-  and you can try again; a rejection still goes through.
-- **Server logs**, as JSON lines on stderr for the host to collect. Each line
-  holds ids, a phase, an outcome, and an error's type and message.
-- **LangSmith traces**, if tracing is on. A signed-in deployment hides inputs,
-  outputs and metadata by default, so traces keep timing, token counts, errors
-  and the call tree without any proposal text. Set `GRANT_WRITER_TRACING` to
-  `full`, `hidden` or `off` to choose.
+| Record | Where | Holds |
+|---|---|---|
+| Run table | Postgres, or `.grant_writer/runs.sqlite` | Pseudonymous user, thread, time, outcome, tokens, searches, cost, error class |
+| Approval record | Same | User, time, thread, file, and decision, written *before* the decision is sent |
+| Server logs | JSON lines on stderr | Ids, phase, outcome, and error type |
+| LangSmith traces | LangSmith, if enabled | Timing, tokens, errors, and the call tree; inputs, outputs, and metadata hidden by default |
 
-The run table and the approval record live in Postgres when `DATABASE_URL` is
-set, otherwise in `.grant_writer/runs.sqlite`. How long each is kept, and what
-deleting a user's data removes, is the deployment's retention policy. The
-approval record is meant to outlive a user's deletion, which is why it holds
-ids and decisions and nothing else.
+If the approval record can't be written, the approval is refused and can be retried; a
+rejection still goes through. Retention is the deployment's policy, and the approval record is
+meant to outlive a user's deletion.
 
-For the host: `/_stcore/health` is Streamlit's liveness endpoint, and
-`grant-writer healthcheck` is the readiness check. Run `grant-writer ops-check`
-on a schedule. It reports failed and declined runs above 10% of the last 24
-hours, any rate-limit or pool-timeout failures, and any thread parked on an
-approval for more than 3 days. Alert on the `run.limited`, `run.failed` and
-`approval.unrecorded` log events as well.
+### Monitoring
 
-The theme (`.streamlit/config.toml`) follows the desktop's light or dark mode, and
-the settings menu can override it. Text, links, input outlines and focused
-inputs meet WCAG AA contrast in both modes, and `tests/test_theme_config.py`
-recomputes every figure. One known exception: Streamlit draws a focused
-button's ring at half opacity, which reaches only 2.5:1 (light) and 1.8:1
-(dark). A focused button also darkens, so the focus is still visible.
+- **Liveness:** Streamlit's `/_stcore/health` endpoint.
+- **Readiness:** `grant-writer healthcheck`.
+- **Alerts:** run `grant-writer ops-check` on a schedule. It flags failed and declined runs
+  above 10% of the last 24 hours, rate-limit and pool-timeout failures, and threads waiting on
+  an approval for more than 3 days. Also alert on the `run.limited`, `run.failed`, and
+  `approval.unrecorded` log events.
 
 ## Architecture
 
@@ -293,26 +319,25 @@ orchestrator (opus)       reads RFP, extracts requirements, plans, delegates, as
 └── compliance-checker    (sonnet, write-limited)  audits drafts, cannot edit them
 ```
 
-Each subagent works in its own context. Research produces search results the
-drafter doesn't need, drafting needs the style guides loaded, and compliance
-judges the drafts without seeing the drafter's reasoning.
+Each subagent works in its own context: research produces search results the drafter doesn't
+need, drafting needs the style guides loaded, and compliance judges drafts without seeing the
+drafter's reasoning.
 
 ### Where state lives
 
 | Path | Lifetime | Purpose |
 |---|---|---|
-| `memories/org/AGENTS.md` | Permanent, not tracked | Organization profile, loaded every turn. Created from the template on first run |
-| `templates/org-profile.md` | Tracked | The blank profile that ships. No agent can write it |
+| `memories/org/AGENTS.md` | Permanent, untracked | Organization profile, loaded every turn |
+| `templates/org-profile.md` | Tracked | Blank profile template; no agent can write it |
 | `skills/*/SKILL.md` | Permanent | Section drafting guides, loaded on demand |
 | `opportunities/<scan-id>/` | One scan | Candidate texts and scores |
 | `applications/<app-id>/` | One application | RFP, requirements, research, drafts, reviews |
 | `.grant_writer/checkpoints.sqlite` | Until deleted | Conversation state, plans, and writes awaiting approval |
-| `.grant_writer/runs.sqlite` | Until deleted | Run table for signed-in turns: usage and cost, no content (Postgres when `DATABASE_URL` is set) |
+| `.grant_writer/runs.sqlite` | Until deleted | Run table for signed-in turns (no content) |
 
-Back up the checkpoint file before upgrading dependencies. It is the one piece
-of state a library upgrade can make unreadable. Close the CLI and the UI first,
-and use SQLite's own backup rather than `cp`, which can miss rows still in the
-write-ahead log:
+Back up the checkpoint file before upgrading dependencies; it is the one piece of state a
+library upgrade can make unreadable. Close the CLI and UI first, and use SQLite's backup rather
+than `cp`, which can miss rows still in the write-ahead log:
 
 ```bash
 sqlite3 .grant_writer/checkpoints.sqlite ".backup .grant_writer/checkpoints.pre-upgrade.sqlite"
@@ -322,110 +347,80 @@ sqlite3 .grant_writer/checkpoints.sqlite ".backup .grant_writer/checkpoints.pre-
 
 | Profile | Drafts | Skills and memory | Use for |
 |---|---|---|---|
-| `local` (default) | Real files on disk | Real files on disk | CLI and local UI |
+| `local` (default) | Files on disk | Files on disk | CLI and local UI |
 | `server` | Graph state | `Store` seeded from disk at startup | Web deployments |
 
-Never use `local` inside a web server; once sign-in is on, the UI only offers
-`server`. Without `DATABASE_URL`, the `server`
-profile's Store is in memory and is lost when the process exits. With it set,
-checkpoints, the Store and the run table all live in Postgres; run
-`grant-writer db-setup` once per deploy, before the app starts, to create or
-migrate the tables.
-
-On every start, skills are refreshed from disk, while the organization profile
-is only seeded when the Store has none, so edits made through the app survive
+Never use `local` inside a web server. Without `DATABASE_URL`, the `server` Store is in memory
+and lost when the process exits. On each start, skills are refreshed from disk, but the
+organization profile is seeded only when the Store has none, so edits made in the app survive
 a restart.
-
-**SQLite history does not move to Postgres.** No tool copies checkpoints from
-one to the other, so threads started locally stay local and a deployment starts
-with none.
 
 ### Permissions
 
-- **Drafting** can write only to `/applications/`, `/memories/`, and
-  `/opportunities/`. Everything else, including `skills/` and the source tree,
-  is read-only. Rules are first-match-wins, so specific allows must come before
-  the catch-all deny (see `backends.py`).
-- **`--approve`** pauses on writes to `/applications/*/final/**` and on any
-  delete under `/applications/`. It doesn't pause on every write, because
-  constant prompts get approved without being read.
-- **Deletes** follow the write rules: a file the agent can write, it can delete.
-  It can never delete a directory.
+- **Drafting** can write only to `/applications/`, `/memories/`, and `/opportunities/`;
+  everything else is read-only. Rules are first-match-wins, so specific allows come before the
+  catch-all deny (see `backends.py`).
+- **`--approve`** pauses on writes to `/applications/*/final/**` and on any delete under
+  `/applications/`. It doesn't pause on every write, because constant prompts get approved
+  without being read.
+- **Deletes** follow the write rules: the agent can delete a file it can write, and can never
+  delete a directory.
 - **Discovery** cannot write to `/applications/` and never pauses for approval.
-- **The organization profile** (`/memories/`) is shared by every user on the
-  `server` profile, so there every drafting write to it pauses for approval,
-  whether or not `--approve` is on, and discovery can't write it at all.
-  On `local` it stays writable without a pause.
-- **The real-disk tool** (`fetch_grants_gov_opportunity`) bypasses these
-  rules, so it limits itself to the folder its own graph may write to.
-- **Solicitations** are read before the run, never by the agent: the CLI and
-  the UI extract the PDF's text (up to 50 MB and 500 pages, checked by its
-  `%PDF-` signature, in a child process stopped after two minutes) and put it
-  at `rfp.md`. The agent has no tool that opens a PDF or any other path on
-  disk, and the UI keeps no copy of the uploaded file.
+- **The organization profile** is shared by every user on `server`, so there each drafting
+  write to it pauses for approval regardless of `--approve`, and discovery can't write it. On
+  `local` it stays writable without a pause.
+- **The real-disk tool** (`fetch_grants_gov_opportunity`) bypasses these rules, so it limits
+  itself to the folder its own graph may write to.
+- **Solicitations** are extracted by the CLI or UI before the run, never by the agent: up to
+  50 MB and 500 pages, checked by the `%PDF-` signature, in a child process stopped after two
+  minutes. The agent has no tool that opens a PDF, and the UI keeps no copy of the upload.
 
 ## Guardrails
 
-Invented preliminary data, personnel, or budget figures are misconduct, not
-just a bad draft. So:
+Invented preliminary data, personnel, or budget figures are misconduct, not just a bad draft.
 
-- Prompts forbid inventing facts. Unknowns become `[NEEDS INPUT: <question>]`
-  and are collected in `review/gaps.md`.
-- Lengths come from the `measure_text` tool, run on the saved file after its last edit, never
-  from the model's own estimate.
-- The compliance reviewer cannot edit what it reviews.
-- The scout must cite every verdict; an honest `NONE` beats a hopeful `STRONG`.
-- A turn declined by the model's safety classifier is shown as declined, with
-  the agent and the classifier's category, not as an empty reply. Health and
-  biomedical topics can trigger false refusals; if one does, rephrase the
-  request or retry later. There is no automatic fallback to another model.
+- **No invented facts.** Unknowns become `[NEEDS INPUT: <question>]` and are collected in
+  `review/gaps.md`.
+- **Measured lengths.** Word and character counts come from the `measure_text` tool on the
+  saved file, never from the model's estimate.
+- **Independent review.** The compliance reviewer cannot edit what it reviews.
+- **Cited scores.** The scout must cite every verdict; an honest `NONE` beats a hopeful
+  `STRONG`.
+- **Visible refusals.** A turn declined by the model's safety classifier is shown as declined,
+  with the agent and category, not as an empty reply. Health and biomedical topics can trigger
+  false refusals; rephrase or retry. There is no automatic fallback model.
 
-Before submitting, check every `[NEEDS INPUT]` marker, every number, and every
-citation.
+Before submitting, check every `[NEEDS INPUT]` marker, every number, and every citation.
 
 ## Development
 
 ```bash
-uv sync                                              # includes the dev group (streamlit)
-uv run pytest tests/ -q                              # offline, no API calls
+uv sync                                                    # includes the dev group (streamlit)
+uv run pytest tests/ -q                                    # offline, no API calls
 uvx ruff@0.17.1 check src/ tests/ evals/ streamlit_app.py
 uvx ruff@0.17.1 format --check src/ tests/ evals/ streamlit_app.py
-uvx ty@0.0.89 check src/ tests/ evals/ streamlit_app.py   # 1 upstream diagnostic expected
-uv run python -m evals.run_scout                     # prompt eval: live model, costs money
+uvx ty@0.0.89 check src/ tests/ evals/ streamlit_app.py    # 1 upstream diagnostic expected
+uv run python -m evals.run_scout                           # prompt eval: live model, costs money
 ```
 
-- **Don't use `--no-dev`.** The Streamlit `AppTest` cases would be skipped and
-  the type check would report extra diagnostics.
-- **Tests** cover wiring failures that raise no error: a subagent missing its
-  skills, a misordered permission rule, or an approval step with no checkpointer.
-  See the invariants in `CLAUDE.md`.
-- **Postgres tests** are opt-in. Set `TEST_DATABASE_URL` to a server where you
-  can create databases (each run makes a scratch one and drops it), then run
-  `uv run pytest tests/ -q -m postgres`. Without the variable they're skipped,
-  and CI runs them in a job of their own. `uv run python -m tests.load_postgres`
-  load-tests the database with a stub model, which costs nothing.
-- **Evals** in `evals/` are not part of the suite. The tests can't check prompt
-  quality, so run the evals by hand after editing a prompt. See `evals/README.md`.
-- **CI** runs on Python 3.13 and 3.14, with pinned `ruff` and `ty` versions.
-  The Claude Code hooks pin the same versions, so a local edit is formatted
-  exactly as CI checks it.
-- **uv is pinned too**, to 0.13.4 by `required-version` in `pyproject.toml`.
-  CI reads the same setting, so local and CI builds run the same uv, and it
-  moves together with the `uv_build` bound.
-- **CI audits `uv.lock`** with `uv audit` and fails on any advisory not
-  accepted by ID in `ci.yml`, with the reason next to it. Dependabot keeps the
-  GitHub Actions current; Python dependencies are upgraded by hand.
-- **Billed commands ask first in Claude Code.** `draft`, `discover`, `chat` and
-  the live evals, plus any `rm` or `mv` of the checkpoint file, need a
-  confirmation before they run.
-- **Releases** are automatic: when a green push to `main` has a `version` in
-  `pyproject.toml` with no `v<version>` tag yet, CI tags it and publishes the
-  wheel and sdist. Bumping the version is all a release takes.
+- **Don't use `--no-dev`.** The Streamlit `AppTest` cases would skip and the type check would
+  report extra diagnostics.
+- **Tests** cover wiring failures that raise no error, such as a subagent missing its skills or
+  a misordered permission rule. See the invariants in `CLAUDE.md`.
+- **Postgres tests** are opt-in: set `TEST_DATABASE_URL` to a server where you can create
+  databases, then run `uv run pytest tests/ -q -m postgres`. `uv run python -m
+  tests.load_postgres` load-tests with a stub model at no cost.
+- **Evals** in `evals/` are not part of the suite. Tests can't judge prompt quality, so run the
+  evals by hand after editing a prompt. See `evals/README.md`.
+- **CI** runs on Python 3.13 and 3.14 with the same pinned `uv`, `ruff`, and `ty` as the local
+  Claude Code hooks, runs the Postgres tests in their own job, and audits `uv.lock` with
+  `uv audit`.
+- **Releases** are automatic: bumping `version` in `pyproject.toml` and pushing green to `main`
+  tags the release and publishes the wheel and sdist.
 
 ### Known quirks
 
-- The model sees an `execute` tool, but it does nothing on either backend
-  profile: it returns an error without running anything.
+- The model sees an `execute` tool, but it does nothing on either backend; it returns an error.
   `test_execute_tool_is_not_a_permission_bypass` guards this.
 - `RubricMiddleware` is beta upstream; its API may change.
 

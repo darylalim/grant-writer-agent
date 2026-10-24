@@ -2491,6 +2491,43 @@ def test_the_shortlist_counts_the_gaps_the_scout_refused_to_invent(
     assert int(needs_input[0].value) >= 2
 
 
+def test_the_shortlist_shows_the_scouts_text_as_written_not_as_markdown():
+    """A citation is only checkable if it reads as its source does.
+
+    `SCOUT_PROMPT`'s own format puts two dollar amounts on one line, and
+    Streamlit typeset the span between them as a formula -- found on the first
+    screenshot of a realistic scan, after a fixture with one `$` had passed for
+    months. A `*` or `:red[` in a quote restyles it the same quiet way.
+    """
+    scan_id = "zz-pytest-scan-literal"
+    scan_dir = PROJECT_ROOT / "opportunities" / scan_id
+    (scan_dir / "scored").mkdir(parents=True, exist_ok=True)
+    (scan_dir / "scored" / "literal.md").write_text(
+        "# Opportunity: Rural_Fund *2027*\n\n"
+        "- Award range: $100,000 to $500,000\n\n"
+        "## eligibility\n- Verdict: STRONG\n"
+        '- Citation (opportunity): "a *strict* :red[limit] of $5 to $9"\n',
+        encoding="utf-8",
+    )
+    try:
+        app = _app_test()
+        app.run()
+        app.text_input(key="scan_id_input").set_value(scan_id).run()
+
+        assert not app.exception
+        (label,) = [e.label for e in app.expander if "Rural" in e.label]
+        assert r"Rural\_Fund \*2027\*" in label
+        # Every ASCII punctuation mark is escaped, commas included: CommonMark
+        # makes all of them literal behind a backslash, so `\,` reads as `,`.
+        captions = [c.value for c in app.caption]
+        assert any(r"\$100\,000 to \$500\,000" in c for c in captions), captions
+        quotes = [m.value for m in app.markdown if "strict" in m.value]
+        assert quotes, "the citation was not drawn"
+        assert r"a \*strict\* \:red\[limit\] of \$5 to \$9" in quotes[0]
+    finally:
+        shutil.rmtree(scan_dir, ignore_errors=True)
+
+
 # ---- ⑥ the shared turn config ----------------------------------------------
 #
 # Tracing is automatic for a LangGraph app, so every run here already reached
