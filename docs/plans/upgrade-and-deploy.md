@@ -38,7 +38,8 @@ A (0 → 6) → A2 → B → C → C2 → C3
   → D1 steps 1–2 (plumbing only, no behaviour change) → H3 → D1 step 3 (effort values) → D3 → D4
   → H4 → D2
   → F → G1 → G2 → G3 → G4
-  → E0 → E1 → E2 → E3 → E3b → E4 → E7 → E6 (incl. the fake-model load test) → E5 (go-live)
+  → E0 → E1 → E2 → E3 → E3b → E4 → E7 → E6 (incl. the fake-model load test)
+  → E5a (offline readiness, now) → … a team exists (decision 20) … → E5b (go-live)
 ```
 
 | Step | Unblocks |
@@ -53,6 +54,8 @@ A (0 → 6) → A2 → B → C → C2 → C3
 | E0 | E1's seeding (template vs. real profile) |
 | E2, E3b, E4 | E5: hosting is unsafe without them |
 | E7, E6 | E5 go-live: operations and capacity are known first |
+| E5a | E5b: the deployed configuration is pinned by tests before anyone deploys it |
+| a team (decision 20) | E5b: decisions 14, 15 and 17 depend on the organisation's identity system, cloud account and policy |
 
 ### Three priority tiers
 
@@ -105,12 +108,13 @@ without stopping to ask.
 | 11 | Upload handling | extract text at upload / object storage | **Decided 2026-10-23: as recommended.** Extract text at upload; also remove `extract_pdf_text` from the graph | E3 |
 | 12 | Org-memory writes when deployed | approval interrupt / read-only + admin path | **Decided 2026-10-23: as recommended.** Interrupt for drafting (keeps the feature), deny for discovery (it must never park) | E3b |
 | 13 | Spending and concurrent-run limits | values | **Decided 2026-10-23:** estimated USD per user per UTC day (model tokens at list price plus Tavily searches), conservative defaults **$10/day and 3 runs at once** per deployment, overridable by `GRANT_WRITER_DAILY_BUDGET_USD` / `GRANT_WRITER_MAX_CONCURRENT_RUNS` | E4 |
-| 14 | Sign-in provider | open | **Mechanism decided 2026-10-23: Streamlit's `st.login` OIDC** (not a trusted proxy header). The provider itself is still open: any OIDC provider whose sign-in page passes the accessibility check, chosen in E5 | E4/E5 |
-| 15 | Host | container platform + managed Postgres / LangSmith Deployment | Decide after A–D, from what E1–E4 needed | E5 |
+| 14 | Sign-in provider | open | **Mechanism decided 2026-10-23: Streamlit's `st.login` OIDC** (not a trusted proxy header). **Provider postponed 2026-10-24 (decision 20).** Recommendation: the identity system the team already signs in with, since `identity.admission` admits by email domain. Google Workspace → Google (sends `email_verified`, works unchanged). Microsoft 365 → Entra ID, which by default sends no `email_verified`, so `admission` (`identity.py`) would refuse everyone; it would need a reviewed change (e.g. trusting the tenant id). Its sign-in page must pass the accessibility check. **Restarts when:** the team's identity system is known | E5b |
+| 15 | Host | container platform + managed Postgres / LangSmith Deployment | **Category recommended 2026-10-24: a container platform with managed Postgres.** LangSmith Deployment would make Streamlit a remote client, and E4/E7 assume the graph is in-process: `UsageMeter` meters subagents through the turn's `callbacks` (which do not cross HTTP), `parked_state` and `ops.parked_threads` read the checkpointer directly, `RunLedger.begin` is a locked transaction, and the `AppTest` cases build the graph in-process. **Vendor postponed (decision 20)**: prefer the cloud the organisation already pays for and administers. Requirements are in E5b. **Restarts when:** the organisation's cloud account is known | E5b |
 | 16 | Tracing in the deployment | off / full / content hidden | **Decided 2026-10-23: content hidden**, and metadata hidden too (it carries the rubric, funder and user-prefixed thread id). `GRANT_WRITER_TRACING` overrides; unset, a shared process (signed in or on `DATABASE_URL`) defaults to hidden. Parked-thread alert threshold: **3 days** | E5/E7 |
-| 17 | Retention and deletion | periods; what per-user deletion removes | Organisation policy. Must say: deleting a user's data removes their threads, files, run-table rows and LangSmith traces, while the approval audit (E7) keeps IDs and decisions with no content, so it survives deletion | E5 |
+| 17 | Retention and deletion | periods; what per-user deletion removes | Organisation policy. Must say: deleting a user's data removes their threads, files, run-table rows and LangSmith traces, while the approval audit (E7) keeps IDs and decisions with no content, so it survives deletion. **Postponed 2026-10-24 (decision 20). Restarts when:** the organisation that will hold the data exists to set the policy | E5b |
 | 18 | CLI against the shared database | refuse / allow with an operator flag | **Decided 2026-10-23: as recommended.** Refuse when `DATABASE_URL` is set; `--operator` allows it, logged at WARNING. `db-setup` is exempt | E2 |
 | 19 | When to release E4 | now / with E7 | **Decided 2026-10-23: with E7, as 0.7.0.** No deployment consumes a release before E5; the wheel's `pypdf>=6.14.2` already admits the fixed 6.21.2; E7 will likely add run-table columns, so the table's first public shape should be E7's; and sign-in has had no real OIDC round trip | after E7 |
+| 20 | When to deploy (E5b) | now / when a team exists | **Decided 2026-10-24: when a team exists.** The app has one user today. Deploying now would cost a host and managed Postgres, backups, restores and key rotation, and put a public sign-in page in front of a spending API key, for no one but that user; and decisions 14, 15 and 17 would be guessed before the organisation that settles them exists, risking a redo of E5 (and of `admission`, for Entra ID). Meanwhile: `local` profile and SQLite, and E5a keeps the deploy path tested. **Restarts when:** a team is decided and its identity system and cloud account are known | E5b |
 
 ### Progress checklist
 
@@ -270,7 +274,9 @@ Tick each box in the commit that completes the step. Fill in its hash in the *ne
     | 25 | 0 | 52.0 / 427.4 | 207 (8.5) | 2640 | 478 |
 
     A pool of 25 at 25 sessions gave the same wall time (4.7 s vs 4.6 s), so latency here is in-process CPU (the GIL, with a model that answers instantly), not connections: **the default pool of 10 is enough for 25 simultaneous sessions**, and real turns, which mostly wait on the model, contend far less. **E7's open item, sized:** the `ops-check` scan costs about 0.18 ms per checkpoint, roughly linear, so about 18 s at 100k checkpoints. Fine for one team; narrow it to latest-per-thread if history grows past that.
-- [ ] E5: deployed; checklist done; README Deployment section (commit: `       `)
+- [ ] E5a: offline readiness: `postgres` in `release`'s `needs:`; the shared `get_agent` cache holds no per-user state (test); the `execute` bypass test over `server` too; optionally release 0.7.1 (commit: `       `)
+  - 2026-10-24: E5 split in two by decision 20. **Finding for E5b:** `fetch_grants_gov_opportunity` writes `opportunities/` to real disk in every profile (`tools.py`, `target.write_text`), so on an ephemeral container filesystem archived candidates vanish on redeploy and invariant 16's citation check can no longer find its sources. Recorded as an E5b host requirement, not fixed in E5a: a persistent volume may make moving it into the Store unnecessary.
+- [ ] E5b: deployed; checklist done; README Deployment section (commit: `       `). **Waits for a team (decision 20).**
 
 ## Tracks at a glance
 
@@ -1074,11 +1080,42 @@ org profile (Track E's decision), it affects **every user**, and nothing on scre
   run in E7's run table, include them in the spending limit, and alert on Tavily errors the same
   way as Anthropic 429s.
 
-### E5. Deployment (decide the host here)
+### E5. Deployment, in two parts (decision 20)
 
-- The host is open: a container platform with managed Postgres, or LangSmith Deployment, which
-  provides Postgres, threads and auth hooks, with Streamlit becoming a client. Decide after A–D,
-  using what E1–E4 turned out to need.
+**E5a, now: offline readiness, no billed run, no host.** One branch and PR.
+
+- Add the `postgres` CI job to `release`'s `needs:`, so no release ships with the database path
+  broken while nobody runs it day to day. It has passed on E6's PR and its merge.
+- Pin with a test that `get_agent`'s shared `st.cache_resource` graph holds no per-user state (the
+  `get_agent` bullet under E5b below).
+- Extend `test_execute_tool_is_not_a_permission_bypass` to the `server` profile (the last bullet of
+  E5b's security checklist).
+- Optionally release 0.7.1 (`uv version --bump patch`), so the released version carries E6 and
+  these.
+- **Not in E5a:** the README Deployment section, which would describe a deployment never done;
+  write it after E5b's staging deploy. Forcing `server` from config also waits, since how a
+  deployment says "I am deployed" depends on the host.
+
+**E5b, when a team exists: go-live.** Everything below. Settle decisions 14, 15 and 17 first,
+from the organisation's identity system, cloud account and policy.
+
+- **Host (decision 15): a container platform with managed Postgres** (category recommended
+  2026-10-24; see the decisions table for why not LangSmith Deployment). Choose the vendor
+  against what the code needs:
+  - one always-on instance, no scale-to-zero (`st.cache_resource` and session state are in
+    process memory; more than one replica needs sticky sessions);
+  - long-lived WebSockets and no request timeout that cuts a draft short;
+  - **a persistent volume for `opportunities/`, or move it into the Store** (the E5a finding in
+    the checklist: it is written to real disk in every profile);
+  - child processes allowed (the PDF parse is a `spawn`ed child, invariant 24);
+  - managed Postgres with TLS, encryption at rest, point-in-time recovery and a testable
+    restore; a secret store; HTTPS on a custom domain.
+- **Sign-in (decision 14):** the provider the team already uses; check `email_verified` before
+  choosing (Entra ID needs an `admission` change).
+- **Staging deploy before go-live**, no model call needed: a real `st.login` round trip (never
+  done), `db-setup` / `healthcheck` / `ops-check` on the managed Postgres, `opportunities/`
+  surviving a redeploy, and a backup restore. The deferred checkpoint-growth measurement (E1)
+  rides on the pre-go-live trajectory run, which is billed: ask first.
 - `backend_profile` must be `server` in any web deployment. Today that is a sidebar choice
   (`streamlit_app.py:894`). For a deployment, force it from config and hide the choice, so that
   nobody can select `local` inside a web server (the `CLAUDE.md` rule, enforced rather than
