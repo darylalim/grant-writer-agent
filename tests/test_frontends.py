@@ -1385,8 +1385,10 @@ def test_the_approval_caption_names_a_pending_delete(monkeypatch):
     # And it must not still be calling the pair "writes to final/".
     assert "write(s) to" not in caption
     # The per-request expander carries the tool name too, so the path a delete
-    # would remove is on screen next to the decision.
-    labels = " ".join(exp.label for exp in app.expander)
+    # would remove is on screen next to the decision. The label is markdown with
+    # the path's punctuation escaped, so compare what it displays: dropping the
+    # backslashes is exact here, since no path in this case contains one.
+    labels = " ".join(exp.label.replace("\\", "") for exp in app.expander)
     assert "delete → /applications/x/sections/need.md" in labels
 
 
@@ -1605,6 +1607,112 @@ def test_the_approval_preview_can_still_be_read_as_prose(monkeypatch):
 
     assert not app.exception
     assert "Drafted text." in " ".join(block.value for block in app.markdown)
+
+
+# A budget section is where two dollar figures share a line, and Streamlit
+# typesets the span between them as a formula. Code is the exception: a
+# backslash inside a code span or fence is shown, not obeyed. No trailing
+# newline: Streamlit strips one from an element's value, which would make every
+# comparison below fail for a reason that has nothing to do with escaping.
+BUDGET_DRAFT = (
+    "# Budget\n\n"
+    "Personnel is $120,000 and travel is $4,500.\n\n"
+    "| Item | Cost |\n|---|---|\n| Staff | $90,000 |\n| Travel | $4,000 |\n\n"
+    "Export `$GRANT_ID` first.\n\n"
+    "```\necho $PATH $HOME\n```"
+)
+BUDGET_SHOWN = (
+    "# Budget\n\n"
+    r"Personnel is \$120,000 and travel is \$4,500."
+    "\n\n"
+    "| Item | Cost |\n|---|---|\n"
+    r"| Staff | \$90,000 |"
+    "\n"
+    r"| Travel | \$4,000 |"
+    "\n\n"
+    "Export `$GRANT_ID` first.\n\n"
+    "```\necho $PATH $HOME\n```"
+)
+
+
+def test_dollar_figures_in_the_feed_are_not_typeset():
+    """The agent's replies and the human's prompts render as markdown, minus
+    `$` math; a plan step is the agent's words and renders as none."""
+    from grant_writer.activity import Event, Todo
+
+    app = _app_test()
+    app.run()
+    app.session_state["activity"] = [
+        Event(PLAN, todos=(Todo("pending", "Cap *travel* at $4,000 or $5,000"),)),
+        Event(MESSAGE, detail=BUDGET_DRAFT),
+        Event("prompt", detail="Move $500 from travel to $ supplies."),
+    ]
+    app.run()
+
+    assert not app.exception
+    shown = [block.value for block in app.markdown]
+    assert BUDGET_SHOWN in shown
+    assert r"Move \$500 from travel to \$ supplies." in shown
+    assert any(r"Cap \*travel\* at \$4\,000 or \$5\,000" in s for s in shown)
+
+
+def test_dollar_figures_in_a_rendered_draft_are_not_typeset():
+    """The file browser's Rendered view, where a budget section is read."""
+    app_id = "zz-pytest-budget"
+    app_dir = PROJECT_ROOT / "applications" / app_id
+    (app_dir / "sections").mkdir(parents=True, exist_ok=True)
+    (app_dir / "sections" / "budget.md").write_text(BUDGET_DRAFT, encoding="utf-8")
+    try:
+        app = _app_test()
+        app.run()
+        app.text_input(key="app_id_input").set_value(app_id)
+        app.run()
+        app.radio(key="file_pick").set_value("sections/budget.md").run()
+
+        assert not app.exception
+        (control,) = _view_controls(app)
+        assert control.value == "Rendered"
+        assert BUDGET_SHOWN in [block.value for block in app.markdown]
+    finally:
+        shutil.rmtree(app_dir, ignore_errors=True)
+
+
+def test_dollar_figures_in_a_rendered_approval_preview_are_not_typeset(
+    monkeypatch,
+):
+    """The approval preview's Rendered toggle. Source, the default, is
+    `st.code` and was never affected; it is pinned so this stays true."""
+    requests = [
+        {
+            "name": "write_file",
+            "args": {
+                "file_path": "/applications/x/final/budget.md",
+                "content": BUDGET_DRAFT,
+            },
+        }
+    ]
+    agent = SimpleNamespace(
+        get_state=lambda _config: SimpleNamespace(
+            tasks=[
+                SimpleNamespace(
+                    interrupts=[SimpleNamespace(value={"action_requests": requests})]
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr("grant_writer.agent.build_agent", lambda *_a, **_k: agent)
+
+    app = _app_test(monkeypatch)
+    app.run()
+    app.session_state["phase"] = "awaiting"
+    app.session_state["active_app_id"] = "zz-pytest-budget-view"
+    app.run()
+
+    assert BUDGET_DRAFT in [block.value for block in app.code]
+    app.segmented_control(key="view_0_0").set_value("Rendered").run()
+
+    assert not app.exception
+    assert BUDGET_SHOWN in [block.value for block in app.markdown]
 
 
 def test_the_rejection_reason_does_not_leak_into_the_next_interrupt(monkeypatch):
