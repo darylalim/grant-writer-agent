@@ -336,18 +336,22 @@ def get_agent(profile: BackendProfile, approve: bool, search: bool) -> Any:
     """Build the graph once per settings combination.
 
     `cache_resource` is shared across sessions, which is what we want: the
-    SQLite checkpointer opens one connection for the process (with
-    `check_same_thread=False`, see agent._build_checkpointer) instead of one
-    per rerun. Toggling a sidebar setting rebuilds the graph, but the thread's
-    history and any pending approval live in the checkpoint file, so nothing
-    in flight is lost.
+    checkpointer is built once per entry rather than per rerun. Toggling a
+    sidebar setting selects another entry, but the thread's history and any
+    pending approval live in the checkpoint, so nothing in flight is lost.
 
     The cache holds one agent per (profile, approve, search) combination and
-    never evicts, so it tops out at eight SQLite connections held open for the
-    process -- bounded, but the reason this is a single-user local tool rather
-    than something to put behind a shared URL. Two viewers also share one graph
-    object, so a sidebar toggle in one tab changes which agent the other tab's
-    pending approval resumes through.
+    never evicts, so it tops out at eight graphs. Without `DATABASE_URL` each
+    holds its own SQLite connection (with `check_same_thread=False`, see
+    `agent._build_checkpointer`); with it, every entry here and in
+    `get_discovery_agent` borrows from one `psycopg` pool per process
+    (`agent._connection_pool`).
+
+    Shared means every signed-in user's turns run through the same object, so
+    it must hold nothing per-user: the user travels in the thread id, never in
+    the graph (invariant 23), and `tests/test_users.py` pins one graph serving
+    two users. What differs per session is which entry it asks for, since the
+    sidebar is session state.
     """
     return build_agent(
         persistent_settings(
