@@ -457,7 +457,7 @@ def render_event(event: Event) -> None:
             st.markdown(f"**Plan** · {len(event.todos)} steps")
             for todo in event.todos:
                 icon = TODO_ICONS.get(todo.status, PENDING_TODO_ICON)
-                st.markdown(f"{icon} {todo.content}")
+                st.markdown(f"{icon} {_literal(todo.content)}")
     elif event.kind == DELEGATE:
         icon = SUBAGENT_ICONS.get(event.label, ":material/hub:")
         st.markdown(f"{icon} Delegated to **{event.label}**")
@@ -467,7 +467,7 @@ def render_event(event: Event) -> None:
         st.markdown(f":gray[{icon} {event.label}]{detail}")
     elif event.kind == MESSAGE:
         with st.container(border=True):
-            st.markdown(event.detail)
+            st.markdown(_without_math(event.detail))
     elif event.kind == DECLINED:
         # The outcome is stated in words, not left to the alert's colour or
         # icon, so it is announced like any other alert. The sentence is built
@@ -491,7 +491,7 @@ def render_event(event: Event) -> None:
         # agent's own prose is already drawn as one, and a turn that opens with
         # a follow-up needs the two told apart at a glance.
         with st.chat_message("user"):
-            st.markdown(event.detail)
+            st.markdown(_without_math(event.detail))
 
 
 def stream_turn(agent: Any, payload: Any, config: dict) -> bool:
@@ -648,6 +648,34 @@ def _literal(text: str) -> str:
     checkable if it reads as the source does, so none of it is interpreted.
     """
     return _MARKDOWN_PUNCTUATION.sub(r"\\\1", text)
+
+
+# A dollar sign outside code, or a stretch of code to leave alone. Code is
+# matched first because a backslash inside a code span or fenced block is shown,
+# not obeyed: escaping `$HOME` there would put `\$HOME` on screen. A fence left
+# unclosed runs to the end, as CommonMark has it, and a span may not cross a
+# blank line, so one stray backtick cannot shield the rest of a draft.
+_CODE_OR_DOLLAR = re.compile(
+    r"^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[ \t]*$|\Z)"
+    r"|(`+)(?:(?!\n[ \t]*\n).)+?(?<!`)\2(?!`)"
+    r"|(?<!\\)\$",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _without_math(text: str) -> str:
+    """Markdown the agent wrote, rendered as markdown except for `$`.
+
+    Unlike `_literal`, this keeps headings, lists, tables and emphasis: agent
+    replies and drafts are meant to be formatted. But Streamlit typesets the
+    span between two dollar signs as a formula, and a budget narrative or
+    a reply about one routinely has two on a line (`$120,000 for personnel and
+    $45,000 for travel`). No grant text here means a formula, so every `$`
+    outside code is made literal.
+    """
+    return _CODE_OR_DOLLAR.sub(
+        lambda match: r"\$" if match.group(0) == "$" else match.group(0), text
+    )
 
 
 def _verdict_markup(criterion: Any) -> str:
@@ -878,7 +906,8 @@ def approval_panel(requests: list[dict], unreadable: str = "") -> None:
         for index, request in enumerate(requests):
             args = request.get("args") or {}
             path = args.get("file_path") or "(unknown path)"
-            with st.expander(f"{request.get('name', '?')} → {path}"):
+            name = request.get("name", "?")
+            with st.expander(f"{_literal(name)} → {_literal(path)}"):
                 content = args.get("content")
                 if not content:
                     st.json(args)
@@ -886,14 +915,15 @@ def approval_panel(requests: list[dict], unreadable: str = "") -> None:
                 # Source is the default, and the reason is not stylistic.
                 # st.markdown *transforms* what it is given: a citation whose
                 # link text and URL disagree shows only the text, heading
-                # levels and whitespace normalise away, and `:red[...]` or
-                # `$...$` are read as directives. This is the one moment a
-                # human vets a submission-bound file, and approving a rendered
-                # view approves something other than the bytes that get
-                # written. `required` keeps the pair exhaustive: without it a
-                # click on the lit segment deselects, and the control then
-                # shows nothing lit above a pane that is still displaying one
-                # of the two views.
+                # levels and whitespace normalise away, and `:red[...]` is read
+                # as a directive. (`$...$` no longer is -- `_without_math` keeps
+                # a budget's dollar figures readable -- but that is one
+                # transform of many.) This is the one moment a human vets a
+                # submission-bound file, and approving a rendered view approves
+                # something other than the bytes that get written. `required`
+                # keeps the pair exhaustive: without it a click on the lit
+                # segment deselects, and the control then shows nothing lit
+                # above a pane that is still displaying one of the two views.
                 view = st.segmented_control(
                     "View",
                     ("Source", "Rendered"),
@@ -903,7 +933,7 @@ def approval_panel(requests: list[dict], unreadable: str = "") -> None:
                     label_visibility="collapsed",
                 )
                 if view == "Rendered":
-                    st.markdown(content)
+                    st.markdown(_without_math(content))
                 else:
                     st.code(content, language="markdown", wrap_lines=True)
         reason = st.text_input(
@@ -1035,7 +1065,7 @@ def render_file(path: Path) -> None:
         # gets the full pane rather than a sideways scroll. The source view
         # keeps the full width: code blocks need it.
         with st.container(width=PROSE_WIDTH):
-            st.markdown(text)
+            st.markdown(_without_math(text))
     else:
         st.code(text, language="markdown", wrap_lines=True)
 
