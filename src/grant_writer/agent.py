@@ -121,6 +121,10 @@ def _connection_pool(
         kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
         check=pool_class.check_connection,
         name="grant-writer",
+        # Explicit because psycopg_pool deprecates the default and will flip
+        # it to False: inherited, that release would leave this pool built
+        # and never opened, failing on the first query rather than here.
+        open=True,
     )
     # The cache keeps the pool alive to interpreter teardown, where its worker
     # threads can no longer be joined: every CLI exit then stalled ~20s (four

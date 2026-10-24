@@ -83,6 +83,13 @@ required-version = "==0.13.4"
 # in `tests/`. The eval runner needs a live API key and must stay uncollectable
 # -- see `evals/__init__.py`.
 pythonpath = ["."]
+# `postgres` cases need a real server and skip unless TEST_DATABASE_URL is set
+# (tests/conftest.py); CI runs them in a job of their own, so the `test` job
+# stays the proof that the suite needs no database. --strict-markers makes a
+# misspelt `@pytest.mark.postgress` an error instead of a case that silently
+# runs offline and fails on its first query.
+markers = ["postgres: needs a real Postgres at TEST_DATABASE_URL (opt-in)"]
+addopts = ["--strict-markers"]
 
 [tool.ruff.lint]
 # The source already satisfied every rule below before this section existed, so

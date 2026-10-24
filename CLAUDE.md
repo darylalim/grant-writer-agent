@@ -9,6 +9,8 @@ uv sync                                       # install (Python >=3.13, uv_build
 uv run pytest tests/ -q                       # full suite: offline, no API calls
 uv run pytest tests/test_wiring.py::test_subagent_roster -q   # single test
 uv run pytest tests/ -q -k permission         # by keyword
+TEST_DATABASE_URL=postgresql://... uv run pytest tests/ -q -m postgres   # opt-in, real Postgres
+TEST_DATABASE_URL=postgresql://... uv run python -m tests.load_postgres  # load test, stub model
 uvx ruff@0.17.1 check src/ tests/ evals/ streamlit_app.py   # lint (select list in [tool.ruff.lint])
 uvx ruff@0.17.1 format --check src/ tests/ evals/ streamlit_app.py   # ruff's default 88-col
 
@@ -789,7 +791,20 @@ Postgres. The three limit variables (`GRANT_WRITER_DAILY_BUDGET_USD`,
 An autouse fixture there resets LangSmith's global client and switch after every case:
 `ops.configure_tracing` is process-global by design, and the CLI's `main` and the app's
 first pass both call it.
-`tests/test_database.py` pins the Postgres wiring with the pool's `open()` patched out. Any AppTest
+`tests/test_database.py` pins the Postgres wiring with the pool's `open()` patched out.
+`tests/test_postgres.py` is the other half, against a real server: every case there is marked
+`postgres` and skips unless `TEST_DATABASE_URL` is set — read by `conftest.py` from the shell
+*before* `config.py` loads `.env`, then blanked, so a `.env` cannot switch them on.
+`--strict-markers` makes a misspelt marker an error rather than a case that runs offline. The
+session's `postgres_url` fixture makes a scratch database there (so the URL needs CREATEDB, and is
+never a deployment's), migrates it with `db-setup`'s own `setup_database`, and drops it after.
+Cases share it and `TRUNCATE` on entry. They claim no invariant, since each property already has an
+offline test; they exist for what constructs fine and fails on the first query, and earned that on
+the first run, surfacing psycopg_pool's deprecated `open` default. CI runs them in a `postgres` job
+of its own, so `test` stays the proof that the suite needs no database; that job fails on a skip
+too, or a renamed variable would make it a green run of nothing. `tests/load_postgres.py` is the
+fake-model load test: never collected, run by hand before a go-live, and kept from rotting by one
+small `postgres` case. Any AppTest
 case that signs a user in must patch `agent.build_run_ledger` too, as `tests/test_users.py` and
 `tests/test_sign_in.py` do, or its turns land in the developer's own `.grant_writer/runs.sqlite`
 — and patch `identity.admission` unless the allowlist is what it tests, since `AppTest`'s own

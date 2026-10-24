@@ -93,6 +93,55 @@ jobs:
       - name: Smoke-test the entry point
         run: uv run grant-writer --help
 
+  # The `postgres`-marked cases (E6), against a real server. A job of its own
+  # rather than a service on `test`, so that `test` stays the proof the suite
+  # needs no database: a database there could be leaned on unnoticed. Not in
+  # `release`'s `needs:` yet -- a flaky service container there would block
+  # every release, so it joins once it has proven stable.
+  postgres:
+    name: Postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Major version pinned, and the multi-arch index pinned by digest, on
+        # the principle the SHA-pinned actions follow: a tag can move under a
+        # green build. 17 is what E4's and E7's live smoke tests used.
+        image: postgres:17-alpine@sha256:eee6c6e1b0894fa4fe0075eb054af9fd1cf39a35321c2d4110626cfe506411fb
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # A throwaway superuser, which the cases need: each session creates a
+      # scratch database and drops it. Never a deployment's credential.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      # Fails on a skip as well as a failure. The cases skip whenever
+      # TEST_DATABASE_URL reads as unset, so a renamed variable would
+      # otherwise turn this job into a green run of nothing.
+      - name: Test
+        run: |
+          uv run pytest tests/ -q -m postgres -rs | tee pytest.log
+          if grep -q SKIPPED pytest.log; then
+            echo "::error::postgres cases were skipped -- is TEST_DATABASE_URL reaching pytest?"
+            exit 1
+          fi
+
   lint:
     name: Lint and types
     runs-on: ubuntu-latest
