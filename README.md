@@ -424,8 +424,8 @@ uv run python -m evals.run_scout                     # prompt eval: live model, 
 
 ### Known quirks
 
-- The model sees an `execute` tool, but it does nothing on `FilesystemBackend`:
-  it returns an error without running anything.
+- The model sees an `execute` tool, but it does nothing on either backend
+  profile: it returns an error without running anything.
   `test_execute_tool_is_not_a_permission_bypass` guards this.
 - `RubricMiddleware` is beta upstream; its API may change.
 

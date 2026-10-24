@@ -468,6 +468,42 @@ def test_the_approval_panel_shows_and_resolves_only_the_viewers_thread(monkeypat
     assert agent.parked == {ALICE_THREAD: [ALICE_FINAL]}
 
 
+def test_the_cached_graph_is_shared_and_the_user_travels_in_the_config(monkeypatch):
+    """Pins invariant 23.
+
+    `get_agent` is `st.cache_resource`, shared by every session in the
+    process, which is safe only while the graph holds nothing per-user (E5a).
+    Alice and then Bob draft on one id without the cache being cleared between
+    them: one graph must be built for both, and each turn must still reach its
+    sender's own thread. Keying the cache on the user builds two graphs; a user
+    captured into the graph at build time hands Bob's turn to Alice's thread.
+    """
+    built: list[_Checkpoints] = []
+
+    def build_agent(*_args, **_kwargs):
+        built.append(_Checkpoints({}))
+        return built[-1]
+
+    monkeypatch.setattr("grant_writer.agent.build_agent", build_agent)
+    alice = _app_test(monkeypatch, ALICE)
+    # `_app_test` clears the cache, which is right for isolation and wrong
+    # here: Bob's session must find the entry Alice's left. Same script, same
+    # patches, minus the clear -- and the user re-patched to Bob.
+    from streamlit.testing.v1 import AppTest
+
+    bob = AppTest.from_file(str(PROJECT_ROOT / "streamlit_app.py"), default_timeout=60)
+
+    for user, app in ((ALICE, alice), (BOB, bob)):
+        monkeypatch.setattr("grant_writer.identity.current_user", lambda *_, u=user: u)
+        app.run()
+        app.text_input(key="app_id_input").set_value(APP)
+        _button(app, "Draft proposal").click().run()
+        assert not app.exception
+
+    assert len(built) == 1, "one graph per settings combination, not per user"
+    assert [thread for thread, _ in built[0].streamed] == [ALICE_THREAD, BOB_THREAD]
+
+
 SOLO = "zz-pytest-single-user-app"
 
 

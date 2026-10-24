@@ -95,9 +95,10 @@ jobs:
 
   # The `postgres`-marked cases (E6), against a real server. A job of its own
   # rather than a service on `test`, so that `test` stays the proof the suite
-  # needs no database: a database there could be leaned on unnoticed. Not in
-  # `release`'s `needs:` yet -- a flaky service container there would block
-  # every release, so it joins once it has proven stable.
+  # needs no database: a database there could be leaned on unnoticed. In
+  # `release`'s `needs:` since E5a, once it had passed on three runs: the
+  # Postgres path is the deployment's and nobody runs it day to day, so CI is
+  # the only thing that would notice it break before a release shipped it.
   postgres:
     name: Postgres
     runs-on: ubuntu-latest
@@ -228,7 +229,7 @@ jobs:
     # pull_request events carry refs/pull/N/merge and workflow_dispatch carries
     # whichever branch it was run on, so this one condition excludes both.
     if: github.ref == 'refs/heads/main'
-    needs: [test, lint]
+    needs: [test, lint, postgres]
     runs-on: ubuntu-latest
     permissions:
       contents: write

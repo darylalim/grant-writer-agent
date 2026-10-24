@@ -584,15 +584,28 @@ def test_reviewer_cannot_edit_what_it_reviews():
     )
 
 
-def test_execute_tool_is_not_a_permission_bypass():
-    """`execute` is registered but inert on FilesystemBackend.
+@pytest.mark.parametrize("profile", ["local", "server"])
+def test_execute_tool_is_not_a_permission_bypass(profile):
+    """`execute` is registered but inert on both profiles' backends.
 
     It is offered to the model, so if this ever flips to True the write
     permissions above stop being a real boundary -- the agent could shell out.
+    `server` is the profile a deployment runs (E5a), so it is pinned too. Its
+    routes are checked one by one because `supports_execution` asks only a
+    `CompositeBackend`'s default: a sandbox mounted under `/skills/` would pass
+    it while still answering an `execute` routed there.
     """
-    backend = build_backend(Settings(backend_profile="local"))
-    assert not callable(backend), "local profile should build a concrete backend"
+    from deepagents.backends.composite import CompositeBackend
+    from deepagents.backends.protocol import SandboxBackendProtocol
+
+    backend = build_backend(Settings(backend_profile=profile))
+    assert not callable(backend), f"{profile} profile should build a concrete backend"
     assert supports_execution(backend) is False
+    if profile == "server":
+        assert isinstance(backend, CompositeBackend)
+        assert backend.routes, "server profile should route /skills/ and /memories/"
+        for prefix, route in backend.routes.items():
+            assert not isinstance(route, SandboxBackendProtocol), prefix
 
 
 def test_measure_counts_accurately():
